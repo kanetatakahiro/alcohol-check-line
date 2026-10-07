@@ -9,8 +9,9 @@ TOT連携・本人通知の前に、管理者1人へ未実施者一覧をLINEで
 3. 管理者のLINEで、その公式アカウントを友だち追加する（未追加だと届かない）。
 
 ## 2. Apps Script
-1. シートの「拡張機能 → Apps Script」を開く。
-2. 既存ファイルは変更せず、「＋ → スクリプト」で `AlcoholCheck` を追加し、
+1. Apps Scriptの既存プロジェクト「アルコールチェックLINE自動通知」を開く
+   （シートの編集権限があるアカウント mayu.ando@rebros.info で作業）。
+2. 既存ファイル（doGet/doPost）は変更せず、「＋ → スクリプト」で `AlcoholCheck` を追加し、
    `gas/AlcoholCheck.gs` の内容を貼り付けて保存する。
 3. 「プロジェクトの設定 → スクリプト プロパティ」に次を追加する。
    - `LINE_CHANNEL_ACCESS_TOKEN`：1-1のトークン

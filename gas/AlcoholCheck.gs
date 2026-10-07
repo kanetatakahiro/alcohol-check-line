@@ -17,9 +17,12 @@
  *  LINE_ADMIN_USER_ID         通知先の管理者のユーザーID（U から始まる）
  *  DRY_RUN                    "false" のときだけ実際に送信する（未設定なら送信しない）
  *
+ * 既存プロジェクト「アルコールチェックLINE自動通知」（Webhook確認用の doGet/doPost）に別ファイルとして追加する。
  * 既存のApps Scriptとの衝突を避けるため、関数名・定数名には AC_ / alcoholCheck を付けている。
  */
 
+// 独立型プロジェクトでも動くよう、シートはIDで開く（IDは秘密情報ではない）
+var AC_SPREADSHEET_ID = '1YeYjc_-O2B1JlVtUpVFWGlM3ahW8dED1JFuQ4ttym5Q';
 var AC_SHEET_SCHEDULE = '2026-2028';
 var AC_SHEET_FORM = 'フォームの回答 1';
 var AC_TZ = 'Asia/Tokyo';
@@ -74,7 +77,8 @@ function AC_run_(type) {
     // 照合できない場合は一覧を送らず、失敗だけを知らせる（氏名や生データは含めない）
     message = '【アルコールチェック】' + today + ' ' + AC_CHECK_LABELS[type]
       + 'の確認ができませんでした。シートを確認してください。（' + (e && e.code ? e.code : '不明なエラー') + '）';
-    Logger.log('照合失敗：%s', e && e.code ? e.code : 'unknown');
+    // 実行ログ（所有者のみ閲覧可）には原因調査のため例外メッセージも残す
+    Logger.log('照合失敗：%s %s', e && e.code ? e.code : 'unknown', e && e.message ? e.message : '');
   }
   if (!message) return;
   if (dryRun) { Logger.log('DRY_RUNのため送信しません'); return; }
@@ -87,7 +91,7 @@ function AC_today_() {
 }
 
 function AC_reconcileFromSheets_(today, type) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SpreadsheetApp.openById(AC_SPREADSHEET_ID);
   var schedule = ss.getSheetByName(AC_SHEET_SCHEDULE);
   var form = ss.getSheetByName(AC_SHEET_FORM);
   if (!schedule || !form) throw AC_error_('シートが見つかりません');

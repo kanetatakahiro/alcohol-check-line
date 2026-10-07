@@ -23,6 +23,9 @@ test('GETだけで順に取得し、リダイレクトを拒否・日付指定�
   assert.equal(calls.length, 3);
   assert.deepEqual(waits, [1000, 1000]);
   assert.ok(calls[0].url.endsWith(`/employees?date=${date}&includeResigner=false`));
+  // 公式資料の指定日取得パス（日別打刻・日別スケジュール）
+  assert.ok(calls[1].url.endsWith(`/daily-workings/timerecord/${date}`));
+  assert.ok(calls[2].url.endsWith(`/daily-workings/schedules/${date}`));
   for (const call of calls) {
     assert.equal(call.options.method, 'GET');
     assert.equal(call.options.redirect, 'error');

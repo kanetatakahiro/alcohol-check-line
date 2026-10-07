@@ -52,7 +52,7 @@ export function createTotClient({ token, fetchImpl = fetch, now = () => new Date
       return await response.json();
     } catch {
       // 外部の例外・応答本文には秘密情報や個人情報が含まれる可能性がある。
-      throw new Error('TOTから取得できませんでした。トークン・権限・通信状態を確認してください。');
+      throw new Error('TOTから取得できませんでした。トークン・権限・許可IPアドレス・通信状態を確認してください。');
     }
   }
   async function read(date) {
@@ -61,7 +61,9 @@ export function createTotClient({ token, fetchImpl = fetch, now = () => new Date
     validateRows(employees, 'key');
     validateRows(employees, 'code');
     const punches = await get(`/daily-workings/timerecord/${date}`);
-    const schedules = await get(`/daily-schedules/${date}`);
+    // 公式資料の「日別スケジュールデータ（指定日）」は /daily-workings/schedules/{date}。
+    // 応答の項目名（dailySchedules 等）は実応答で最終確認する。
+    const schedules = await get(`/daily-workings/schedules/${date}`);
     for (const [data, field] of [[punches, 'dailyWorkings'], [schedules, 'dailySchedules']]) {
       if (!data || data.date !== date) throw new Error('TOTの取得日が一致しません。');
       validateRows(data[field], 'employeeKey');

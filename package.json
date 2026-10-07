@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "demo": "node src/demo.js",
-    "test": "node --test"
+    "test": "node --test",
+    "tot:check": "node --env-file=.env src/tot-check.js"
   },
   "engines": { "node": ">=22" }
 }

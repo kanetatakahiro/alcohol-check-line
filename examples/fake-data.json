@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-07",
+  "checkType": "beforeWork",
+  "attendance": [
+    { "employeeCode": "TEST001", "date": "2026-10-07", "schedule": "work", "clockedIn": true },
+    { "employeeCode": "TEST002", "date": "2026-10-07", "schedule": "work", "clockedIn": true },
+    { "employeeCode": "TEST003", "date": "2026-10-07", "schedule": "publicHoliday", "clockedIn": false },
+    { "employeeCode": "TEST004", "date": "2026-10-07", "schedule": "paidLeave", "clockedIn": false },
+    { "employeeCode": "TEST005", "date": "2026-10-07", "schedule": "work", "clockedIn": false },
+    { "employeeCode": "TEST006", "date": "2026-10-07", "schedule": "unknown", "clockedIn": false }
+  ],
+  "checks": [
+    { "employeeCode": "TEST001", "date": "2026-10-07", "checkType": "beforeWork", "completed": true }
+  ]
+}

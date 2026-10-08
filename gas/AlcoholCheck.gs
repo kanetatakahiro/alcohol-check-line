@@ -43,6 +43,29 @@ function alcoholCheckPreview() {
   });
 }
 
+/** 手動確認用：当日のフォーム回答件数と、シフト表の氏名と一致しない回答の件数を出す（氏名は出さない） */
+function alcoholCheckDiagnose() {
+  var today = AC_today_();
+  var ss = SpreadsheetApp.openById(AC_SPREADSHEET_ID);
+  var sv = ss.getSheetByName(AC_SHEET_SCHEDULE).getDataRange().getValues();
+  var fv = ss.getSheetByName(AC_SHEET_FORM).getDataRange().getValues();
+  var roster = {};
+  for (var r = 2; r < sv.length; r++) {
+    if (String(sv[r][1]).trim()) roster[AC_normalizeName(sv[r][1])] = true;
+  }
+  var counts = {}, unmatched = 0, nonDate = 0;
+  for (var i = 1; i < fv.length; i++) {
+    var v = fv[i][0];
+    if (Object.prototype.toString.call(v) !== '[object Date]') { if (String(v).trim()) nonDate++; continue; }
+    if (Utilities.formatDate(v, AC_TZ, 'yyyy-MM-dd') !== today) continue;
+    var label = String(fv[i][2]).trim();
+    counts[label] = (counts[label] || 0) + 1;
+    if (!roster[AC_normalizeName(fv[i][1])]) unmatched++;
+  }
+  Logger.log('%s 当日の回答件数（区分別）%s／シフト表に無い氏名の回答 %s件／日時でないタイムスタンプ %s件',
+    today, JSON.stringify(counts), unmatched, nonDate);
+}
+
 /** 定期実行の登録（既存の同名トリガーは消してから登録する） */
 function alcoholCheckSetupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) {

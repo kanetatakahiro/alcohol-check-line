@@ -603,6 +603,42 @@ function AC_isValidDate(s) {
   return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
 }
 
+/**
+ * 手動実行用：従業員マスタに「在籍者一覧」タブを作る（マスタで在籍状況が「在籍」の人を数式で自動表示）。
+ * 一覧は表示専用。修正は「従業員マスタ」タブで行う。
+ */
+function alcoholCheckSetupActiveList() {
+  var ss = AC_masterSheet_().getParent();
+  var sheet = ss.getSheetByName('在籍者一覧') || ss.insertSheet('在籍者一覧');
+  sheet.clear();
+  sheet.getRange(1, 1, 1, 7).setValues([['社員番号', '氏名', '所属・拠点', '社員区分', 'LINE確認済み',
+    'アルコールチェック対象', '退職日（予定）']]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  var m = "'従業員マスタ'!";
+  sheet.getRange('A2').setFormula('=IFERROR(SORT(FILTER({' + [m + 'A2:A', m + 'B2:B', m + 'E2:E', m + 'L2:L',
+    m + 'I2:I', m + 'J2:J', m + 'N2:N'].join(',') + '},' + m + 'D2:D="在籍"),3,TRUE,1,TRUE),"")');
+  Logger.log('在籍者一覧：%s人', ss.getSheetByName('従業員マスタ').getRange('D2:D').getValues()
+    .filter(function (r) { return r[0] === '在籍'; }).length);
+}
+
+/** 社員番号を指定して「退職」にする（退職日が不明な場合は備考に記録） */
+function AC_markRetired_(codes, note) {
+  var sheet = AC_masterSheet_();
+  var values = sheet.getDataRange().getValues();
+  var want = {}, done = 0;
+  codes.forEach(function (c) { want[String(c)] = true; });
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    if (!want[AC_cellCode_(row[AC_COL.code])]) continue;
+    row[AC_COL.status] = '退職';
+    if (note) AC_addNote_(row, note);
+    sheet.getRange(i + 1, 1, 1, row.length).setValues([row]);
+    delete want[AC_cellCode_(row[AC_COL.code])];
+    done++;
+  }
+  Logger.log('退職に変更：%s人／見つからない社員番号：%s', done, Object.keys(want).join(',') || 'なし');
+}
+
 /** 名簿データを従業員マスタへ取り込む（一時的な取り込み用ファイルから呼ぶ） */
 function AC_importRoster_(roster) {
   var sheet = AC_masterSheet_();

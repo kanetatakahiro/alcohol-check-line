@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
-  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames } = ctx.module.exports;
+  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -120,4 +120,34 @@ test('GAS: 通知文（全員実施済みなら送らない、出勤ゼロは確
   assert.equal(AC_buildMessage(today, '出勤前', { targets: ['a'], missing: [] }), null);
   assert.match(AC_buildMessage(today, '出勤前', { targets: [], missing: [] }), /出勤」がありません/);
   assert.match(AC_buildMessage(today, '出勤前', { targets: ['a', 'b'], missing: ['b'] }), /未実施（1\/2人）\n・b/);
+});
+
+test('GAS: 名簿の取り込み（架空データ）：氏名が1人だけ一致する行に社員番号を入れ、残りは追加', () => {
+  const master = [MASTER_HEADER,
+    mrow('', '試験 太郎'),                 // 名簿と1人一致 → 番号を入れる
+    mrow('', '試験 花子'),                 // 名簿に同名2人 → 変更しない
+    mrow('', '架空 次郎'),                 // 名簿に無い
+    mrow("'90009", '試験 三郎', { userId: uid(9) }),  // 番号一致 → 空欄だけ埋める
+  ];
+  const roster = [
+    { code: 90001, totCode: 101, name: '試験太郎（旧姓）', dept: 'A店', category: '正社員' },
+    { code: 90002, totCode: '', name: '試験 花子', dept: 'B店', category: 'パート' },
+    { code: 90003, totCode: '', name: '試験　花子', dept: 'C店', category: 'パート' },
+    { code: 90009, totCode: 109, name: '試験 三郎', dept: 'A店', category: '契約社員' },
+    { code: 'abc', name: '不正' },
+  ];
+  const plan = AC_mergeRoster(master, roster);
+  assert.equal(plan.ambiguous, 1);
+  assert.equal(plan.notFound, 1);
+  const byIndex = Object.fromEntries(plan.updates.map(u => [u.index, [...u.values]]));
+  assert.equal(byIndex[0][0], "'90001");
+  assert.equal(byIndex[0][4], 'A店');
+  assert.match(byIndex[0][10], /要確認/);
+  assert.equal(byIndex[3][0], "'90009");            // 番号は変えない
+  assert.equal(byIndex[3][5], uid(9));              // LINE IDは保持
+  assert.equal(byIndex[3][12], "'109");
+  assert.equal(byIndex[1], undefined);              // 同名2人の行は変更しない
+  assert.deepEqual([...plan.appends.map(r => r[0])].sort(), ["'90002", "'90003"]);
+  assert.equal(plan.appends[0][9], false);          // 追加した人はアルコールチェック対象外
+  assert.equal(AC_nameKey('山田 太郎（旧姓）'), '山田太郎');
 });

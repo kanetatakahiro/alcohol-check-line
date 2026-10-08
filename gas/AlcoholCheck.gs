@@ -278,9 +278,10 @@ function AC_pushTo_(to, text) {
 // Apps ScriptのdoPostは署名検証ができないため、管理者が「LINE確認済み」にするまで通知に使わない。
 
 var AC_MASTER_HEADER = ['社員番号', '氏名', '別表記（シフト表の書き方が違う場合）', '在籍状況', '所属・拠点',
-  'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考'];
+  'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考',
+  '社員区分', 'TOT従業員コード'];
 var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineName: 6, lineAt: 7,
-  lineOk: 8, alcohol: 9, note: 10 };
+  lineOk: 8, alcohol: 9, note: 10, category: 11, totCode: 12 };
 
 function doPost(e) {
   try {
@@ -412,6 +413,9 @@ function AC_masterSheet_() {
     props.setProperty('EMPLOYEE_MASTER_ID', ss.getId());
   }
   var sheet = ss.getSheetByName('従業員マスタ') || ss.getSheets()[0];
+  if (sheet.getLastRow() > 0 && sheet.getLastColumn() < AC_MASTER_HEADER.length) {   // 列を後から追加した場合
+    sheet.getRange(1, 1, 1, AC_MASTER_HEADER.length).setValues([AC_MASTER_HEADER]).setFontWeight('bold');
+  }
   if (sheet.getLastRow() === 0) {
     sheet.setName('従業員マスタ');
     sheet.appendRow(AC_MASTER_HEADER);
@@ -475,6 +479,82 @@ function alcoholCheckSetupMaster() {
   Logger.log('従業員マスタ：%s', sheet.getParent().getUrl());
 }
 
+/** 名簿照合用の氏名キー：空白と、括弧書き（旧姓など）を除く */
+function AC_nameKey(name) {
+  return AC_normalizeName(name).replace(/[（(][^）)]*[）)]/g, '');
+}
+
+/**
+ * 純粋関数：従業員名簿をマスタに取り込む計画を作る（書き込みはしない）。
+ * roster: [{ code, totCode, name, dept, category }]
+ *  - マスタに同じ社員番号がある行 → 所属・社員区分・TOTコードの空欄だけ埋める
+ *  - 社員番号が空のマスタ行 → 名簿で氏名キーが1人だけ一致すれば社員番号等を入れ、備考に「要確認」を付ける
+ *  - どのマスタ行にも当たらない名簿の人 → 新しい行（アルコールチェック対象はオフ）
+ * 氏名が名簿で複数人に当たる・見つからないマスタ行は変更せず、件数を返す。
+ */
+function AC_mergeRoster(masterValues, roster) {
+  var C = AC_COL, width = AC_MASTER_HEADER.length;
+  var rows = (masterValues || []).slice(1).map(function (r) {
+    var x = r.slice(0, width); while (x.length < width) x.push(''); return x;
+  });
+  var byCode = {}, byKey = {};
+  roster.forEach(function (p) {
+    p.code = AC_cellCode_(p.code);
+    if (!/^\d{4,6}$/.test(p.code)) return;
+    byCode[p.code] = p;
+    var k = AC_nameKey(p.name);
+    if (k) (byKey[k] = byKey[k] || []).push(p);
+  });
+  var used = {}, updates = [], ambiguous = 0, notFound = 0;
+  rows.forEach(function (r, i) {
+    var code = AC_cellCode_(r[C.code]), p = null, note = '';
+    if (code) {
+      p = byCode[code];
+    } else {
+      var hits = byKey[AC_nameKey(r[C.name])] || [];
+      if (hits.length === 1) { p = hits[0]; note = '名簿と氏名で照合（要確認）'; }
+      else if (hits.length > 1) ambiguous++;
+      else notFound++;
+    }
+    if (!p || used[p.code]) return;
+    used[p.code] = true;
+    var nr = r.slice();
+    if (!code) nr[C.code] = "'" + p.code;
+    if (!nr[C.dept]) nr[C.dept] = p.dept || '';
+    if (!nr[C.category]) nr[C.category] = p.category || '';
+    if (!nr[C.totCode] && p.totCode !== '' && p.totCode != null) nr[C.totCode] = "'" + p.totCode;
+    if (note) nr[C.note] = nr[C.note] ? nr[C.note] + '／' + note : note;
+    if (nr.join('\u0001') !== r.join('\u0001')) updates.push({ index: i, values: nr });
+  });
+  Object.keys(byCode).forEach(function (code) {
+    if (rows.some(function (r) { return AC_cellCode_(r[C.code]) === code; })) used[code] = true;
+  });
+  var appends = Object.keys(byCode).filter(function (c) { return !used[c]; }).map(function (c) {
+    var p = byCode[c], nr = AC_MASTER_HEADER.map(function () { return ''; });
+    nr[C.code] = "'" + p.code; nr[C.name] = p.name; nr[C.dept] = p.dept || ''; nr[C.category] = p.category || '';
+    nr[C.totCode] = p.totCode !== '' && p.totCode != null ? "'" + p.totCode : '';
+    nr[C.lineOk] = false; nr[C.alcohol] = false;
+    return nr;
+  });
+  return { updates: updates, appends: appends, ambiguous: ambiguous, notFound: notFound };
+}
+
+/** 名簿データを従業員マスタへ取り込む（一時的な取り込み用ファイルから呼ぶ） */
+function AC_importRoster_(roster) {
+  var sheet = AC_masterSheet_();
+  var width = AC_MASTER_HEADER.length;
+  var values = sheet.getRange(1, 1, Math.max(sheet.getLastRow(), 1), width).getValues();
+  var plan = AC_mergeRoster(values, roster);
+  plan.updates.forEach(function (u) { sheet.getRange(u.index + 2, 1, 1, width).setValues([u.values]); });
+  if (plan.appends.length) {
+    var start = sheet.getLastRow() + 1;
+    sheet.getRange(start, 1, plan.appends.length, width).setValues(plan.appends);
+    AC_checkboxes_(sheet, start, plan.appends.length);
+  }
+  Logger.log('名簿取り込み：更新 %s行／追加 %s人／氏名が複数一致 %s行／名簿に無い %s行',
+    plan.updates.length, plan.appends.length, plan.ambiguous, plan.notFound);
+}
+
 /** 純粋関数：シフト表（2026-2028）のB列から、「シフト」行の氏名を重複なしで返す（数字だけの空き枠は除く）。 */
 function AC_rosterNames(sv) {
   var out = [], seen = {}, current = '';
@@ -511,6 +591,6 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames,
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey,
     AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

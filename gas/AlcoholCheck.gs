@@ -20,6 +20,7 @@
  *  NOTIFY_EMPLOYEES           "true" のときだけ本人へ通知する（未設定なら管理者一覧のみ）
  *  NOTIFY_ADMIN               "false" にすると管理者一覧を送らない
  *  EMPLOYEE_MASTER_ID         従業員マスタのID（alcoholCheckSetupMaster で自動設定）
+ *  TEST_CODES / TEST_UNTIL     テストモード：指定した社員番号の本人宛て通知を管理者へ送る（期限まで）
  *
  * 会社アカウント（シート編集者）が所有する独立プロジェクト「アルコールチェック通知（暫定版）」で動かす。
  * 既存のApps Scriptとの衝突を避けるため、関数名・定数名には AC_ / alcoholCheck を付けている。
@@ -114,6 +115,7 @@ function AC_run_(type) {
   Logger.log('%s %s：対象 %s人／未実施 %s人／本人通知 %s人／LINE未登録 %s人', today, label,
     r.targets.length, r.missing.length, plan.send.length, plan.unregistered.length);
   if (dryRun) { Logger.log('DRY_RUNのため送信しません'); return; }
+  AC_runTestMode_(props, today, type, label, r);
 
   var failed = [];
   plan.send.forEach(function (p) {
@@ -129,6 +131,51 @@ function AC_run_(type) {
     if (adminMsg) AC_pushLine_(adminMsg);
   }
   props.setProperty(runKey, new Date().toISOString());
+}
+
+/**
+ * テストモード：TEST_CODES（社員番号、カンマ区切り）の人について、本人に届くはずの通知を
+ * 管理者（LINE_ADMIN_USER_ID）へ送る。実施済み・対象外のときも状況を短く報告する。
+ * TEST_UNTIL（YYYY-MM-DD）を過ぎたら自動で止まる。本人には送らない。
+ */
+function AC_runTestMode_(props, today, type, label, r) {
+  var codes = String(props.getProperty('TEST_CODES') || '').split(',')
+    .map(function (c) { return c.trim(); }).filter(function (c) { return /^\d{4,6}$/.test(c); });
+  var until = props.getProperty('TEST_UNTIL');
+  if (!codes.length || (until && today > until)) return;
+  var master = AC_masterSheet_().getDataRange().getValues();
+  codes.forEach(function (code) {
+    var key = 'sent:' + today + ':' + type + ':test:' + code;
+    if (props.getProperty(key)) return;
+    try {
+      AC_pushLine_(AC_buildTestMessage(today, label, code, AC_namesForCode(master, code), r));
+      props.setProperty(key, new Date().toISOString());
+    } catch (e) {
+      Logger.log('テスト通知の送信失敗：%s', e && e.code ? e.code : 'unknown');
+    }
+  });
+}
+
+/** 純粋関数：従業員マスタから社員番号の氏名と別表記を返す */
+function AC_namesForCode(masterValues, code) {
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var row = masterValues[i];
+    if (AC_cellCode_(row[AC_COL.code]) === code) {
+      return [row[AC_COL.name], row[AC_COL.alias]].filter(function (n) { return String(n || '').trim(); });
+    }
+  }
+  return [];
+}
+
+/** 純粋関数：テストモードで管理者に送る文面 */
+function AC_buildTestMessage(today, label, code, names, r) {
+  var head = '【テスト／' + (names[0] || '社員番号' + code) + 'さん宛て】\n';
+  if (!names.length) return head + '従業員マスタに社員番号' + code + 'が見つかりません。';
+  var keys = names.map(AC_normalizeName);
+  var has = function (list) { return list.some(function (n) { return keys.indexOf(AC_normalizeName(n)) !== -1; }); };
+  if (has(r.missing)) return head + AC_buildPersonalMessage(today, label);
+  if (has(r.targets)) return head + '本日の' + label + 'のアルコールチェックは実施済みのため、本人への通知はありません。';
+  return head + '本日はシフトが「出勤」ではないため、' + label + 'の通知対象外です。';
 }
 
 /** 8日より前の送信記録を消す（スクリプトプロパティの容量対策） */
@@ -691,6 +738,6 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired,
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_buildTestMessage: AC_buildTestMessage, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

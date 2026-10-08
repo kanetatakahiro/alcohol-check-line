@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
-  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired } = ctx.module.exports;
+  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_buildTestMessage, AC_namesForCode } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -214,4 +214,14 @@ test('GAS: 退職予定の人は退職日まで在籍として扱う（架空デ
   const r = mrow('90001', '試験 太郎', { userId: uid(1) }); r[13] = '2026-10-24';
   assert.equal(Object.keys(AC_buildRegistry([MASTER_HEADER, r], '2026-10-24')).length, 1);
   assert.equal(Object.keys(AC_buildRegistry([MASTER_HEADER, r], '2026-10-25')).length, 0);
+});
+
+test('GAS: テストモードの文面（未実施・実施済み・対象外・マスタに無い）', () => {
+  const r = { targets: ['試験 太郎', '試験 花子'], missing: ['試験 太郎'] };
+  const names = [...AC_namesForCode([MASTER_HEADER, mrow("'90001", '試験 太郎')], '90001')];
+  assert.deepEqual(names, ['試験 太郎']);
+  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90001', names, r), /^【テスト／試験 太郎さん宛て】\n【アルコールチェック】本日（10\/8）の出勤前/);
+  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90002', ['試験 花子'], r), /実施済みのため/);
+  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90003', ['試験 次郎'], r), /対象外/);
+  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '99999', [], r), /見つかりません/);
 });

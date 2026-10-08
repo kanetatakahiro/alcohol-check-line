@@ -322,6 +322,7 @@ function AC_handleEvent_(ev) {
       r[AC_COL.lineOk] = false; r[AC_COL.alcohol] = false;
       r[AC_COL.note] = 'LINE登録で追加。氏名を入力してください';
       sheet.appendRow(r);
+      AC_checkboxes_(sheet, sheet.getLastRow(), 1);
     } else if (action.type === 'conflict') {
       // 既に別のLINE IDが登録されている社員番号：上書きせず、管理者確認用のシートに残す
       AC_reviewSheet_(sheet.getParent()).appendRow([now, "'" + code, src.userId, displayName, '既存のLINE IDと異なる']);
@@ -417,11 +418,24 @@ function AC_masterSheet_() {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, AC_MASTER_HEADER.length).setFontWeight('bold');
     sheet.getRange('A:A').setNumberFormat('@');                       // 社員番号の先頭ゼロを保つ
-    sheet.getRange(2, AC_COL.lineOk + 1, 999, 2).insertCheckboxes();
-    sheet.getRange(2, AC_COL.status + 1, 999, 1).setDataValidation(
+    sheet.getRange('D2:D').setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInList(['在籍', '休職', '退職'], true).build());
   }
   return sheet;
+}
+
+/** 行にチェックボックス（LINE確認済み・アルコールチェック対象）を付ける。空行に先回りして付けない（最終行がずれるため）。 */
+function AC_checkboxes_(sheet, startRow, numRows) {
+  if (numRows > 0) sheet.getRange(startRow, AC_COL.lineOk + 1, numRows, 2).insertCheckboxes();
+}
+
+/** 社員番号・氏名・LINE IDのどれかが入っている行が1つでもあるか（チェックボックスだけの行は数えない） */
+function AC_masterHasData_(sheet) {
+  var last = sheet.getLastRow();
+  if (last < 2) return false;
+  return sheet.getRange(2, 1, last - 1, AC_COL.userId + 1).getValues().some(function (r) {
+    return String(r[AC_COL.code]).trim() || String(r[AC_COL.name]).trim() || String(r[AC_COL.userId]).trim();
+  });
 }
 
 function AC_reviewSheet_(ss) {
@@ -440,7 +454,12 @@ function AC_reviewSheet_(ss) {
  */
 function alcoholCheckSetupMaster() {
   var sheet = AC_masterSheet_();
-  if (sheet.getLastRow() === 1) {
+  if (!AC_masterHasData_(sheet)) {
+    if (sheet.getLastRow() > 1) {                                      // 中身の無い行（チェックボックスだけ等）を片付ける
+      sheet.getRange(2, 1, sheet.getLastRow() - 1, AC_MASTER_HEADER.length).clearContent().clearDataValidations();
+      sheet.getRange('D2:D').setDataValidation(
+        SpreadsheetApp.newDataValidation().requireValueInList(['在籍', '休職', '退職'], true).build());
+    }
     var sv = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE).getDataRange().getValues();
     var names = AC_rosterNames(sv);
     if (names.length) {
@@ -449,6 +468,7 @@ function alcoholCheckSetupMaster() {
         r[AC_COL.name] = n; r[AC_COL.status] = '在籍'; r[AC_COL.lineOk] = false; r[AC_COL.alcohol] = true;
         return r;
       }));
+      AC_checkboxes_(sheet, 2, names.length);
     }
     Logger.log('シフト表から %s人の氏名を入れました', names.length);
   }

@@ -191,9 +191,11 @@ function AC_buildMessage(today, label, r) {
 }
 
 function AC_pushLine_(text) {
-  var props = PropertiesService.getScriptProperties();
-  var token = props.getProperty('LINE_CHANNEL_ACCESS_TOKEN');
-  var to = props.getProperty('LINE_ADMIN_USER_ID');
+  AC_pushTo_(PropertiesService.getScriptProperties().getProperty('LINE_ADMIN_USER_ID'), text);
+}
+
+function AC_pushTo_(to, text) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!token || !to) throw AC_error_('LINEの設定がありません');
   var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
     method: 'post',
@@ -208,7 +210,69 @@ function AC_pushLine_(text) {
   }
 }
 
+// ---------------- グループIDの収集（Webhook） ----------------
+// 公式アカウントがグループへ送るには groupId（Cから始まる）が必要で、Webhookでしか取得できない。
+// グループで発言があると、groupId とグループ名（「氏名｜社員番号」）をスクリプトプロパティに記録する。
+// 返信・自動応答はしない。Apps ScriptのdoPostはヘッダーを読めず署名検証ができないため、
+// 記録した対応はそのまま使わず、送信前に社員番号で1件だけ一致することを確認する。
+
+function doPost(e) {
+  try {
+    var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
+    var props = PropertiesService.getScriptProperties();
+    (body.events || []).forEach(function (ev) {
+      var gid = ev && ev.source && ev.source.type === 'group' ? ev.source.groupId : null;
+      if (!AC_isGroupId(gid)) return;
+      var key = 'group:' + gid;
+      if (props.getProperty(key)) return;                 // 既知のグループは再取得しない
+      props.setProperty(key, AC_fetchGroupName_(gid) || '');
+    });
+  } catch (err) {
+    Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
+  }
+  return ContentService.createTextOutput('OK');
+}
+
+function AC_isGroupId(v) { return typeof v === 'string' && /^C[0-9a-f]{32}$/.test(v); }
+
+function AC_fetchGroupName_(gid) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+  if (!token) return null;
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + gid + '/summary', {
+    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true,
+  });
+  return res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).groupName : null;
+}
+
+/** 純粋関数：{ 'group:Cxxx': 'グループ名' } から、グループ名の「｜社員番号」が一致するgroupIdを返す。0件・複数件はnull。 */
+function AC_findGroupByCode(entries, code) {
+  if (!/^\d+$/.test(String(code))) return null;
+  var re = new RegExp('[｜|]\\s*' + code + '(?!\\d)');
+  var hits = Object.keys(entries).filter(function (k) {
+    return k.indexOf('group:') === 0 && AC_isGroupId(k.slice(6)) && re.test(entries[k]);
+  });
+  return hits.length === 1 ? hits[0].slice(6) : null;
+}
+
+/** 手動確認用：記録済みのグループ数だけを表示する */
+function alcoholCheckListGroups() {
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var n = Object.keys(all).filter(function (k) { return k.indexOf('group:') === 0; }).length;
+  Logger.log('記録済みグループ：%s件', n);
+}
+
+/** 手動確認用：TEST_GROUP_EMPLOYEE_CODE のグループへテストメッセージを1通送る（メンバー人数分の通数を消費） */
+function alcoholCheckSendTestToGroup() {
+  var props = PropertiesService.getScriptProperties();
+  var code = props.getProperty('TEST_GROUP_EMPLOYEE_CODE');
+  var gid = AC_findGroupByCode(props.getProperties(), code);
+  if (!gid) throw AC_error_('社員番号に一致するグループが1件に定まりません（未記録または重複）');
+  AC_pushTo_(gid, '【テスト】アルコールチェック通知の接続確認です。（送信テスト）');
+  Logger.log('送信しました');
+}
+
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
-  module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName };
+  module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
+    AC_findGroupByCode: AC_findGroupByCode, AC_isGroupId: AC_isGroupId };
 }

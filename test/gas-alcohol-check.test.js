@@ -6,7 +6,18 @@ import vm from 'node:vm';
 // Apps Scriptのファイルを読み込み、純粋関数だけをテストする（架空データのみ）
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
-const { AC_reconcile, AC_buildMessage } = ctx.module.exports;
+const { AC_reconcile, AC_buildMessage, AC_findGroupByCode } = ctx.module.exports;
+
+test('GAS: グループ名の社員番号で1件だけ一致したgroupIdを返す（架空データ）', () => {
+  const g = n => 'group:C' + String(n).repeat(32).slice(0, 32);
+  const entries = { [g(1)]: '試験 太郎｜10033(5)', [g(2)]: '試験 花子｜100331(5)', [g(3)]: '試験 次郎|20001', 'DRY_RUN': 'true' };
+  assert.equal(AC_findGroupByCode(entries, '10033'), g(1).slice(6));
+  assert.equal(AC_findGroupByCode(entries, '20001'), g(3).slice(6));
+  assert.equal(AC_findGroupByCode(entries, '99999'), null);
+  assert.equal(AC_findGroupByCode({ ...entries, [g(4)]: '別人｜10033' }, '10033'), null);  // 重複は送らない
+  assert.equal(AC_findGroupByCode(entries, '.*'), null);
+  assert.equal(AC_findGroupByCode({ 'group:not-an-id': '試験｜10033' }, '10033'), null);
+});
 
 const d = s => new Date(`${s}T00:00:00+09:00`);
 const toDate = v => (v instanceof Date ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(v) : null);

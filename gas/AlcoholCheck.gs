@@ -279,9 +279,9 @@ function AC_pushTo_(to, text) {
 
 var AC_MASTER_HEADER = ['社員番号', '氏名', '別表記（シフト表の書き方が違う場合）', '在籍状況', '所属・拠点',
   'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考',
-  '社員区分', 'TOT従業員コード'];
+  '社員区分', 'TOT従業員コード', '退職日'];
 var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineName: 6, lineAt: 7,
-  lineOk: 8, alcohol: 9, note: 10, category: 11, totCode: 12 };
+  lineOk: 8, alcohol: 9, note: 10, category: 11, totCode: 12, retiredOn: 13 };
 
 function doPost(e) {
   try {
@@ -486,41 +486,54 @@ function AC_nameKey(name) {
 
 /**
  * 純粋関数：従業員名簿をマスタに取り込む計画を作る（書き込みはしない）。
- * roster: [{ code, totCode, name, dept, category }]
- *  - マスタに同じ社員番号がある行 → 所属・社員区分・TOTコードの空欄だけ埋める
- *  - 社員番号が空のマスタ行 → 名簿で氏名キーが1人だけ一致すれば社員番号等を入れ、備考に「要確認」を付ける
- *  - どのマスタ行にも当たらない名簿の人 → 新しい行（アルコールチェック対象はオフ）
+ * roster: [{ code, totCode, name, dept, category, retiredOn }]（retiredOn：退職日の文字列、在籍中は空）
+ * 社員番号の割り当て：
+ *  - 名簿で1人だけが持つ番号 → その人
+ *  - 複数人が持つ番号 → 在籍者が1人だけならその人（退職者の番号を付け直した場合）。在籍者が2人以上なら誰にも使わない
+ *  - 番号を割り当てられなかった退職者 → 番号を空けて「退職」で追加（同じ氏名の空番号の退職行が既にあれば追加しない）
+ * マスタ行の更新：
+ *  - 同じ社員番号の行 → 所属・社員区分・TOTコードの空欄を埋め、在籍状況・退職日を名簿に合わせる
+ *  - 社員番号が空の行 → 名簿で氏名キーが1人だけ一致すれば番号等を入れ、備考に「要確認」を付ける
  * 氏名が名簿で複数人に当たる・見つからないマスタ行は変更せず、件数を返す。
- * 名簿内で別の人に同じ社員番号が付いている場合、その番号は取り込まない（誤った紐付け防止）。
  */
 function AC_mergeRoster(masterValues, roster) {
   var C = AC_COL, width = AC_MASTER_HEADER.length;
   var rows = (masterValues || []).slice(1).map(function (r) {
     var x = r.slice(0, width); while (x.length < width) x.push(''); return x;
   });
-  var byCode = {}, byKey = {}, count = {};
+  var total = {}, active = {};
   roster.forEach(function (p) {
     p.code = AC_cellCode_(p.code);
-    if (/^\d{4,6}$/.test(p.code)) count[p.code] = (count[p.code] || 0) + 1;
+    p.retiredOn = String(p.retiredOn == null ? '' : p.retiredOn).trim();
+    if (!/^\d{4,6}$/.test(p.code)) return;
+    total[p.code] = (total[p.code] || 0) + 1;
+    if (!p.retiredOn) active[p.code] = (active[p.code] || 0) + 1;
   });
-  var dupCodes = Object.keys(count).filter(function (c) { return count[c] > 1; });
+  var byCode = {}, byKey = {}, homeless = [], dupActive = {};
   roster.forEach(function (p) {
-    if (!count[p.code] || count[p.code] > 1) return;                  // 不正・重複した社員番号は使わない
-    byCode[p.code] = p;
+    if (!total[p.code]) return;                                        // 不正な社員番号
+    var usable = p.retiredOn ? total[p.code] === 1 : active[p.code] === 1;
+    if (!p.retiredOn && active[p.code] > 1) dupActive[p.code] = true;
     var k = AC_nameKey(p.name);
-    if (k) (byKey[k] = byKey[k] || []).push(p);
+    if (usable) { byCode[p.code] = p; if (k) (byKey[k] = byKey[k] || []).push(p); }
+    else { if (k) (byKey[k] = byKey[k] || []).push(null); if (p.retiredOn) homeless.push(p); }
   });
-  roster.forEach(function (p) {                                        // 重複番号の人も氏名の一意性判定には数える
-    if (count[p.code] > 1) { var k = AC_nameKey(p.name); if (k) (byKey[k] = byKey[k] || []).push(null); }
-  });
+  var apply = function (nr, p) {
+    if (!nr[C.dept]) nr[C.dept] = p.dept || '';
+    if (!nr[C.category]) nr[C.category] = p.category || '';
+    if (!nr[C.totCode] && p.totCode !== '' && p.totCode != null) nr[C.totCode] = "'" + p.totCode;
+    if (p.retiredOn) { nr[C.status] = '退職'; nr[C.retiredOn] = p.retiredOn; }
+    else if (!String(nr[C.status]).trim()) nr[C.status] = '在籍';
+    if (p.retiredOn && !AC_isValidDate(p.retiredOn)) AC_addNote_(nr, '退職日の日付を確認してください');
+  };
   var used = {}, updates = [], ambiguous = 0, notFound = 0;
   rows.forEach(function (r, i) {
-    var code = AC_cellCode_(r[C.code]), p = null, note = '';
+    var code = AC_cellCode_(r[C.code]), p = null, nameMatch = false;
     if (code) {
       p = byCode[code];
-    } else {
+    } else if (!(String(r[C.status]).trim() === '退職' && String(r[C.retiredOn]).trim())) {
       var hits = byKey[AC_nameKey(r[C.name])] || [];
-      if (hits.length === 1 && hits[0]) { p = hits[0]; note = '名簿と氏名で照合（要確認）'; }
+      if (hits.length === 1 && hits[0]) { p = hits[0]; nameMatch = true; }
       else if (hits.length > 1) ambiguous++;
       else notFound++;
     }
@@ -528,23 +541,48 @@ function AC_mergeRoster(masterValues, roster) {
     used[p.code] = true;
     var nr = r.slice();
     if (!code) nr[C.code] = "'" + p.code;
-    if (!nr[C.dept]) nr[C.dept] = p.dept || '';
-    if (!nr[C.category]) nr[C.category] = p.category || '';
-    if (!nr[C.totCode] && p.totCode !== '' && p.totCode != null) nr[C.totCode] = "'" + p.totCode;
-    if (note) nr[C.note] = nr[C.note] ? nr[C.note] + '／' + note : note;
+    apply(nr, p);
+    if (nameMatch) AC_addNote_(nr, '名簿と氏名で照合（要確認）');
     if (nr.join('\u0001') !== r.join('\u0001')) updates.push({ index: i, values: nr });
   });
-  Object.keys(byCode).forEach(function (code) {
-    if (rows.some(function (r) { return AC_cellCode_(r[C.code]) === code; })) used[code] = true;
-  });
+  rows.forEach(function (r) { var c = AC_cellCode_(r[C.code]); if (c) used[c] = true; });
+  var blank = function (p) {
+    var nr = AC_MASTER_HEADER.map(function () { return ''; });
+    nr[C.name] = p.name; nr[C.lineOk] = false; nr[C.alcohol] = false;
+    return nr;
+  };
   var appends = Object.keys(byCode).filter(function (c) { return !used[c]; }).map(function (c) {
-    var p = byCode[c], nr = AC_MASTER_HEADER.map(function () { return ''; });
-    nr[C.code] = "'" + p.code; nr[C.name] = p.name; nr[C.dept] = p.dept || ''; nr[C.category] = p.category || '';
-    nr[C.totCode] = p.totCode !== '' && p.totCode != null ? "'" + p.totCode : '';
-    nr[C.lineOk] = false; nr[C.alcohol] = false;
+    var p = byCode[c], nr = blank(p);
+    nr[C.code] = "'" + p.code;
+    apply(nr, p);
     return nr;
   });
-  return { updates: updates, appends: appends, ambiguous: ambiguous, notFound: notFound, dupCodes: dupCodes.length };
+  var existingRetired = {};
+  rows.forEach(function (r) {
+    if (!AC_cellCode_(r[C.code]) && String(r[C.status]).trim() === '退職') existingRetired[AC_nameKey(r[C.name])] = true;
+  });
+  homeless.forEach(function (p) {
+    if (existingRetired[AC_nameKey(p.name)]) return;
+    var nr = blank(p);
+    apply(nr, p);
+    AC_addNote_(nr, '社員番号' + p.code + 'は他の人と重複のため空欄（退職者）');
+    appends.push(nr);
+  });
+  return { updates: updates, appends: appends, ambiguous: ambiguous, notFound: notFound,
+    dupCodes: Object.keys(dupActive).length };
+}
+
+function AC_addNote_(row, text) {
+  var cur = String(row[AC_COL.note] || '');
+  if (cur.indexOf(text) === -1) row[AC_COL.note] = cur ? cur + '／' + text : text;
+}
+
+/** 純粋関数：YYYY-MM-DD または YYYY/M/D が実在する日付か */
+function AC_isValidDate(s) {
+  var m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/.exec(String(s).trim());
+  if (!m) return false;
+  var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
 }
 
 /** 名簿データを従業員マスタへ取り込む（一時的な取り込み用ファイルから呼ぶ） */
@@ -559,7 +597,7 @@ function AC_importRoster_(roster) {
     sheet.getRange(start, 1, plan.appends.length, width).setValues(plan.appends);
     AC_checkboxes_(sheet, start, plan.appends.length);
   }
-  Logger.log('名簿取り込み：更新 %s行／追加 %s人／氏名が複数一致・番号重複 %s行／名簿に無い %s行／名簿内の重複番号 %s件（取り込まず）',
+  Logger.log('名簿取り込み：更新 %s行／追加 %s人／氏名が複数一致・番号重複 %s行／名簿に無い %s行／在籍者どうしの重複番号 %s件（取り込まず）',
     plan.updates.length, plan.appends.length, plan.ambiguous, plan.notFound, plan.dupCodes);
 }
 
@@ -599,6 +637,6 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey,
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate,
     AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

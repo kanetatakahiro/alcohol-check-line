@@ -7,7 +7,9 @@ import vm from 'node:vm';
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
-  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_buildTestMessage, AC_namesForCode } = ctx.module.exports;
+  AC_planNotifications, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_namesForCode,
+  AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
+  AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -65,10 +67,11 @@ test('GAS: 未実施者を本人通知と未登録に分け、管理者一覧に
   assert.match(AC_buildMessage('2026-10-08', '出勤前', { targets: ['a'], missing: ['試験 太郎'] }, plan, ['試験 太郎']), /本人通知に失敗/);
 });
 
-test('GAS: 本人向け文面に日付と区分を入れ、他人の情報を含めない', () => {
-  const m = AC_buildPersonalMessage('2026-10-08', '出勤前');
-  assert.match(m, /本日（10\/8）の出勤前/);
-  assert.doesNotMatch(m, /試験/);
+test('GAS: 本人向け文面（仕様書の文面、他人の情報を含めない）', () => {
+  assert.match(AC_messageFor('followBefore', '2026-10-08'), /本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした/);
+  assert.match(AC_messageFor('followAfter', '2026-10-08'), /本日の退勤前アルコールチェックについて/);
+  assert.match(AC_messageFor('evening', '2026-10-08'), /退勤前のアルコールチェックと、フォームへの入力をお願いいたします/);
+  for (const k of ['morning', 'followBefore', 'evening', 'followAfter']) assert.doesNotMatch(AC_messageFor(k, '2026-10-08', null), /試験|未実施です/);
 });
 
 const d = s => new Date(`${s}T00:00:00+09:00`);
@@ -216,12 +219,88 @@ test('GAS: 退職予定の人は退職日まで在籍として扱う（架空デ
   assert.equal(Object.keys(AC_buildRegistry([MASTER_HEADER, r], '2026-10-25')).length, 0);
 });
 
-test('GAS: テストモードの文面（未実施・実施済み・対象外・マスタに無い）', () => {
-  const r = { targets: ['試験 太郎', '試験 花子'], missing: ['試験 太郎'] };
-  const names = [...AC_namesForCode([MASTER_HEADER, mrow("'90001", '試験 太郎')], '90001')];
-  assert.deepEqual(names, ['試験 太郎']);
-  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90001', names, r), /^【テスト／試験 太郎さん宛て】\n【アルコールチェック】本日（10\/8）の出勤前/);
-  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90002', ['試験 花子'], r), /実施済みのため/);
-  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '90003', ['試験 次郎'], r), /対象外/);
-  assert.match(AC_buildTestMessage('2026-10-08', '出勤前', '99999', [], r), /見つかりません/);
+test('GAS: 従業員マスタから社員番号の氏名を引く', () => {
+  assert.deepEqual([...AC_namesForCode([MASTER_HEADER, mrow("'90001", '試験 太郎', { alias: '試験太郎A' })], '90001')], ['試験 太郎', '試験太郎A']);
+  assert.deepEqual([...AC_namesForCode([MASTER_HEADER], '90001')], []);
+});
+
+// ---- 1日の通知（架空データ） ----
+const dd = s => new Date(`${s}T00:00:00+09:00`);
+const ts2 = (s, hm) => new Date(`${s}T${hm}:00+09:00`);
+const toDate2 = v => (v instanceof Date ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(v) : null);
+const days = ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05', '2026-10-06'];
+const shiftSheet = (rows) => {
+  const sv = [[], ['', '氏名', '区分', ...days.map(dd)]];
+  rows.forEach(([name, shifts]) => { sv.push(['', name, 'シフト', ...shifts]); sv.push(['', '', '出勤前']); sv.push(['', '', '退勤後']); });
+  return sv;
+};
+const both = (name, day) => [[ts2(day, '08:00'), name, '出勤前', '0.14mg/L以下'], [ts2(day, '19:00'), name, '退勤前', '0.14mg/L以下']];
+
+test('GAS: 宛先は種類ごとに出勤者全員／未入力者だけ', () => {
+  const sv = shiftSheet([['試験 太郎', Array(6).fill('出勤')], ['試験 花子', Array(6).fill('出勤')], ['試験 次郎', Array(6).fill('公休')]]);
+  const fv = [['ts', '氏名', '区分', '結果'], [ts2('2026-10-06', '08:00'), '試験 太郎', '出勤前', '0.14mg/L以下']];
+  const d = AC_buildDay({ today: '2026-10-06', sv, fv, toDate: toDate2 });
+  assert.deepEqual([...AC_recipientsFor('morning', d)], ['試験 太郎', '試験 花子']);
+  assert.deepEqual([...AC_recipientsFor('evening', d)], ['試験 太郎', '試験 花子']);
+  assert.deepEqual([...AC_recipientsFor('followBefore', d)], ['試験 花子']);
+  assert.deepEqual([...AC_recipientsFor('followAfter', d)], ['試験 太郎', '試験 花子']);
+  assert.match(AC_notTargetReason('morning', d, '試験 次郎'), /出勤」ではない/);
+  assert.match(AC_notTargetReason('followBefore', d, '試験 太郎'), /入力が確認できた/);
+});
+
+test('GAS: 連続記録は出勤日だけを数え、1日でも欠けたらリセット', () => {
+  // 太郎：10/6・10/5・10/4はそろい、10/3は公休で飛ばし、10/2は退勤前が欠けて止まる → 3日
+  const sv = shiftSheet([['試験 太郎', ['出勤', '出勤', '公休', '出勤', '出勤', '出勤']],
+    ['試験 花子', ['出勤', '出勤', '出勤', '出勤', '出勤', '出勤']]]);
+  const fv = [['ts', '氏名', '区分', '結果'],
+    ...both('試験 太郎', '2026-10-01'), [ts2('2026-10-02', '08:00'), '試験 太郎', '出勤前', '0.14mg/L以下'],
+    ...both('試験 太郎', '2026-10-04'), ...both('試験 太郎', '2026-10-05'), ...both('試験 太郎', '2026-10-06'),
+    ...days.flatMap(x => both('試験　花子', x))];
+  const d = AC_buildDay({ today: '2026-10-06', sv, fv, toDate: toDate2 });
+  assert.equal(AC_streak(d, '試験 太郎'), 3);
+  assert.equal(AC_streak(d, '試験 花子'), 6);
+  const d5 = AC_buildDay({ today: '2026-10-05', sv, fv, toDate: toDate2 });
+  assert.deepEqual(JSON.parse(JSON.stringify(AC_thanksTargets(d5).map(t => [t.name, t.streak]))), [['試験 花子', 5]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(AC_thanksTargets(d).map(t => t.name))), []);           // 6日目は節目でない
+});
+
+test('GAS: 感謝の節目と文面（評価ではなく感謝）', () => {
+  assert.deepEqual([5, 10, 20, 30, 40, 50, 60, 70].map(AC_isMilestone), Array(8).fill(true));
+  assert.deepEqual([1, 4, 6, 15, 25, 55].map(AC_isMilestone), Array(6).fill(false));
+  for (const n of [5, 10, 20, 30, 50, 60]) {
+    const m = AC_thanksMessage(n);
+    assert.match(m, /ありがとう/);
+    assert.doesNotMatch(m, /優秀|合格|よくできました|頑張っていきましょう/);
+  }
+  assert.match(AC_thanksMessage(30), /30勤務日連続/);
+});
+
+test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れる', () => {
+  const jma = (code, weather, pops, temps) => [{ timeSeries: [
+    { timeDefines: ['2026-10-08T05:00:00+09:00', '2026-10-09T00:00:00+09:00'], areas: [{ area: { code: '110010' }, weatherCodes: [code, '100'], weathers: [weather, '晴れ'] }] },
+    { timeDefines: ['2026-10-08T06:00:00+09:00', '2026-10-08T12:00:00+09:00'], areas: [{ area: { code: '110010' }, pops }] },
+    { timeDefines: ['2026-10-08T00:00:00+09:00', '2026-10-08T09:00:00+09:00'], areas: [{ area: { code: '43241' }, temps }] },
+  ] }];
+  assert.equal(AC_weatherFromJma(jma('100', '晴れ', ['0', '10'], ['15', '26']), '2026-10-08').kind, 'sunny');
+  assert.equal(AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08').kind, 'rain');
+  assert.equal(AC_weatherFromJma(jma('101', '晴れ時々くもり', ['0', '60'], ['15', '26']), '2026-10-08').kind, 'rain');
+  assert.equal(AC_weatherFromJma(jma('100', '晴れ', ['0', '0'], ['24', '33']), '2026-10-08').kind, 'hot');
+  assert.equal(AC_weatherFromJma(jma('200', 'くもり', ['0', '0'], ['2', '9']), '2026-10-08').kind, 'cold');
+  assert.equal(AC_weatherFromJma(null, '2026-10-08'), null);
+  const w = AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08');
+  assert.match(AC_morningMessage('2026-10-08', w), /^☔ おはようございます！[\s\S]*路面が滑りやすく[\s\S]*最高20℃／最低15℃[\s\S]*アルコールチェック/);
+  const plain = AC_morningMessage('2026-10-08', null);
+  assert.match(plain, /^おはようございます！✨/);
+  assert.doesNotMatch(plain, /晴れ|雨|℃/);                              // 天気が取れないときは天気に触れない
+  assert.notEqual(AC_morningMessage('2026-10-08', null), AC_morningMessage('2026-10-09', null)); // 日によって言い回しが変わる
+});
+
+test('GAS: 測定結果が「通常」の値以外の当日回答を拾う', () => {
+  const sv = shiftSheet([['試験 太郎', Array(6).fill('出勤')]]);
+  const fv = [['ts', '氏名', '区分', '結果'], [ts2('2026-10-06', '08:00'), '試験 太郎', '出勤前', '0.14mg/L以下'],
+    [ts2('2026-10-06', '09:00'), '試験 太郎', '出勤前', '0.15mg/L以上'], [ts2('2026-10-05', '09:00'), '試験 太郎', '出勤前', '0.15mg/L以上']];
+  const d = AC_buildDay({ today: '2026-10-06', sv, fv, toDate: toDate2 });
+  const hits = AC_findAlerts(d, ['0.14mg/L以下']);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].row, 3);
 });

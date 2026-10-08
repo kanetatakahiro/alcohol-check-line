@@ -1,17 +1,20 @@
 /**
  * アルコールチェック未実施者へのLINE通知（Google Apps Script）
  *
- * 動作：
- *  - シート「2026-2028」のシフト行で、当日（日本時間）が「出勤」の人を対象者とする
- *  - シート「フォームの回答 1」の当日・該当チェック区分の回答と氏名で照合する
- *  - 未実施者のうちLINE登録済み（管理者が確認済み）の人へ本人通知し、管理者へ一覧を送る
- *  - 従業員は公式LINEに社員番号を送って登録する（doPost）。従業員マスタは管理シートとは別のスプレッドシート
+ * 動作（毎日。Apps Scriptの時刻指定は前後15分程度ずれる）：
+ *  -  8:30 出勤者全員へ：あいさつ＋天気（気象庁・埼玉県南部）＋運転前のチェック案内
+ *  - 10:00 出勤前の入力が確認できない人へ：入力のお願い（未実施と決めつけない）
+ *  - 18:30 出勤者全員へ：退勤前のチェック案内
+ *  - 20:00 退勤前の入力が確認できない人へ：入力のお願い／連続記録の節目（5・10・20…日）の人へ感謝
+ *  - 出勤者：シート「2026-2028」のシフト行が当日「出勤」の人。入力確認：「フォームの回答 1」の当日・区分の回答
+ *  - 宛先：従業員マスタでLINE登録・確認済みの本人（1対1）。従業員は公式LINEに社員番号を送って登録する（doPost）
+ *  - 測定結果が「通常」（NORMAL_RESULTS）以外の回答は、管理者へ至急の確認依頼を送る
  *
  * 安全策：
  *  - 管理シートへの書き込みは一切しない（読み取りのみ）
  *  - DRY_RUN が "false" 以外なら送信せず、件数だけをログに出す
  *  - 当日の日付列が見つからない等、データ不備があれば照合をやめ、管理者へ失敗だけを知らせる
- *  - 同じ日・同じ人・同じチェック区分の送信は1回まで
+ *  - 同じ日・同じ人・同じ種類の送信は1回まで
  *
  * スクリプトプロパティ（プロジェクトの設定 → スクリプト プロパティ）：
  *  LINE_CHANNEL_ACCESS_TOKEN  Messaging APIのチャネルアクセストークン（長期）
@@ -21,6 +24,7 @@
  *  NOTIFY_ADMIN               "false" にすると管理者一覧を送らない
  *  EMPLOYEE_MASTER_ID         従業員マスタのID（alcoholCheckSetupMaster で自動設定）
  *  TEST_CODES / TEST_UNTIL     テストモード：指定した社員番号の本人宛て通知を管理者へ送る（期限まで）
+ *  NORMAL_RESULTS             「通常」とみなす測定結果（カンマ区切り）。未設定なら検知通知は動かない
  *
  * 会社アカウント（シート編集者）が所有する独立プロジェクト「アルコールチェック通知（暫定版）」で動かす。
  * 既存のApps Scriptとの衝突を避けるため、関数名・定数名には AC_ / alcoholCheck を付けている。
@@ -32,11 +36,6 @@ var AC_SHEET_SCHEDULE = '2026-2028';
 var AC_SHEET_FORM = 'フォームの回答 1';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
-
-/** 定期実行：出勤前チェック */
-function alcoholCheckBeforeWork() { AC_run_('beforeWork'); }
-/** 定期実行：退勤前チェック */
-function alcoholCheckAfterWork() { AC_run_('afterWork'); }
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -71,15 +70,34 @@ function alcoholCheckDiagnose() {
     today, JSON.stringify(counts), unmatched, nonDate);
 }
 
-/** 定期実行の登録（既存の同名トリガーは消してから登録する） */
+// ---------------- 1日の通知（仕様：朝の案内・未入力フォロー・退勤前案内・感謝） ----------------
+// 種類と時刻（Apps Scriptの時刻指定は前後15分程度ずれる）
+//  morning      8:30  出勤者全員へ：あいさつ＋天気＋運転前のチェック案内
+//  followBefore 10:00 出勤前の入力が確認できない人へ：入力のお願い（未実施と決めつけない）
+//  evening      18:30 出勤者全員へ：退勤前のチェック案内
+//  followAfter  20:00 退勤前の入力が確認できない人へ：入力のお願い。あわせて連続記録の感謝を送る
+var AC_SCHEDULE = [
+  { fn: 'alcoholCheckMorning', hour: 8, minute: 30 },
+  { fn: 'alcoholCheckBeforeWork', hour: 10, minute: 0 },
+  { fn: 'alcoholCheckEvening', hour: 18, minute: 30 },
+  { fn: 'alcoholCheckAfterWork', hour: 20, minute: 0 },
+];
+
+function alcoholCheckMorning() { AC_dispatch_('morning'); }
+function alcoholCheckBeforeWork() { AC_dispatch_('followBefore'); }
+function alcoholCheckEvening() { AC_dispatch_('evening'); }
+function alcoholCheckAfterWork() { AC_dispatch_('followAfter'); }
+
+/** 定期実行の登録（このプロジェクトの通知用トリガーを消してから登録し直す） */
 function alcoholCheckSetupTriggers() {
+  var names = AC_SCHEDULE.map(function (s) { return s.fn; });
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    var f = t.getHandlerFunction();
-    if (f === 'alcoholCheckBeforeWork' || f === 'alcoholCheckAfterWork') ScriptApp.deleteTrigger(t);
+    if (names.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
-  // Apps Scriptの時刻指定は「その1時間のどこか」で実行される。
-  ScriptApp.newTrigger('alcoholCheckBeforeWork').timeBased().everyDays(1).atHour(9).inTimezone(AC_TZ).create();
-  ScriptApp.newTrigger('alcoholCheckAfterWork').timeBased().everyDays(1).atHour(19).inTimezone(AC_TZ).create();
+  AC_SCHEDULE.forEach(function (s) {
+    ScriptApp.newTrigger(s.fn).timeBased().everyDays(1).atHour(s.hour).nearMinute(s.minute)
+      .inTimezone(AC_TZ).create();
+  });
 }
 
 /** LINE送信の確認用：管理者へテストメッセージを1通送る（DRY_RUNに関係なく送る） */
@@ -87,73 +105,206 @@ function alcoholCheckSendTestMessage() {
   AC_pushLine_('【テスト】アルコールチェック通知の接続確認です。');
 }
 
+/** 手動確認用：今日の各通知の対象人数と、全員がLINE登録済みだった場合の見込み通数をログに出す（送信しない） */
+function alcoholCheckEstimate() {
+  var today = AC_today_();
+  var d = AC_loadDay_(today);
+  var counts = {};
+  ['morning', 'followBefore', 'evening', 'followAfter'].forEach(function (k) {
+    counts[k] = AC_recipientsFor(k, d).length;
+  });
+  counts.thanks = AC_thanksTargets(d).length;
+  Logger.log('%s 見込み通数 %s（合計 %s通）', today, JSON.stringify(counts),
+    Object.keys(counts).reduce(function (a, k) { return a + counts[k]; }, 0));
+}
+
 // ---------------- 内部処理 ----------------
 
-function AC_run_(type) {
+/** 1回分の通知を実行する。同じ日・同じ種類は1回だけ。データ不備のときは誰にも送らず管理者へ知らせる。 */
+function AC_dispatch_(kind) {
   var props = PropertiesService.getScriptProperties();
   var dryRun = props.getProperty('DRY_RUN') !== 'false';
-  var notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';   // 本人通知は明示的に有効化したときだけ
+  var notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';
   var notifyAdmin = props.getProperty('NOTIFY_ADMIN') !== 'false';
   var today = AC_today_();
-  var label = AC_CHECK_LABELS[type];
-  var runKey = 'sent:' + today + ':' + type;
+  var runKey = 'sent:' + today + ':' + kind;
   if (props.getProperty(runKey)) { Logger.log('実行済みのため中止'); return; }
   AC_cleanupSentKeys_(props, today);
 
-  var r, plan;
+  var d;
   try {
-    r = AC_reconcileFromSheets_(today, type);
-    plan = AC_planNotifications(r.missing, notifyPeople ? AC_loadRegistry_() : {});
+    d = AC_loadDay_(today);
   } catch (e) {
-    // 照合できない場合は誰にも個別通知せず、管理者へ失敗だけを知らせる（氏名や生データは含めない）
     Logger.log('照合失敗：%s %s', e && e.code ? e.code : 'unknown', e && e.message ? e.message : '');
-    var fail = '【アルコールチェック】' + today + ' ' + label
-      + 'の確認ができませんでした。シートを確認してください。（' + (e && e.code ? e.code : '不明なエラー') + '）';
-    if (!dryRun) { AC_pushLine_(fail); props.setProperty(runKey, new Date().toISOString()); }
+    if (!dryRun) {
+      AC_pushLine_('【アルコールチェック】' + today + ' の確認ができませんでした。シートを確認してください。（'
+        + (e && e.code ? e.code : '不明なエラー') + '）');
+      props.setProperty(runKey, new Date().toISOString());
+    }
     return;
   }
-  Logger.log('%s %s：対象 %s人／未実施 %s人／本人通知 %s人／LINE未登録 %s人', today, label,
-    r.targets.length, r.missing.length, plan.send.length, plan.unregistered.length);
+  var weather = kind === 'morning' ? AC_fetchWeather_(today) : null;
+  var people = AC_recipientsFor(kind, d);
+  var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
+  props.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
+  Logger.log('%s %s：対象 %s人／感謝 %s人（全員登録済みなら %s通）', today, kind, people.length, thanks.length,
+    people.length + thanks.length);
+  AC_checkAlerts_(props, d, dryRun);
   if (dryRun) { Logger.log('DRY_RUNのため送信しません'); return; }
-  AC_runTestMode_(props, today, type, label, r);
 
-  var failed = [];
-  plan.send.forEach(function (p) {
-    var personKey = 'sent:' + today + ':' + type + ':' + p.code;      // 同じ日・同じ人・同じ区分は1回
-    if (props.getProperty(personKey)) return;
+  var registry = notifyPeople ? AC_loadRegistry_() : {};
+  var tests = AC_testNames_(props, today);
+  var sent = 0, unregistered = [], failed = [];
+  var deliver = function (name, text, tag) {
+    var key = AC_normalizeName(name);
+    var test = tests[key], reg = registry[key];
+    var dedupe = 'sent:' + today + ':' + tag + ':' + (test ? 'test:' + test.code : reg ? reg.code : key);
+    if (props.getProperty(dedupe)) return;
     try {
-      AC_pushTo_(p.userId, AC_buildPersonalMessage(today, label));
-      props.setProperty(personKey, new Date().toISOString());
-    } catch (e) { failed.push(p.name); }
+      if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
+      else if (reg) AC_pushTo_(reg.userId, text);
+      else { unregistered.push(name); return; }
+      props.setProperty(dedupe, new Date().toISOString());
+      sent++;
+    } catch (e) { failed.push(name); }
+  };
+  people.forEach(function (name) { deliver(name, AC_messageFor(kind, today, weather), kind); });
+  thanks.forEach(function (t) { deliver(t.name, AC_thanksMessage(t.streak), 'thanks'); });
+  // テスト対象が今日の対象外（休み・実施済み）でも、動作確認のため状況を管理者へ知らせる
+  Object.keys(tests).forEach(function (k) {
+    var t = tests[k];
+    if (people.some(function (n) { return AC_normalizeName(n) === k; })) return;
+    var key = 'sent:' + today + ':' + kind + ':testinfo:' + t.code;
+    if (props.getProperty(key)) return;
+    AC_pushLine_('【テスト／' + t.name + 'さん】' + AC_kindLabel(kind) + '：' + AC_notTargetReason(kind, d, t.name));
+    props.setProperty(key, new Date().toISOString());
   });
-  if (notifyAdmin) {
-    var adminMsg = AC_buildMessage(today, label, r, plan, failed);
+  if (notifyAdmin && (kind === 'followBefore' || kind === 'followAfter')) {
+    var r = kind === 'followBefore' ? d.before : d.after;
+    var plan = AC_planNotifications(r.missing, registry);
+    var adminMsg = AC_buildMessage(today, kind === 'followBefore' ? '出勤前' : '退勤前', r, plan, failed);
     if (adminMsg) AC_pushLine_(adminMsg);
   }
+  Logger.log('送信 %s通／LINE未登録 %s人／失敗 %s人', sent, unregistered.length, failed.length);
   props.setProperty(runKey, new Date().toISOString());
 }
 
+/** 今日のシフト・回答を読み、出勤前・退勤前の照合結果と連続記録の計算に必要なデータをまとめる */
+function AC_loadDay_(today) {
+  var ss = SpreadsheetApp.openById(AC_SPREADSHEET_ID);
+  var schedule = ss.getSheetByName(AC_SHEET_SCHEDULE);
+  var form = ss.getSheetByName(AC_SHEET_FORM);
+  if (!schedule || !form) throw AC_error_('シートが見つかりません');
+  var sv = schedule.getDataRange().getValues();
+  var fv = form.getDataRange().getValues();
+  var toDate = AC_toDateFn_();
+  return AC_buildDay({ today: today, sv: sv, fv: fv, toDate: toDate });
+}
+
+function AC_toDateFn_() {
+  return function (v) {
+    return Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)
+      ? Utilities.formatDate(v, AC_TZ, 'yyyy-MM-dd') : null;
+  };
+}
+
+/** 純粋関数：1日分の照合データ */
+function AC_buildDay(input) {
+  var base = { today: input.today, scheduleValues: input.sv, formValues: input.fv, toDate: input.toDate };
+  var before = AC_reconcile(AC_assign_(base, { checkLabel: '出勤前' }));
+  var after = AC_reconcile(AC_assign_(base, { checkLabel: '退勤前' }));
+  return { today: input.today, sv: input.sv, fv: input.fv, toDate: input.toDate, before: before, after: after };
+}
+
+function AC_assign_(a, b) { var o = {}; [a, b].forEach(function (x) { for (var k in x) o[k] = x[k]; }); return o; }
+
+/** 純粋関数：通知の種類ごとの宛先（氏名） */
+function AC_recipientsFor(kind, d) {
+  if (kind === 'morning' || kind === 'evening') return d.before.targets.slice();
+  if (kind === 'followBefore') return d.before.missing.slice();
+  if (kind === 'followAfter') return d.after.missing.slice();
+  return [];
+}
+
+function AC_kindLabel(kind) {
+  return { morning: '朝の案内', followBefore: '出勤前の入力確認', evening: '退勤前の案内',
+    followAfter: '退勤前の入力確認' }[kind] || kind;
+}
+
+/** 純粋関数：テスト対象に今日送らなかった理由 */
+function AC_notTargetReason(kind, d, name) {
+  var k = AC_normalizeName(name);
+  var working = d.before.targets.some(function (n) { return AC_normalizeName(n) === k; });
+  if (!working) return '本日はシフトが「出勤」ではないため、送信なし';
+  return '入力が確認できたため、送信なし';
+}
+
 /**
- * テストモード：TEST_CODES（社員番号、カンマ区切り）の人について、本人に届くはずの通知を
- * 管理者（LINE_ADMIN_USER_ID）へ送る。実施済み・対象外のときも状況を短く報告する。
- * TEST_UNTIL（YYYY-MM-DD）を過ぎたら自動で止まる。本人には送らない。
+ * 純粋関数：連続記録（パーフェクト）。今日から過去へ、シフトが「出勤」の日をさかのぼり、
+ * 出勤前・退勤前の両方の回答がある日を数える。1日でも欠けたらそこで止める（必ずリセット）。
+ * 出勤でない日は数えず、飛ばす。今日の両方がそろっていなければ0。
  */
-function AC_runTestMode_(props, today, type, label, r) {
+function AC_streak(d, name) {
+  var sv = d.sv, toDate = d.toDate, key = AC_normalizeName(name);
+  var row = -1, current = '';
+  for (var r = 2; r < sv.length; r++) {
+    if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
+    if (String(sv[r][2]).trim() === 'シフト' && AC_normalizeName(current) === key) { row = r; break; }
+  }
+  if (row === -1) return 0;
+  var done = {};
+  for (var i = 1; i < d.fv.length; i++) {
+    var day = toDate(d.fv[i][0]);
+    if (!day || AC_normalizeName(d.fv[i][1]) !== key) continue;
+    var label = String(d.fv[i][2]).trim();
+    done[day] = done[day] || {};
+    done[day][label] = true;
+  }
+  var cols = [];
+  for (var c = 3; c < sv[1].length; c++) {
+    var day2 = toDate(sv[1][c]);
+    if (day2 && day2 <= d.today) cols.push({ c: c, day: day2 });
+  }
+  cols.sort(function (a, b) { return a.day < b.day ? 1 : -1; });
+  var n = 0;
+  for (var j = 0; j < cols.length; j++) {
+    if (String(sv[row][cols[j].c]).trim() !== '出勤') continue;
+    var x = done[cols[j].day] || {};
+    if (x['出勤前'] && x['退勤前']) n++; else break;
+  }
+  return n;
+}
+
+/** 純粋関数：感謝を伝える節目（5・10・20・30・40・50日、以降10日ごと） */
+function AC_isMilestone(n) {
+  return n === 5 || (n >= 10 && n % 10 === 0);
+}
+
+/** 純粋関数：今日の感謝メッセージの対象（今日の出勤前・退勤前がそろい、連続日数が節目の人） */
+function AC_thanksTargets(d) {
+  var doneAfter = {};
+  d.after.targets.forEach(function (n) { doneAfter[AC_normalizeName(n)] = true; });
+  d.after.missing.forEach(function (n) { delete doneAfter[AC_normalizeName(n)]; });
+  return d.before.targets.filter(function (n) {
+    var k = AC_normalizeName(n);
+    return doneAfter[k] && d.before.missing.every(function (m) { return AC_normalizeName(m) !== k; });
+  }).map(function (n) { return { name: n, streak: AC_streak(d, n) }; })
+    .filter(function (t) { return AC_isMilestone(t.streak); });
+}
+
+/** テストモード：TEST_CODES の人の「氏名 → {code, name}」（期限 TEST_UNTIL まで） */
+function AC_testNames_(props, today) {
   var codes = String(props.getProperty('TEST_CODES') || '').split(',')
     .map(function (c) { return c.trim(); }).filter(function (c) { return /^\d{4,6}$/.test(c); });
   var until = props.getProperty('TEST_UNTIL');
-  if (!codes.length || (until && today > until)) return;
+  var out = {};
+  if (!codes.length || (until && today > until)) return out;
   var master = AC_masterSheet_().getDataRange().getValues();
   codes.forEach(function (code) {
-    var key = 'sent:' + today + ':' + type + ':test:' + code;
-    if (props.getProperty(key)) return;
-    try {
-      AC_pushLine_(AC_buildTestMessage(today, label, code, AC_namesForCode(master, code), r));
-      props.setProperty(key, new Date().toISOString());
-    } catch (e) {
-      Logger.log('テスト通知の送信失敗：%s', e && e.code ? e.code : 'unknown');
-    }
+    var names = AC_namesForCode(master, code);
+    names.forEach(function (n) { out[AC_normalizeName(n)] = { code: code, name: names[0] }; });
   });
+  return out;
 }
 
 /** 純粋関数：従業員マスタから社員番号の氏名と別表記を返す */
@@ -167,24 +318,181 @@ function AC_namesForCode(masterValues, code) {
   return [];
 }
 
-/** 純粋関数：テストモードで管理者に送る文面 */
-function AC_buildTestMessage(today, label, code, names, r) {
-  var head = '【テスト／' + (names[0] || '社員番号' + code) + 'さん宛て】\n';
-  if (!names.length) return head + '従業員マスタに社員番号' + code + 'が見つかりません。';
-  var keys = names.map(AC_normalizeName);
-  var has = function (list) { return list.some(function (n) { return keys.indexOf(AC_normalizeName(n)) !== -1; }); };
-  if (has(r.missing)) return head + AC_buildPersonalMessage(today, label);
-  if (has(r.targets)) return head + '本日の' + label + 'のアルコールチェックは実施済みのため、本人への通知はありません。';
-  return head + '本日はシフトが「出勤」ではないため、' + label + 'の通知対象外です。';
+/**
+ * アルコール検知の可能性がある回答を管理者へ知らせる（本人通知とは別）。
+ * NORMAL_RESULTS（「通常」とみなす測定結果の値、カンマ区切り）が設定されている場合だけ動く。
+ * それ以外の測定結果の当日の回答を、1件につき1回だけ知らせる。
+ */
+function AC_checkAlerts_(props, d, dryRun) {
+  var normal = String(props.getProperty('NORMAL_RESULTS') || '').split(',')
+    .map(function (s) { return s.trim(); }).filter(Boolean);
+  if (!normal.length) return;
+  var hits = AC_findAlerts(d, normal);
+  hits.forEach(function (h) {
+    var key = 'sent:' + d.today + ':alert:' + h.row;
+    if (props.getProperty(key)) return;
+    Logger.log('要確認の測定結果：%s行目', h.row);
+    if (dryRun) return;
+    var time = Utilities.formatDate(h.at, AC_TZ, 'HH:mm');
+    AC_pushLine_('【至急・要確認】アルコールチェックの測定結果\n' + time + ' ' + h.name + '（' + h.label + '）\n測定結果：'
+      + h.result + '\n本人の運転可否を確認してください。');
+    props.setProperty(key, new Date().toISOString());
+  });
 }
 
-/** 8日より前の送信記録を消す（スクリプトプロパティの容量対策） */
+/** 純粋関数：当日の回答のうち、測定結果が「通常」の値以外のもの */
+function AC_findAlerts(d, normal) {
+  var out = [];
+  for (var i = 1; i < d.fv.length; i++) {
+    var row = d.fv[i];
+    if (d.toDate(row[0]) !== d.today) continue;
+    var result = String(row[3] == null ? '' : row[3]).trim();
+    if (!result || normal.indexOf(result) !== -1) continue;
+    out.push({ row: i + 1, name: String(row[1]).trim(), label: String(row[2]).trim(), result: result, at: row[0] });
+  }
+  return out;
+}
+
+/** 8日より前の送信記録・40日より前の通数記録を消す（スクリプトプロパティの容量対策） */
 function AC_cleanupSentKeys_(props, today) {
-  var limit = Utilities.formatDate(new Date(Date.now() - 8 * 86400000), AC_TZ, 'yyyy-MM-dd');
+  var day = function (n) { return Utilities.formatDate(new Date(Date.now() - n * 86400000), AC_TZ, 'yyyy-MM-dd'); };
+  var sentLimit = day(8), statLimit = day(40);
   Object.keys(props.getProperties()).forEach(function (k) {
-    var m = /^sent:(\d{4}-\d{2}-\d{2}):/.exec(k);
-    if (m && m[1] < limit) props.deleteProperty(k);
+    var m = /^(sent|stat):(\d{4}-\d{2}-\d{2}):/.exec(k);
+    if (m && m[2] < (m[1] === 'sent' ? sentLimit : statLimit)) props.deleteProperty(k);
   });
+}
+
+/** 手動確認用：直近の日ごとの見込み通数（全員がLINE登録済みだった場合） */
+function alcoholCheckUsage() {
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var byDay = {};
+  Object.keys(all).forEach(function (k) {
+    var m = /^stat:(\d{4}-\d{2}-\d{2}):(\w+)$/.exec(k);
+    if (m) byDay[m[1]] = (byDay[m[1]] || 0) + Number(all[k] || 0);
+  });
+  var days = Object.keys(byDay).sort();
+  var total = days.reduce(function (a, k) { return a + byDay[k]; }, 0);
+  Logger.log('日ごとの見込み通数 %s／平均 %s通/日（30日換算 約%s通）', JSON.stringify(byDay),
+    days.length ? Math.round(total / days.length) : 0, days.length ? Math.round(total / days.length * 30) : 0);
+}
+
+// ---------------- 文面 ----------------
+
+/** 気象庁の予報（埼玉県南部・さいたま）から今日の天気区分を返す。取得できなければnull。 */
+function AC_fetchWeather_(today) {
+  try {
+    var res = UrlFetchApp.fetch('https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json',
+      { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return null;
+    return AC_weatherFromJma(JSON.parse(res.getContentText()), today);
+  } catch (e) {
+    Logger.log('天気の取得に失敗：%s', e && e.message ? e.message : '');
+    return null;
+  }
+}
+
+/**
+ * 純粋関数：気象庁JSONから今日の { kind, text, max, min } を作る。
+ * kind：rain（雨・雪）／hot（最高30℃以上）／cold（最低5℃以下または最高12℃以下）／sunny（晴れ）／cloudy（その他）
+ */
+function AC_weatherFromJma(json, today) {
+  var f = json && json[0];
+  if (!f || !f.timeSeries) return null;
+  var area = function (ts, code) {
+    return ts && (ts.areas || []).filter(function (a) { return a.area && a.area.code === code; })[0];
+  };
+  var w = f.timeSeries[0], wa = area(w, '110010');
+  if (!wa) return null;
+  var idx = -1;
+  (w.timeDefines || []).forEach(function (t, i) { if (idx === -1 && String(t).slice(0, 10) === today) idx = i; });
+  if (idx === -1) idx = 0;
+  var code = String((wa.weatherCodes || [])[idx] || '');
+  var text = String((wa.weathers || [])[idx] || '').replace(/\s+/g, ' ');
+  var pops = [], p = f.timeSeries[1], pa = area(p, '110010');
+  if (pa) (p.timeDefines || []).forEach(function (t, i) {
+    if (String(t).slice(0, 10) === today && pa.pops[i] !== '') pops.push(Number(pa.pops[i]));
+  });
+  var temps = [], tt = f.timeSeries[2], ta = area(tt, '43241');
+  if (ta) (tt.timeDefines || []).forEach(function (t, i) {
+    if (String(t).slice(0, 10) === today && ta.temps[i] !== '') temps.push(Number(ta.temps[i]));
+  });
+  var max = temps.length ? Math.max.apply(null, temps) : null;
+  var min = temps.length > 1 ? Math.min.apply(null, temps) : null;
+  var pop = pops.length ? Math.max.apply(null, pops) : 0;
+  var kind = 'cloudy';
+  if (/^[34]/.test(code) || /雨|雪/.test(text.split(' ')[0]) || pop >= 50) kind = 'rain';
+  else if (max !== null && max >= 30) kind = 'hot';
+  else if ((min !== null && min <= 5) || (max !== null && max <= 12)) kind = 'cold';
+  else if (/^1/.test(code)) kind = 'sunny';
+  return { kind: kind, text: text, max: max, min: min };
+}
+
+/** 純粋関数：日付から文面の言い回しを選ぶ（毎日同じ文にならないように） */
+function AC_pick(list, today) {
+  var n = Number(String(today).replace(/-/g, '')) || 0;
+  return list[n % list.length];
+}
+
+/** 純粋関数：通知の種類ごとの本人向け文面（氏名や他人の情報は含めない） */
+function AC_messageFor(kind, today, weather) {
+  if (kind === 'morning') return AC_morningMessage(today, weather);
+  if (kind === 'followBefore') {
+    return 'おはようございます！\n\n本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
+      + 'すでにアルコールチェックを実施済みの場合は、お手数ですがフォームへの入力をお願いいたします😊\n\n'
+      + 'もし忘れてしまっていた場合は、次回から忘れずに対応いただけると助かります！\n\n'
+      + '本日これから運転する予定がある場合は、必ず運転前にアルコールチェックをお願いいたします🚗\n\nよろしくお願いします！';
+  }
+  if (kind === 'evening') {
+    return 'お疲れ様です！😊\n\n本日もお仕事ありがとうございます！\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします🚗\n\n'
+      + 'お帰りの際も、安全運転でお気をつけてください✨';
+  }
+  if (kind === 'followAfter') {
+    return 'お疲れ様です！\n\n本日の退勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
+      + 'すでに実施済みの場合は、お手数ですがフォームへの入力をお願いいたします😊\n\n'
+      + 'もし忘れてしまっていた場合は、次回から忘れずに対応いただけると助かります！\n\n'
+      + 'お忙しい中お手数をおかけしますが、引き続きご協力よろしくお願いいたします🙇‍♀️';
+  }
+  return '';
+}
+
+/** 純粋関数：朝の案内（天気に合わせた一言。天気が取れないときは天気に触れない） */
+function AC_morningMessage(today, weather) {
+  var ask = AC_pick(['本日も運転前のアルコールチェックと、フォームへの入力をお願いいたします！🚗',
+    '運転前のアルコールチェックと、フォームへの入力を本日もよろしくお願いいたします🚗'], today);
+  var close = AC_pick(['今日も一日、安全運転でよろしくお願いします✨', '今日も一日、よろしくお願いします😊',
+    '本日もよろしくお願いいたします✨'], today);
+  var kind = weather ? weather.kind : 'none';
+  var lines = {
+    sunny: ['☀️ おはようございます！', AC_pick(['今日は晴れて気持ちの良い一日になりそうですね😊',
+      '今日は晴れの予報です。気持ちよく一日を始められそうですね😊'], today)],
+    cloudy: ['🌤 おはようございます！', AC_pick(['今日はくもりの予報です。', '今日は雲の多い一日になりそうです。'], today)],
+    rain: ['☔ おはようございます！', '今日は雨の予報です。\n路面が滑りやすくなりますので、運転の際はお気をつけください😊'],
+    hot: ['☀️ おはようございます！', '今日は気温が高くなる予報です🥵\n屋外での作業もあると思いますので、こまめな水分補給をお願いします！'],
+    cold: ['❄️ おはようございます！', '今日は冷え込む予報です。\n屋外での作業もあると思いますので、暖かくしてお過ごしください😊'],
+    none: ['おはようございます！✨', ''],
+  }[kind];
+  var temp = weather && weather.max !== null && kind !== 'none'
+    ? '（さいたま 最高' + weather.max + '℃' + (weather.min !== null ? '／最低' + weather.min + '℃' : '') + '）' : '';
+  return [lines[0], lines[1] ? lines[1] + temp : '', ask, close].filter(Boolean).join('\n\n');
+}
+
+/** 純粋関数：連続記録の感謝（評価ではなく感謝を伝える） */
+function AC_thanksMessage(n) {
+  if (n === 5) {
+    return '🎉 アルコールチェック開始から、5勤務日連続で入力ありがとうございます！！\n\n'
+      + '出勤前・退勤前ともに忘れず対応していただけて、本当に助かっています😊\n\n毎日のことでお手数をおかけしますが、いつもありがとうございます✨';
+  }
+  if (n === 10) {
+    return '✨ アルコールチェック、10勤務日連続でのご対応ありがとうございます！！\n\n'
+      + '毎日欠かさず入力していただけて、とても助かっています😊\n\nいつもご協力いただき、本当にありがとうございます！';
+  }
+  if (n === 50) {
+    return '✨ いつもありがとうございます！！\n\nアルコールチェックの入力が、50勤務日連続となりました🎉\n\n'
+      + '日々の業務でお忙しい中、継続してご対応いただき、本当にありがとうございます！\n\n引き続きよろしくお願いします😊';
+  }
+  return '🎉 いつもアルコールチェックへのご協力ありがとうございます！\n\n出勤前・退勤前ともに、' + n
+    + '勤務日連続で入力いただいています👏\n\n毎日の積み重ね、本当にありがとうございます😊';
 }
 
 function AC_today_() {
@@ -273,14 +581,6 @@ function AC_buildMessage(today, label, r, plan, failed) {
   return '【アルコールチェック】' + today + ' ' + label + ' 未実施（' + r.missing.length + '/'
     + r.targets.length + '人）\n' + r.missing.map(function (n) { return '・' + n + (mark[n] || ''); }).join('\n')
     + '\n※シフト表の「出勤」とフォーム回答を氏名で照合した結果です。';
-}
-
-/** 本人向けの文面（氏名や他人の情報は含めない） */
-function AC_buildPersonalMessage(today, label) {
-  var md = today.slice(5).replace('-', '/').replace(/^0/, '').replace('/0', '/');
-  return '【アルコールチェック】本日（' + md + '）の' + label + 'のアルコールチェックの記録がまだありません。'
-    + '\n未実施の場合は、すぐに実施してフォームから記録してください。'
-    + '\n実施済みの場合は、管理者へお知らせください。';
 }
 
 /**
@@ -738,6 +1038,9 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_buildTestMessage: AC_buildTestMessage, AC_namesForCode: AC_namesForCode,
-    AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
+    AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
+    AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
+    AC_notTargetReason: AC_notTargetReason };
 }

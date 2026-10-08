@@ -7,7 +7,7 @@ import vm from 'node:vm';
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
-  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate } = ctx.module.exports;
+  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -177,7 +177,7 @@ test('GAS: 退職者の番号を付け直した場合は在籍者に番号を割
     { code: 90002, name: '旧在籍 三郎', retiredOn: '2021-02-28' },                   // 退職者どうしの重複
     { code: 90005, name: '試験 五郎', retiredOn: '2023/06/31' },                     // 実在しない日付
   ];
-  const plan = AC_mergeRoster(master, roster);
+  const plan = AC_mergeRoster(master, roster, '2026-10-08');
   assert.equal(plan.dupCodes, 0);
   const u = Object.fromEntries(plan.updates.map(x => [x.index, [...x.values]]));
   assert.equal(u[0][0], "'90001");
@@ -189,7 +189,7 @@ test('GAS: 退職者の番号を付け直した場合は在籍者に番号を割
   assert.equal(appended.length, 3);                                  // 一郎・二郎・三郎（番号は空欄）
   assert.ok(appended.every(r => r[0] === '' && r[3] === '退職' && r[9] === false));
   // 2回目の取り込みでは、番号空欄の退職者を重複して追加しない
-  const again = AC_mergeRoster([MASTER_HEADER, ...appended], roster.slice(2, 4));
+  const again = AC_mergeRoster([MASTER_HEADER, ...appended], roster.slice(2, 4), '2026-10-08');
   assert.equal(again.appends.length, 0);
 });
 
@@ -197,4 +197,21 @@ test('GAS: 日付の妥当性', () => {
   assert.equal(AC_isValidDate('2023-06-30'), true);
   assert.equal(AC_isValidDate('2023/6/31'), false);
   assert.equal(AC_isValidDate('令和5年'), false);
+});
+
+test('GAS: 退職予定の人は退職日まで在籍として扱う（架空データ）', () => {
+  assert.equal(AC_isRetired('', '2026-10-08'), false);
+  assert.equal(AC_isRetired('2026-10-24', '2026-10-08'), false);
+  assert.equal(AC_isRetired('2026-10-08', '2026-10-08'), false);   // 退職日当日はまだ在籍
+  assert.equal(AC_isRetired('2026-10-07', '2026-10-08'), true);
+  assert.equal(AC_isRetired('2023/6/31', '2026-10-08'), true);     // 読めない日付は退職扱い
+  const plan = AC_mergeRoster([MASTER_HEADER, mrow('', '試験 太郎')],
+    [{ code: 90001, name: '試験 太郎', retiredOn: '2026-10-24' }], '2026-10-08');
+  const row = [...plan.updates[0].values];
+  assert.equal(row[3], '在籍');
+  assert.match(row[10], /退職予定/);
+  // 退職日を過ぎたら、在籍のままでも本人通知に使わない
+  const r = mrow('90001', '試験 太郎', { userId: uid(1) }); r[13] = '2026-10-24';
+  assert.equal(Object.keys(AC_buildRegistry([MASTER_HEADER, r], '2026-10-24')).length, 1);
+  assert.equal(Object.keys(AC_buildRegistry([MASTER_HEADER, r], '2026-10-25')).length, 0);
 });

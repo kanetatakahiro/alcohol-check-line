@@ -378,12 +378,13 @@ function AC_planRegistration(values, code, userId) {
  * 条件：LINE確認済み・アルコールチェック対象・退職でない・社員番号とLINE IDが正しい形式。
  * 氏名と別表記の両方で引けるようにする。同じ氏名が別の人に当たる場合は、その氏名は使わない。
  */
-function AC_buildRegistry(values) {
+function AC_buildRegistry(values, today) {
   var map = {}, dup = {};
   for (var i = 1; i < (values || []).length; i++) {
     var row = values[i];
     if (row[AC_COL.lineOk] !== true || row[AC_COL.alcohol] !== true) continue;
     if (String(row[AC_COL.status]).trim() === '退職') continue;
+    if (today && AC_isRetired(row[AC_COL.retiredOn], today)) continue;  // 退職日を過ぎた人（在籍のまま残っていても）
     var code = AC_cellCode_(row[AC_COL.code]);
     if (!AC_isUserId(row[AC_COL.userId]) || !/^\d{4,6}$/.test(code)) continue;
     [row[AC_COL.name], row[AC_COL.alias]].forEach(function (n) {
@@ -398,7 +399,7 @@ function AC_buildRegistry(values) {
 }
 
 function AC_loadRegistry_() {
-  return AC_buildRegistry(AC_masterSheet_().getDataRange().getValues());
+  return AC_buildRegistry(AC_masterSheet_().getDataRange().getValues(), AC_today_());
 }
 
 /** 従業員マスタ（管理シートとは別ファイル）。無ければ作成する。 */
@@ -487,6 +488,7 @@ function AC_nameKey(name) {
 /**
  * 純粋関数：従業員名簿をマスタに取り込む計画を作る（書き込みはしない）。
  * roster: [{ code, totCode, name, dept, category, retiredOn }]（retiredOn：退職日の文字列、在籍中は空）
+ * today: YYYY-MM-DD。退職日が今日より後の人は「在籍」のまま（備考に退職予定）とし、番号の割り当てでも在籍者として扱う。
  * 社員番号の割り当て：
  *  - 名簿で1人だけが持つ番号 → その人
  *  - 複数人が持つ番号 → 在籍者が1人だけならその人（退職者の番号を付け直した場合）。在籍者が2人以上なら誰にも使わない
@@ -496,7 +498,7 @@ function AC_nameKey(name) {
  *  - 社員番号が空の行 → 名簿で氏名キーが1人だけ一致すれば番号等を入れ、備考に「要確認」を付ける
  * 氏名が名簿で複数人に当たる・見つからないマスタ行は変更せず、件数を返す。
  */
-function AC_mergeRoster(masterValues, roster) {
+function AC_mergeRoster(masterValues, roster, today) {
   var C = AC_COL, width = AC_MASTER_HEADER.length;
   var rows = (masterValues || []).slice(1).map(function (r) {
     var x = r.slice(0, width); while (x.length < width) x.push(''); return x;
@@ -505,25 +507,28 @@ function AC_mergeRoster(masterValues, roster) {
   roster.forEach(function (p) {
     p.code = AC_cellCode_(p.code);
     p.retiredOn = String(p.retiredOn == null ? '' : p.retiredOn).trim();
+    p.gone = AC_isRetired(p.retiredOn, today);
     if (!/^\d{4,6}$/.test(p.code)) return;
     total[p.code] = (total[p.code] || 0) + 1;
-    if (!p.retiredOn) active[p.code] = (active[p.code] || 0) + 1;
+    if (!p.gone) active[p.code] = (active[p.code] || 0) + 1;
   });
   var byCode = {}, byKey = {}, homeless = [], dupActive = {};
   roster.forEach(function (p) {
     if (!total[p.code]) return;                                        // 不正な社員番号
-    var usable = p.retiredOn ? total[p.code] === 1 : active[p.code] === 1;
-    if (!p.retiredOn && active[p.code] > 1) dupActive[p.code] = true;
+    var usable = p.gone ? total[p.code] === 1 : active[p.code] === 1;
+    if (!p.gone && active[p.code] > 1) dupActive[p.code] = true;
     var k = AC_nameKey(p.name);
     if (usable) { byCode[p.code] = p; if (k) (byKey[k] = byKey[k] || []).push(p); }
-    else { if (k) (byKey[k] = byKey[k] || []).push(null); if (p.retiredOn) homeless.push(p); }
+    else { if (k) (byKey[k] = byKey[k] || []).push(null); if (p.gone) homeless.push(p); }
   });
   var apply = function (nr, p) {
     if (!nr[C.dept]) nr[C.dept] = p.dept || '';
     if (!nr[C.category]) nr[C.category] = p.category || '';
     if (!nr[C.totCode] && p.totCode !== '' && p.totCode != null) nr[C.totCode] = "'" + p.totCode;
-    if (p.retiredOn) { nr[C.status] = '退職'; nr[C.retiredOn] = p.retiredOn; }
+    if (p.retiredOn) nr[C.retiredOn] = p.retiredOn;
+    if (p.gone) nr[C.status] = '退職';
     else if (!String(nr[C.status]).trim()) nr[C.status] = '在籍';
+    if (p.retiredOn && !p.gone) AC_addNote_(nr, '退職予定');
     if (p.retiredOn && !AC_isValidDate(p.retiredOn)) AC_addNote_(nr, '退職日の日付を確認してください');
   };
   var used = {}, updates = [], ambiguous = 0, notFound = 0;
@@ -577,6 +582,19 @@ function AC_addNote_(row, text) {
   if (cur.indexOf(text) === -1) row[AC_COL.note] = cur ? cur + '／' + text : text;
 }
 
+/**
+ * 純粋関数：退職済みか。退職日が空なら在籍。日付として読めない値（実在しない日付など）は退職済みとみなす。
+ * 退職日当日は勤務している可能性があるため、翌日から退職済みとする。
+ */
+function AC_isRetired(retiredOn, today) {
+  var s = String(retiredOn == null ? '' : retiredOn).trim();
+  if (!s) return false;
+  if (!AC_isValidDate(s) || !today) return true;
+  var m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/.exec(s);
+  var iso = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  return iso < today;
+}
+
 /** 純粋関数：YYYY-MM-DD または YYYY/M/D が実在する日付か */
 function AC_isValidDate(s) {
   var m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/.exec(String(s).trim());
@@ -590,7 +608,7 @@ function AC_importRoster_(roster) {
   var sheet = AC_masterSheet_();
   var width = AC_MASTER_HEADER.length;
   var values = sheet.getRange(1, 1, Math.max(sheet.getLastRow(), 1), width).getValues();
-  var plan = AC_mergeRoster(values, roster);
+  var plan = AC_mergeRoster(values, roster, AC_today_());
   plan.updates.forEach(function (u) { sheet.getRange(u.index + 2, 1, 1, width).setValues([u.values]); });
   if (plan.appends.length) {
     var start = sheet.getLastRow() + 1;
@@ -637,6 +655,6 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate,
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired,
     AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

@@ -5,7 +5,7 @@
  *  - シート「2026-2028」のシフト行で、当日（日本時間）が「出勤」の人を対象者とする
  *  - シート「フォームの回答 1」の当日・該当チェック区分の回答と氏名で照合する
  *  - 未実施者のうちLINE登録済み（管理者が確認済み）の人へ本人通知し、管理者へ一覧を送る
- *  - 従業員は公式LINEに社員番号を送って登録する（doPost）。登録表は管理シートとは別のスプレッドシート
+ *  - 従業員は公式LINEに社員番号を送って登録する（doPost）。従業員マスタは管理シートとは別のスプレッドシート
  *
  * 安全策：
  *  - 管理シートへの書き込みは一切しない（読み取りのみ）
@@ -19,7 +19,7 @@
  *  DRY_RUN                    "false" のときだけ実際に送信する（未設定なら送信しない）
  *  NOTIFY_EMPLOYEES           "true" のときだけ本人へ通知する（未設定なら管理者一覧のみ）
  *  NOTIFY_ADMIN               "false" にすると管理者一覧を送らない
- *  REGISTRY_SPREADSHEET_ID    登録表のID（alcoholCheckSetupRegistry で自動設定）
+ *  EMPLOYEE_MASTER_ID         従業員マスタのID（alcoholCheckSetupMaster で自動設定）
  *
  * 会社アカウント（シート編集者）が所有する独立プロジェクト「アルコールチェック通知（暫定版）」で動かす。
  * 既存のApps Scriptとの衝突を避けるため、関数名・定数名には AC_ / alcoholCheck を付けている。
@@ -270,12 +270,17 @@ function AC_pushTo_(to, text) {
   }
 }
 
-// ---------------- 従業員のLINE登録（Webhook） ----------------
-// 従業員が公式アカウントを友だち追加し、社員番号を送ると、登録表（別スプレッドシート）に1行追加する。
-// 返信は応答メッセージ（reply）で行い、通数に数えられない。社員番号以外の発言には反応しない（手動チャットを邪魔しない）。
-// Apps ScriptのdoPostはヘッダーを読めず署名検証ができないため、登録は管理者が「確認済み」にするまで通知に使わない。
+// ---------------- 従業員マスタとLINE登録（Webhook） ----------------
+// 従業員マスタ：社員番号をキーに、氏名・在籍・所属・LINE ID・業務ごとの対象を1行で管理する（管理シートとは別ファイル）。
+// 今後の他業務の自動化でも、このマスタを社員番号で参照する。
+// 従業員が公式LINEに社員番号を送ると、マスタの該当行にLINE IDを記録する（返信はreplyで通数に数えない）。
+// 社員番号以外の発言には反応しない（手動チャットを邪魔しない）。
+// Apps ScriptのdoPostは署名検証ができないため、管理者が「LINE確認済み」にするまで通知に使わない。
 
-var AC_REG_HEADER = ['登録日時', '社員番号', 'LINE表示名', 'LINEユーザーID', 'シフト表の氏名（管理者が入力）', '確認済み（管理者がチェック）'];
+var AC_MASTER_HEADER = ['社員番号', '氏名', '別表記（シフト表の書き方が違う場合）', '在籍状況', '所属・拠点',
+  'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考'];
+var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineName: 6, lineAt: 7,
+  lineOk: 8, alcohol: 9, note: 10 };
 
 function doPost(e) {
   try {
@@ -291,7 +296,7 @@ function AC_handleEvent_(ev) {
   var src = ev && ev.source;
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (ev.type === 'follow') {
-    AC_reply_(ev.replyToken, '友だち追加ありがとうございます。\nアルコールチェックの通知を受け取るため、社員番号（数字のみ）を送ってください。');
+    AC_reply_(ev.replyToken, '友だち追加ありがとうございます。\n通知を受け取るため、社員番号（数字のみ）を送ってください。');
     return;
   }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
@@ -299,22 +304,39 @@ function AC_handleEvent_(ev) {
   if (!code) return;
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
+  var result;
   try {
-    var sheet = AC_registrySheet_();
-    var rows = sheet.getDataRange().getValues();
-    for (var i = 1; i < rows.length; i++) {
-      if (rows[i][3] === src.userId && String(rows[i][1]) === code) {
-        AC_reply_(ev.replyToken, '社員番号 ' + code + ' は登録済みです。');
-        return;
-      }
+    var sheet = AC_masterSheet_();
+    var values = sheet.getDataRange().getValues();
+    var action = AC_planRegistration(values, code, src.userId);
+    var displayName = AC_fetchDisplayName_(src.userId) || '（取得できませんでした）';
+    var now = new Date();
+    if (action.type === 'fill') {
+      var row = action.row + 1;
+      sheet.getRange(row, AC_COL.userId + 1, 1, 3).setValues([[src.userId, displayName, now]]);
+      sheet.getRange(row, AC_COL.lineOk + 1).setValue(false);
+    } else if (action.type === 'new') {
+      var r = AC_MASTER_HEADER.map(function () { return ''; });
+      r[AC_COL.code] = "'" + code; r[AC_COL.status] = '在籍';
+      r[AC_COL.userId] = src.userId; r[AC_COL.lineName] = displayName; r[AC_COL.lineAt] = now;
+      r[AC_COL.lineOk] = false; r[AC_COL.alcohol] = false;
+      r[AC_COL.note] = 'LINE登録で追加。氏名を入力してください';
+      sheet.appendRow(r);
+    } else if (action.type === 'conflict') {
+      // 既に別のLINE IDが登録されている社員番号：上書きせず、管理者確認用のシートに残す
+      AC_reviewSheet_(sheet.getParent()).appendRow([now, "'" + code, src.userId, displayName, '既存のLINE IDと異なる']);
     }
-    var name = AC_fetchDisplayName_(src.userId) || '（取得できませんでした）';
-    sheet.appendRow([new Date(), "'" + code, name, src.userId, '', false]);
-    sheet.getRange(sheet.getLastRow(), 6).insertCheckboxes();
+    result = action.type;
   } finally {
     lock.releaseLock();
   }
-  AC_reply_(ev.replyToken, '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、アルコールチェックの通知が届くようになります。');
+  var replies = {
+    fill: '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、通知が届くようになります。',
+    new: '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、通知が届くようになります。',
+    same: '社員番号 ' + code + ' は登録済みです。',
+    conflict: '社員番号 ' + code + ' で受け付けました。管理者が確認します。',
+  };
+  AC_reply_(ev.replyToken, replies[result]);
 }
 
 function AC_isUserId(v) { return typeof v === 'string' && /^U[0-9a-f]{32}$/.test(v); }
@@ -327,54 +349,122 @@ function AC_parseEmployeeCode(text) {
   return /^\d{4,6}$/.test(t) ? t : null;
 }
 
+function AC_cellCode_(v) { return String(v == null ? '' : v).replace(/^'/, '').trim(); }
+
 /**
- * 純粋関数：登録表の全値から、確認済みの行だけで「シフト表の氏名 → {code, userId}」を作る。
- * 同じ氏名に別の登録が複数あるときは、その氏名は使わない（誤送信防止）。
+ * 純粋関数：LINE登録の処理方法を決める。
+ *  fill：マスタに社員番号があり、LINE ID未登録 → その行に記録
+ *  same：同じLINE IDで登録済み
+ *  conflict：別のLINE IDで登録済み → 上書きしない
+ *  new：マスタに社員番号が無い → 新しい行を追加（管理者が氏名を入力）
+ * 同じ社員番号の行が複数ある場合は conflict とする。
+ */
+function AC_planRegistration(values, code, userId) {
+  var rows = [];
+  for (var i = 1; i < (values || []).length; i++) {
+    if (AC_cellCode_(values[i][AC_COL.code]) === code) rows.push(i);
+  }
+  if (rows.length === 0) return { type: 'new' };
+  if (rows.length > 1) return { type: 'conflict' };
+  var current = values[rows[0]][AC_COL.userId];
+  if (!current) return { type: 'fill', row: rows[0] };
+  return { type: current === userId ? 'same' : 'conflict', row: rows[0] };
+}
+
+/**
+ * 純粋関数：従業員マスタから、アルコールチェックの本人通知に使える「氏名 → {code, userId}」を作る。
+ * 条件：LINE確認済み・アルコールチェック対象・退職でない・社員番号とLINE IDが正しい形式。
+ * 氏名と別表記の両方で引けるようにする。同じ氏名が別の人に当たる場合は、その氏名は使わない。
  */
 function AC_buildRegistry(values) {
   var map = {}, dup = {};
   for (var i = 1; i < (values || []).length; i++) {
     var row = values[i];
-    if (row[5] !== true) continue;
-    var name = AC_normalizeName(row[4]);
-    var code = String(row[1]).replace(/^'/, '').trim();
-    if (!name || !AC_isUserId(row[3]) || !/^\d{4,6}$/.test(code)) continue;
-    if (map[name] && (map[name].userId !== row[3] || map[name].code !== code)) dup[name] = true;
-    map[name] = { code: code, userId: row[3] };
+    if (row[AC_COL.lineOk] !== true || row[AC_COL.alcohol] !== true) continue;
+    if (String(row[AC_COL.status]).trim() === '退職') continue;
+    var code = AC_cellCode_(row[AC_COL.code]);
+    if (!AC_isUserId(row[AC_COL.userId]) || !/^\d{4,6}$/.test(code)) continue;
+    [row[AC_COL.name], row[AC_COL.alias]].forEach(function (n) {
+      var key = AC_normalizeName(n);
+      if (!key) return;
+      if (map[key] && map[key].code !== code) dup[key] = true;
+      map[key] = { code: code, userId: row[AC_COL.userId] };
+    });
   }
   Object.keys(dup).forEach(function (n) { delete map[n]; });
   return map;
 }
 
 function AC_loadRegistry_() {
-  return AC_buildRegistry(AC_registrySheet_().getDataRange().getValues());
+  return AC_buildRegistry(AC_masterSheet_().getDataRange().getValues());
 }
 
-/** 登録表のスプレッドシート（管理シートとは別ファイル）。無ければ作成する。 */
-function AC_registrySheet_() {
+/** 従業員マスタ（管理シートとは別ファイル）。無ければ作成する。 */
+function AC_masterSheet_() {
   var props = PropertiesService.getScriptProperties();
-  var id = props.getProperty('REGISTRY_SPREADSHEET_ID');
+  var id = props.getProperty('EMPLOYEE_MASTER_ID');
   var ss;
   if (id) {
     ss = SpreadsheetApp.openById(id);
   } else {
-    ss = SpreadsheetApp.create('アルコールチェック LINE登録表');
-    props.setProperty('REGISTRY_SPREADSHEET_ID', ss.getId());
+    ss = SpreadsheetApp.create('従業員マスタ');
+    props.setProperty('EMPLOYEE_MASTER_ID', ss.getId());
   }
-  var sheet = ss.getSheets()[0];
+  var sheet = ss.getSheetByName('従業員マスタ') || ss.getSheets()[0];
   if (sheet.getLastRow() === 0) {
-    sheet.setName('LINE登録');
-    sheet.appendRow(AC_REG_HEADER);
+    sheet.setName('従業員マスタ');
+    sheet.appendRow(AC_MASTER_HEADER);
     sheet.setFrozenRows(1);
-    sheet.getRange(1, 1, 1, AC_REG_HEADER.length).setFontWeight('bold');
+    sheet.getRange(1, 1, 1, AC_MASTER_HEADER.length).setFontWeight('bold');
+    sheet.getRange('A:A').setNumberFormat('@');                       // 社員番号の先頭ゼロを保つ
+    sheet.getRange(2, AC_COL.lineOk + 1, 999, 2).insertCheckboxes();
+    sheet.getRange(2, AC_COL.status + 1, 999, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(['在籍', '休職', '退職'], true).build());
   }
   return sheet;
 }
 
-/** 手動実行用：登録表を作成し、URLを実行ログに出す */
-function alcoholCheckSetupRegistry() {
-  var sheet = AC_registrySheet_();
-  Logger.log('登録表：%s', sheet.getParent().getUrl());
+function AC_reviewSheet_(ss) {
+  var sheet = ss.getSheetByName('LINE登録の要確認');
+  if (!sheet) {
+    sheet = ss.insertSheet('LINE登録の要確認');
+    sheet.appendRow(['日時', '社員番号', 'LINEユーザーID', 'LINE表示名', '理由']);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/**
+ * 手動実行用：従業員マスタを作成し、URLを実行ログに出す。
+ * マスタが空なら、シフト表の氏名を「氏名」列に入れる（社員番号は管理者が入力）。
+ */
+function alcoholCheckSetupMaster() {
+  var sheet = AC_masterSheet_();
+  if (sheet.getLastRow() === 1) {
+    var sv = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE).getDataRange().getValues();
+    var names = AC_rosterNames(sv);
+    if (names.length) {
+      sheet.getRange(2, 1, names.length, AC_MASTER_HEADER.length).setValues(names.map(function (n) {
+        var r = AC_MASTER_HEADER.map(function () { return ''; });
+        r[AC_COL.name] = n; r[AC_COL.status] = '在籍'; r[AC_COL.lineOk] = false; r[AC_COL.alcohol] = true;
+        return r;
+      }));
+    }
+    Logger.log('シフト表から %s人の氏名を入れました', names.length);
+  }
+  Logger.log('従業員マスタ：%s', sheet.getParent().getUrl());
+}
+
+/** 純粋関数：シフト表（2026-2028）のB列から、「シフト」行の氏名を重複なしで返す。 */
+function AC_rosterNames(sv) {
+  var out = [], seen = {}, current = '';
+  for (var r = 2; r < (sv || []).length; r++) {
+    if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
+    if (String(sv[r][2]).trim() !== 'シフト' || !current) continue;
+    var k = AC_normalizeName(current);
+    if (!seen[k]) { seen[k] = true; out.push(current); }
+  }
+  return out;
 }
 
 function AC_fetchDisplayName_(userId) {
@@ -400,6 +490,6 @@ function AC_reply_(replyToken, text) {
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry,
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames,
     AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

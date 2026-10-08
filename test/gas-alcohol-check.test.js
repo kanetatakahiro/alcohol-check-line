@@ -7,7 +7,12 @@ import vm from 'node:vm';
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
-  AC_planNotifications, AC_buildPersonalMessage } = ctx.module.exports;
+  AC_planNotifications, AC_buildPersonalMessage, AC_planRegistration, AC_rosterNames } = ctx.module.exports;
+
+// 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
+const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
+  [code, name, alias, status, '', userId, '', '', ok, alcohol, ''];
+const MASTER_HEADER = mrow('社員番号', '氏名');
 
 const uid = n => 'U' + String(n).repeat(32).slice(0, 32);   // 架空のLINEユーザーID
 
@@ -19,17 +24,34 @@ test('GAS: 社員番号だけのメッセージを受け付ける（全角数字
   }
 });
 
-test('GAS: 登録表は確認済みの行だけ使い、同じ氏名の別登録は使わない', () => {
-  const header = ['登録日時', '社員番号', '表示名', 'ID', '氏名', '確認済み'];
-  const reg = AC_buildRegistry([header,
-    [null, "'90001", 'a', uid(1), '試験 太郎', true],
-    [null, '90002', 'b', uid(2), '試験 花子', false],          // 未確認
-    [null, '90003', 'c', 'not-an-id', '試験 次郎', true],      // 不正なID
-    [null, '90004', 'd', uid(4), '試験 三郎', true],
-    [null, '90005', 'e', uid(5), '試験　三郎', true],          // 同じ氏名に別登録 → 使わない
+test('GAS: 従業員マスタから本人通知に使える人だけを取り出す', () => {
+  const reg = AC_buildRegistry([MASTER_HEADER,
+    mrow("'90001", '試験 太郎', { alias: '試験太郎（A店）', userId: uid(1) }),
+    mrow('90002', '試験 花子', { userId: uid(2), ok: false }),          // LINE未確認
+    mrow('90003', '試験 次郎', { userId: 'not-an-id' }),                 // 不正なID
+    mrow('90004', '試験 三郎', { userId: uid(4) }),
+    mrow('90005', '試験　三郎', { userId: uid(5) }),                     // 同じ氏名に別の人 → 使わない
+    mrow('90006', '試験 四郎', { userId: uid(6), status: '退職' }),      // 退職
+    mrow('90007', '試験 五郎', { userId: uid(7), alcohol: false }),      // 対象外
   ]);
-  assert.deepEqual(Object.keys(reg), ['試験太郎']);
-  assert.deepEqual({ ...reg['試験太郎'] }, { code: '90001', userId: uid(1) });
+  assert.deepEqual(Object.keys(reg).sort(), ['試験太郎', '試験太郎（A店）'].sort());
+  assert.deepEqual({ ...reg['試験太郎（A店）'] }, { code: '90001', userId: uid(1) });
+});
+
+test('GAS: LINE登録は社員番号で行を探し、別のIDで上書きしない', () => {
+  const values = [MASTER_HEADER, mrow('90001', '試験 太郎'), mrow('90002', '試験 花子', { userId: uid(2) }),
+    mrow('90003', 'a'), mrow('90003', 'b')];
+  assert.deepEqual({ ...AC_planRegistration(values, '90001', uid(1)) }, { type: 'fill', row: 1 });
+  assert.equal(AC_planRegistration(values, '90002', uid(2)).type, 'same');
+  assert.equal(AC_planRegistration(values, '90002', uid(9)).type, 'conflict');
+  assert.equal(AC_planRegistration(values, '90003', uid(3)).type, 'conflict');   // 番号の重複
+  assert.equal(AC_planRegistration(values, '99999', uid(1)).type, 'new');
+});
+
+test('GAS: シフト表から氏名を重複なしで取り出す', () => {
+  const sv = [[], ['', '氏名', '区分'], ['', '試験 太郎', 'シフト'], ['', '', '出勤前'], ['', '', '退勤後'],
+    ['', '試験 花子', 'シフト'], ['', '', '出勤前'], ['', '試験　太郎', 'シフト']];
+  assert.deepEqual([...AC_rosterNames(sv)], ['試験 太郎', '試験 花子']);
 });
 
 test('GAS: 未実施者を本人通知と未登録に分け、管理者一覧に表示する', () => {

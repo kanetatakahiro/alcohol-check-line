@@ -475,12 +475,13 @@ function alcoholCheckSetupMaster() {
   Logger.log('従業員マスタ：%s', sheet.getParent().getUrl());
 }
 
-/** 純粋関数：シフト表（2026-2028）のB列から、「シフト」行の氏名を重複なしで返す。 */
+/** 純粋関数：シフト表（2026-2028）のB列から、「シフト」行の氏名を重複なしで返す（数字だけの空き枠は除く）。 */
 function AC_rosterNames(sv) {
   var out = [], seen = {}, current = '';
   for (var r = 2; r < (sv || []).length; r++) {
     if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
     if (String(sv[r][2]).trim() !== 'シフト' || !current) continue;
+    if (/^[0-9０-９]+$/.test(AC_normalizeName(current))) continue;   // 数字だけの行はシフト表の空き枠
     var k = AC_normalizeName(current);
     if (!seen[k]) { seen[k] = true; out.push(current); }
   }

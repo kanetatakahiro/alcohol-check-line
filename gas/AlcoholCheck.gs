@@ -87,26 +87,53 @@ function alcoholCheckSendTestMessage() {
 function AC_run_(type) {
   var props = PropertiesService.getScriptProperties();
   var dryRun = props.getProperty('DRY_RUN') !== 'false';
+  var notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';   // 本人通知は明示的に有効化したときだけ
+  var notifyAdmin = props.getProperty('NOTIFY_ADMIN') !== 'false';
   var today = AC_today_();
-  var sentKey = 'sent:' + today + ':' + type;
-  if (props.getProperty(sentKey)) { Logger.log('送信済みのため中止'); return; }
+  var label = AC_CHECK_LABELS[type];
+  var runKey = 'sent:' + today + ':' + type;
+  if (props.getProperty(runKey)) { Logger.log('実行済みのため中止'); return; }
+  AC_cleanupSentKeys_(props, today);
 
-  var message;
+  var r, plan;
   try {
-    var r = AC_reconcileFromSheets_(today, type);
-    message = AC_buildMessage(today, AC_CHECK_LABELS[type], r);
-    Logger.log('%s %s：対象 %s人／未実施 %s人', today, AC_CHECK_LABELS[type], r.targets.length, r.missing.length);
+    r = AC_reconcileFromSheets_(today, type);
+    plan = AC_planNotifications(r.missing, notifyPeople ? AC_loadRegistry_() : {});
   } catch (e) {
-    // 照合できない場合は一覧を送らず、失敗だけを知らせる（氏名や生データは含めない）
-    message = '【アルコールチェック】' + today + ' ' + AC_CHECK_LABELS[type]
-      + 'の確認ができませんでした。シートを確認してください。（' + (e && e.code ? e.code : '不明なエラー') + '）';
-    // 実行ログ（所有者のみ閲覧可）には原因調査のため例外メッセージも残す
+    // 照合できない場合は誰にも個別通知せず、管理者へ失敗だけを知らせる（氏名や生データは含めない）
     Logger.log('照合失敗：%s %s', e && e.code ? e.code : 'unknown', e && e.message ? e.message : '');
+    var fail = '【アルコールチェック】' + today + ' ' + label
+      + 'の確認ができませんでした。シートを確認してください。（' + (e && e.code ? e.code : '不明なエラー') + '）';
+    if (!dryRun) { AC_pushLine_(fail); props.setProperty(runKey, new Date().toISOString()); }
+    return;
   }
-  if (!message) return;
+  Logger.log('%s %s：対象 %s人／未実施 %s人／本人通知 %s人／LINE未登録 %s人', today, label,
+    r.targets.length, r.missing.length, plan.send.length, plan.unregistered.length);
   if (dryRun) { Logger.log('DRY_RUNのため送信しません'); return; }
-  AC_pushLine_(message);
-  props.setProperty(sentKey, new Date().toISOString());
+
+  var failed = [];
+  plan.send.forEach(function (p) {
+    var personKey = 'sent:' + today + ':' + type + ':' + p.code;      // 同じ日・同じ人・同じ区分は1回
+    if (props.getProperty(personKey)) return;
+    try {
+      AC_pushTo_(p.userId, AC_buildPersonalMessage(today, label));
+      props.setProperty(personKey, new Date().toISOString());
+    } catch (e) { failed.push(p.name); }
+  });
+  if (notifyAdmin) {
+    var adminMsg = AC_buildMessage(today, label, r, plan, failed);
+    if (adminMsg) AC_pushLine_(adminMsg);
+  }
+  props.setProperty(runKey, new Date().toISOString());
+}
+
+/** 8日より前の送信記録を消す（スクリプトプロパティの容量対策） */
+function AC_cleanupSentKeys_(props, today) {
+  var limit = Utilities.formatDate(new Date(Date.now() - 8 * 86400000), AC_TZ, 'yyyy-MM-dd');
+  Object.keys(props.getProperties()).forEach(function (k) {
+    var m = /^sent:(\d{4}-\d{2}-\d{2}):/.exec(k);
+    if (m && m[1] < limit) props.deleteProperty(k);
+  });
 }
 
 function AC_today_() {
@@ -179,15 +206,44 @@ function AC_reconcile(input) {
   return { targets: targets, missing: missing };
 }
 
-function AC_buildMessage(today, label, r) {
+/** 管理者向け一覧。plan・failed は省略可（本人通知を使わない場合）。 */
+function AC_buildMessage(today, label, r, plan, failed) {
   if (r.targets.length === 0) {
     return '【アルコールチェック】' + today + ' ' + label
       + '：シフト表に本日の「出勤」がありません。入力漏れでないか確認してください。';
   }
   if (r.missing.length === 0) return null; // 全員実施済みなら送らない
+  var mark = {};
+  if (plan) {
+    plan.send.forEach(function (p) { mark[p.name] = '（本人に通知）'; });
+    if (plan.registryUsed) plan.unregistered.forEach(function (n) { mark[n] = '（LINE未登録）'; });
+  }
+  (failed || []).forEach(function (n) { mark[n] = '（本人通知に失敗）'; });
   return '【アルコールチェック】' + today + ' ' + label + ' 未実施（' + r.missing.length + '/'
-    + r.targets.length + '人）\n' + r.missing.map(function (n) { return '・' + n; }).join('\n')
-    + '\n※シフト表の「出勤」とフォーム回答を氏名で照合した暫定結果です。';
+    + r.targets.length + '人）\n' + r.missing.map(function (n) { return '・' + n + (mark[n] || ''); }).join('\n')
+    + '\n※シフト表の「出勤」とフォーム回答を氏名で照合した結果です。';
+}
+
+/** 本人向けの文面（氏名や他人の情報は含めない） */
+function AC_buildPersonalMessage(today, label) {
+  var md = today.slice(5).replace('-', '/').replace(/^0/, '').replace('/0', '/');
+  return '【アルコールチェック】本日（' + md + '）の' + label + 'のアルコールチェックの記録がまだありません。'
+    + '\n未実施の場合は、すぐに実施してフォームから記録してください。'
+    + '\n実施済みの場合は、管理者へお知らせください。';
+}
+
+/**
+ * 純粋関数：未実施者の氏名一覧と登録表（氏名→{code,userId}）から、本人通知の対象と未登録者を分ける。
+ * 登録表は管理者が「確認済み」にした行だけを使う（AC_buildRegistryで作る）。
+ */
+function AC_planNotifications(missingNames, registry) {
+  var send = [], unregistered = [];
+  missingNames.forEach(function (n) {
+    var hit = registry[AC_normalizeName(n)];
+    if (hit) send.push({ name: n, code: hit.code, userId: hit.userId });
+    else unregistered.push(n);
+  });
+  return { send: send, unregistered: unregistered, registryUsed: Object.keys(registry).length > 0 };
 }
 
 function AC_pushLine_(text) {
@@ -210,69 +266,136 @@ function AC_pushTo_(to, text) {
   }
 }
 
-// ---------------- グループIDの収集（Webhook） ----------------
-// 公式アカウントがグループへ送るには groupId（Cから始まる）が必要で、Webhookでしか取得できない。
-// グループで発言があると、groupId とグループ名（「氏名｜社員番号」）をスクリプトプロパティに記録する。
-// 返信・自動応答はしない。Apps ScriptのdoPostはヘッダーを読めず署名検証ができないため、
-// 記録した対応はそのまま使わず、送信前に社員番号で1件だけ一致することを確認する。
+// ---------------- 従業員のLINE登録（Webhook） ----------------
+// 従業員が公式アカウントを友だち追加し、社員番号を送ると、登録表（別スプレッドシート）に1行追加する。
+// 返信は応答メッセージ（reply）で行い、通数に数えられない。社員番号以外の発言には反応しない（手動チャットを邪魔しない）。
+// Apps ScriptのdoPostはヘッダーを読めず署名検証ができないため、登録は管理者が「確認済み」にするまで通知に使わない。
+
+var AC_REG_HEADER = ['登録日時', '社員番号', 'LINE表示名', 'LINEユーザーID', 'シフト表の氏名（管理者が入力）', '確認済み（管理者がチェック）'];
 
 function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
-    var props = PropertiesService.getScriptProperties();
-    (body.events || []).forEach(function (ev) {
-      var gid = ev && ev.source && ev.source.type === 'group' ? ev.source.groupId : null;
-      if (!AC_isGroupId(gid)) return;
-      var key = 'group:' + gid;
-      if (props.getProperty(key)) return;                 // 既知のグループは再取得しない
-      props.setProperty(key, AC_fetchGroupName_(gid) || '');
-    });
+    (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
   }
   return ContentService.createTextOutput('OK');
 }
 
-function AC_isGroupId(v) { return typeof v === 'string' && /^C[0-9a-f]{32}$/.test(v); }
+function AC_handleEvent_(ev) {
+  var src = ev && ev.source;
+  if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
+  if (ev.type === 'follow') {
+    AC_reply_(ev.replyToken, '友だち追加ありがとうございます。\nアルコールチェックの通知を受け取るため、社員番号（数字のみ）を送ってください。');
+    return;
+  }
+  if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
+  var code = AC_parseEmployeeCode(ev.message.text);
+  if (!code) return;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sheet = AC_registrySheet_();
+    var rows = sheet.getDataRange().getValues();
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][3] === src.userId && String(rows[i][1]) === code) {
+        AC_reply_(ev.replyToken, '社員番号 ' + code + ' は登録済みです。');
+        return;
+      }
+    }
+    var name = AC_fetchDisplayName_(src.userId) || '（取得できませんでした）';
+    sheet.appendRow([new Date(), "'" + code, name, src.userId, '', false]);
+    sheet.getRange(sheet.getLastRow(), 6).insertCheckboxes();
+  } finally {
+    lock.releaseLock();
+  }
+  AC_reply_(ev.replyToken, '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、アルコールチェックの通知が届くようになります。');
+}
 
-function AC_fetchGroupName_(gid) {
+function AC_isUserId(v) { return typeof v === 'string' && /^U[0-9a-f]{32}$/.test(v); }
+
+/** 純粋関数：メッセージが社員番号だけ（全角数字可、4〜6桁）ならその番号を返す。それ以外はnull。 */
+function AC_parseEmployeeCode(text) {
+  var t = String(text == null ? '' : text).replace(/[０-９]/g, function (c) {
+    return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
+  }).trim();
+  return /^\d{4,6}$/.test(t) ? t : null;
+}
+
+/**
+ * 純粋関数：登録表の全値から、確認済みの行だけで「シフト表の氏名 → {code, userId}」を作る。
+ * 同じ氏名に別の登録が複数あるときは、その氏名は使わない（誤送信防止）。
+ */
+function AC_buildRegistry(values) {
+  var map = {}, dup = {};
+  for (var i = 1; i < (values || []).length; i++) {
+    var row = values[i];
+    if (row[5] !== true) continue;
+    var name = AC_normalizeName(row[4]);
+    var code = String(row[1]).replace(/^'/, '').trim();
+    if (!name || !AC_isUserId(row[3]) || !/^\d{4,6}$/.test(code)) continue;
+    if (map[name] && (map[name].userId !== row[3] || map[name].code !== code)) dup[name] = true;
+    map[name] = { code: code, userId: row[3] };
+  }
+  Object.keys(dup).forEach(function (n) { delete map[n]; });
+  return map;
+}
+
+function AC_loadRegistry_() {
+  return AC_buildRegistry(AC_registrySheet_().getDataRange().getValues());
+}
+
+/** 登録表のスプレッドシート（管理シートとは別ファイル）。無ければ作成する。 */
+function AC_registrySheet_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('REGISTRY_SPREADSHEET_ID');
+  var ss;
+  if (id) {
+    ss = SpreadsheetApp.openById(id);
+  } else {
+    ss = SpreadsheetApp.create('アルコールチェック LINE登録表');
+    props.setProperty('REGISTRY_SPREADSHEET_ID', ss.getId());
+  }
+  var sheet = ss.getSheets()[0];
+  if (sheet.getLastRow() === 0) {
+    sheet.setName('LINE登録');
+    sheet.appendRow(AC_REG_HEADER);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, AC_REG_HEADER.length).setFontWeight('bold');
+  }
+  return sheet;
+}
+
+/** 手動実行用：登録表を作成し、URLを実行ログに出す */
+function alcoholCheckSetupRegistry() {
+  var sheet = AC_registrySheet_();
+  Logger.log('登録表：%s', sheet.getParent().getUrl());
+}
+
+function AC_fetchDisplayName_(userId) {
   var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!token) return null;
-  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + gid + '/summary', {
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/profile/' + userId, {
     headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true,
   });
-  return res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).groupName : null;
+  return res.getResponseCode() === 200 ? JSON.parse(res.getContentText()).displayName : null;
 }
 
-/** 純粋関数：{ 'group:Cxxx': 'グループ名' } から、グループ名の「｜社員番号」が一致するgroupIdを返す。0件・複数件はnull。 */
-function AC_findGroupByCode(entries, code) {
-  if (!/^\d+$/.test(String(code))) return null;
-  var re = new RegExp('[｜|]\\s*' + code + '(?!\\d)');
-  var hits = Object.keys(entries).filter(function (k) {
-    return k.indexOf('group:') === 0 && AC_isGroupId(k.slice(6)) && re.test(entries[k]);
+function AC_reply_(replyToken, text) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+  if (!token || !replyToken) return;
+  UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
+    method: 'post', contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ replyToken: replyToken, messages: [{ type: 'text', text: text }] }),
+    muteHttpExceptions: true,
   });
-  return hits.length === 1 ? hits[0].slice(6) : null;
-}
-
-/** 手動確認用：記録済みのグループ数だけを表示する */
-function alcoholCheckListGroups() {
-  var all = PropertiesService.getScriptProperties().getProperties();
-  var n = Object.keys(all).filter(function (k) { return k.indexOf('group:') === 0; }).length;
-  Logger.log('記録済みグループ：%s件', n);
-}
-
-/** 手動確認用：TEST_GROUP_EMPLOYEE_CODE のグループへテストメッセージを1通送る（メンバー人数分の通数を消費） */
-function alcoholCheckSendTestToGroup() {
-  var props = PropertiesService.getScriptProperties();
-  var code = props.getProperty('TEST_GROUP_EMPLOYEE_CODE');
-  var gid = AC_findGroupByCode(props.getProperties(), code);
-  if (!gid) throw AC_error_('社員番号に一致するグループが1件に定まりません（未記録または重複）');
-  AC_pushTo_(gid, '【テスト】アルコールチェック通知の接続確認です。（送信テスト）');
-  Logger.log('送信しました');
 }
 
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
   module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
-    AC_findGroupByCode: AC_findGroupByCode, AC_isGroupId: AC_isGroupId };
+    AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry,
+    AC_planNotifications: AC_planNotifications, AC_buildPersonalMessage: AC_buildPersonalMessage };
 }

@@ -6,17 +6,47 @@ import vm from 'node:vm';
 // Apps Scriptのファイルを読み込み、純粋関数だけをテストする（架空データのみ）
 const ctx = { module: { exports: {} } };
 vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.url), 'utf8'), ctx);
-const { AC_reconcile, AC_buildMessage, AC_findGroupByCode } = ctx.module.exports;
+const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
+  AC_planNotifications, AC_buildPersonalMessage } = ctx.module.exports;
 
-test('GAS: グループ名の社員番号で1件だけ一致したgroupIdを返す（架空データ）', () => {
-  const g = n => 'group:C' + String(n).repeat(32).slice(0, 32);
-  const entries = { [g(1)]: '試験 太郎｜10033(5)', [g(2)]: '試験 花子｜100331(5)', [g(3)]: '試験 次郎|20001', 'DRY_RUN': 'true' };
-  assert.equal(AC_findGroupByCode(entries, '10033'), g(1).slice(6));
-  assert.equal(AC_findGroupByCode(entries, '20001'), g(3).slice(6));
-  assert.equal(AC_findGroupByCode(entries, '99999'), null);
-  assert.equal(AC_findGroupByCode({ ...entries, [g(4)]: '別人｜10033' }, '10033'), null);  // 重複は送らない
-  assert.equal(AC_findGroupByCode(entries, '.*'), null);
-  assert.equal(AC_findGroupByCode({ 'group:not-an-id': '試験｜10033' }, '10033'), null);
+const uid = n => 'U' + String(n).repeat(32).slice(0, 32);   // 架空のLINEユーザーID
+
+test('GAS: 社員番号だけのメッセージを受け付ける（全角数字可、それ以外は無視）', () => {
+  assert.equal(AC_parseEmployeeCode('10033'), '10033');
+  assert.equal(AC_parseEmployeeCode(' １００３３ '), '10033');
+  for (const t of ['おはようございます', '10033です', '123', '1234567', '', null]) {
+    assert.equal(AC_parseEmployeeCode(t), null);
+  }
+});
+
+test('GAS: 登録表は確認済みの行だけ使い、同じ氏名の別登録は使わない', () => {
+  const header = ['登録日時', '社員番号', '表示名', 'ID', '氏名', '確認済み'];
+  const reg = AC_buildRegistry([header,
+    [null, "'90001", 'a', uid(1), '試験 太郎', true],
+    [null, '90002', 'b', uid(2), '試験 花子', false],          // 未確認
+    [null, '90003', 'c', 'not-an-id', '試験 次郎', true],      // 不正なID
+    [null, '90004', 'd', uid(4), '試験 三郎', true],
+    [null, '90005', 'e', uid(5), '試験　三郎', true],          // 同じ氏名に別登録 → 使わない
+  ]);
+  assert.deepEqual(Object.keys(reg), ['試験太郎']);
+  assert.deepEqual({ ...reg['試験太郎'] }, { code: '90001', userId: uid(1) });
+});
+
+test('GAS: 未実施者を本人通知と未登録に分け、管理者一覧に表示する', () => {
+  const reg = { '試験太郎': { code: '90001', userId: uid(1) } };
+  const plan = AC_planNotifications(['試験 太郎', '試験 花子'], reg);
+  assert.deepEqual([...plan.send.map(p => p.code)], ['90001']);
+  assert.deepEqual([...plan.unregistered], ['試験 花子']);
+  const msg = AC_buildMessage('2026-10-08', '出勤前', { targets: ['a', 'b', 'c'], missing: ['試験 太郎', '試験 花子'] }, plan, []);
+  assert.match(msg, /・試験 太郎（本人に通知）/);
+  assert.match(msg, /・試験 花子（LINE未登録）/);
+  assert.match(AC_buildMessage('2026-10-08', '出勤前', { targets: ['a'], missing: ['試験 太郎'] }, plan, ['試験 太郎']), /本人通知に失敗/);
+});
+
+test('GAS: 本人向け文面に日付と区分を入れ、他人の情報を含めない', () => {
+  const m = AC_buildPersonalMessage('2026-10-08', '出勤前');
+  assert.match(m, /本日（10\/8）の出勤前/);
+  assert.doesNotMatch(m, /試験/);
 });
 
 const d = s => new Date(`${s}T00:00:00+09:00`);

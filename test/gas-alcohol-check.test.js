@@ -151,3 +151,19 @@ test('GAS: 名簿の取り込み（架空データ）：氏名が1人だけ一�
   assert.equal(plan.appends[0][9], false);          // 追加した人はアルコールチェック対象外
   assert.equal(AC_nameKey('山田 太郎（旧姓）'), '山田太郎');
 });
+
+test('GAS: 名簿内で別の人に同じ社員番号がある場合は取り込まない（架空データ）', () => {
+  const master = [MASTER_HEADER, mrow('', '試験 太郎'), mrow('', '試験 次郎')];
+  const roster = [
+    { code: 90001, name: '試験 太郎', dept: 'A' },
+    { code: 90001, name: '試験 花子', dept: 'B' },     // 番号重複
+    { code: 90002, name: '試験 次郎', dept: 'C' },
+    { code: 90003, name: '試験 次郎', dept: 'D' },     // 同名
+  ];
+  const plan = AC_mergeRoster(master, roster);
+  assert.equal(plan.dupCodes, 1);
+  assert.equal(plan.updates.length, 0);
+  assert.equal(plan.ambiguous, 1);                      // 次郎は同名2人
+  assert.equal(plan.notFound, 1);                       // 太郎は重複番号のみ → 名簿に無い扱い
+  assert.deepEqual([...plan.appends.map(r => r[0])].sort(), ["'90002", "'90003"]);
+});

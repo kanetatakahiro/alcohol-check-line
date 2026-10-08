@@ -491,19 +491,27 @@ function AC_nameKey(name) {
  *  - 社員番号が空のマスタ行 → 名簿で氏名キーが1人だけ一致すれば社員番号等を入れ、備考に「要確認」を付ける
  *  - どのマスタ行にも当たらない名簿の人 → 新しい行（アルコールチェック対象はオフ）
  * 氏名が名簿で複数人に当たる・見つからないマスタ行は変更せず、件数を返す。
+ * 名簿内で別の人に同じ社員番号が付いている場合、その番号は取り込まない（誤った紐付け防止）。
  */
 function AC_mergeRoster(masterValues, roster) {
   var C = AC_COL, width = AC_MASTER_HEADER.length;
   var rows = (masterValues || []).slice(1).map(function (r) {
     var x = r.slice(0, width); while (x.length < width) x.push(''); return x;
   });
-  var byCode = {}, byKey = {};
+  var byCode = {}, byKey = {}, count = {};
   roster.forEach(function (p) {
     p.code = AC_cellCode_(p.code);
-    if (!/^\d{4,6}$/.test(p.code)) return;
+    if (/^\d{4,6}$/.test(p.code)) count[p.code] = (count[p.code] || 0) + 1;
+  });
+  var dupCodes = Object.keys(count).filter(function (c) { return count[c] > 1; });
+  roster.forEach(function (p) {
+    if (!count[p.code] || count[p.code] > 1) return;                  // 不正・重複した社員番号は使わない
     byCode[p.code] = p;
     var k = AC_nameKey(p.name);
     if (k) (byKey[k] = byKey[k] || []).push(p);
+  });
+  roster.forEach(function (p) {                                        // 重複番号の人も氏名の一意性判定には数える
+    if (count[p.code] > 1) { var k = AC_nameKey(p.name); if (k) (byKey[k] = byKey[k] || []).push(null); }
   });
   var used = {}, updates = [], ambiguous = 0, notFound = 0;
   rows.forEach(function (r, i) {
@@ -512,7 +520,7 @@ function AC_mergeRoster(masterValues, roster) {
       p = byCode[code];
     } else {
       var hits = byKey[AC_nameKey(r[C.name])] || [];
-      if (hits.length === 1) { p = hits[0]; note = '名簿と氏名で照合（要確認）'; }
+      if (hits.length === 1 && hits[0]) { p = hits[0]; note = '名簿と氏名で照合（要確認）'; }
       else if (hits.length > 1) ambiguous++;
       else notFound++;
     }
@@ -536,7 +544,7 @@ function AC_mergeRoster(masterValues, roster) {
     nr[C.lineOk] = false; nr[C.alcohol] = false;
     return nr;
   });
-  return { updates: updates, appends: appends, ambiguous: ambiguous, notFound: notFound };
+  return { updates: updates, appends: appends, ambiguous: ambiguous, notFound: notFound, dupCodes: dupCodes.length };
 }
 
 /** 名簿データを従業員マスタへ取り込む（一時的な取り込み用ファイルから呼ぶ） */
@@ -551,8 +559,8 @@ function AC_importRoster_(roster) {
     sheet.getRange(start, 1, plan.appends.length, width).setValues(plan.appends);
     AC_checkboxes_(sheet, start, plan.appends.length);
   }
-  Logger.log('名簿取り込み：更新 %s行／追加 %s人／氏名が複数一致 %s行／名簿に無い %s行',
-    plan.updates.length, plan.appends.length, plan.ambiguous, plan.notFound);
+  Logger.log('名簿取り込み：更新 %s行／追加 %s人／氏名が複数一致・番号重複 %s行／名簿に無い %s行／名簿内の重複番号 %s件（取り込まず）',
+    plan.updates.length, plan.appends.length, plan.ambiguous, plan.notFound, plan.dupCodes);
 }
 
 /** 純粋関数：シフト表（2026-2028）のB列から、「シフト」行の氏名を重複なしで返す（数字だけの空き枠は除く）。 */

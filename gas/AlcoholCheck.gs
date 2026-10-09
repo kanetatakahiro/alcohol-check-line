@@ -8,7 +8,7 @@
  *  - 20:00 退勤前の入力が確認できない人へ：入力のお願い／連続記録の節目（5・10・20…日）の人へ感謝
  *  - 出勤者：シート「2026-2028」のシフト行が当日「出勤」の人。入力確認：「フォームの回答 1」の当日・区分の回答
  *  - 宛先：従業員マスタでLINE登録・確認済みの本人（1対1）。従業員は公式LINEに社員番号を送って登録する（doPost）
- *  - 測定結果が「通常」（NORMAL_RESULTS）以外の回答は、管理者へ至急の確認依頼を送る
+ *  - 測定結果が 0.14mg/L 以下と読めない回答は、管理者へ至急の確認依頼を送る（10分ごとに確認）
  *
  * 安全策：
  *  - 管理シートへの書き込みは一切しない（読み取りのみ）
@@ -24,7 +24,9 @@
  *  NOTIFY_ADMIN               "false" にすると管理者一覧を送らない
  *  EMPLOYEE_MASTER_ID         従業員マスタのID（alcoholCheckSetupMaster で自動設定）
  *  TEST_CODES / TEST_UNTIL     テストモード：指定した社員番号の本人宛て通知を管理者へ送る（期限まで）
- *  NORMAL_RESULTS             「通常」とみなす測定結果（カンマ区切り）。未設定なら検知通知は動かない
+ *  ALERT_THRESHOLD            これを超える測定結果（mg/L）を管理者へ至急知らせる（既定 0.14。10分ごとに確認）
+ *  NORMAL_RESULTS             上記に加えて「正常」とみなす測定結果（カンマ区切り、任意）
+ *  REQUIRE_DEVICE             "true" のとき、「アルコールチェッカー在庫」の機器所持にチェックがある人だけに本人通知する
  *
  * 会社アカウント（シート編集者）が所有する独立プロジェクト「アルコールチェック通知（暫定版）」で動かす。
  * 既存のApps Scriptとの衝突を避けるため、関数名・定数名には AC_ / alcoholCheck を付けている。
@@ -34,6 +36,7 @@
 var AC_SPREADSHEET_ID = '1YeYjc_-O2B1JlVtUpVFWGlM3ahW8dED1JFuQ4ttym5Q';
 var AC_SHEET_SCHEDULE = '2026-2028';
 var AC_SHEET_FORM = 'フォームの回答 1';
+var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 
@@ -90,7 +93,7 @@ function alcoholCheckAfterWork() { AC_dispatch_('followAfter'); }
 
 /** 定期実行の登録（このプロジェクトの通知用トリガーを消してから登録し直す） */
 function alcoholCheckSetupTriggers() {
-  var names = AC_SCHEDULE.map(function (s) { return s.fn; });
+  var names = AC_SCHEDULE.map(function (s) { return s.fn; }).concat(['alcoholCheckAlerts']);
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (names.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
@@ -98,6 +101,23 @@ function alcoholCheckSetupTriggers() {
     ScriptApp.newTrigger(s.fn).timeBased().everyDays(1).atHour(s.hour).nearMinute(s.minute)
       .inTimezone(AC_TZ).create();
   });
+  // 飲酒検知の確認は10分ごと（回答から最大10分程度で管理者へ届く）
+  ScriptApp.newTrigger('alcoholCheckAlerts').timeBased().everyMinutes(10).create();
+}
+
+/** 手動確認用：今日、本人へ送れる人数（登録・確認済み、機器所持の絞り込み後）をログに出す（氏名は出さない） */
+function alcoholCheckRegistryStatus() {
+  var props = PropertiesService.getScriptProperties();
+  var all = AC_buildRegistry(AC_masterSheet_().getDataRange().getValues(), AC_today_());
+  var codes = function (r) { var s = {}; Object.keys(r).forEach(function (k) { s[r[k].code] = true; }); return Object.keys(s); };
+  var sh = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_DEVICES);
+  var dev = sh ? AC_deviceCodes(sh.getDataRange().getValues()) : null;
+  var d = AC_loadDay_(AC_today_());
+  var reg = AC_loadRegistry_();
+  var working = d.before.targets.filter(function (n) { return reg[AC_normalizeName(n)]; }).length;
+  Logger.log('登録・確認済み %s人／機器所持 %s人／送信対象（絞り込み後）%s人 %s／本日出勤の送信対象 %s人／REQUIRE_DEVICE=%s',
+    codes(all).length, dev ? Object.keys(dev).length : '読めず', codes(reg).length, JSON.stringify(codes(reg)),
+    working, props.getProperty('REQUIRE_DEVICE'));
 }
 
 /** LINE送信の確認用：管理者へテストメッセージを1通送る（DRY_RUNに関係なく送る） */
@@ -318,16 +338,29 @@ function AC_namesForCode(masterValues, code) {
   return [];
 }
 
+/** 10分ごと：当日の回答に要確認の測定結果がないかを見て、管理者へ知らせる */
+function alcoholCheckAlerts() {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    AC_checkAlerts_(props, AC_loadDay_(AC_today_()), props.getProperty('DRY_RUN') !== 'false');
+  } catch (e) {
+    Logger.log('検知確認の失敗：%s', e && e.message ? e.message : e);
+  } finally { lock.releaseLock(); }
+}
+
 /**
  * アルコール検知の可能性がある回答を管理者へ知らせる（本人通知とは別）。
- * NORMAL_RESULTS（「通常」とみなす測定結果の値、カンマ区切り）が設定されている場合だけ動く。
- * それ以外の測定結果の当日の回答を、1件につき1回だけ知らせる。
+ * 測定結果が ALERT_THRESHOLD（mg/L、既定 0.14）以下と読めない当日の回答を、1件につき1回だけ知らせる。
+ * NORMAL_RESULTS（カンマ区切り）に書いた値は、そのまま正常として扱う。
  */
 function AC_checkAlerts_(props, d, dryRun) {
   var normal = String(props.getProperty('NORMAL_RESULTS') || '').split(',')
     .map(function (s) { return s.trim(); }).filter(Boolean);
-  if (!normal.length) return;
-  var hits = AC_findAlerts(d, normal);
+  var th = parseFloat(props.getProperty('ALERT_THRESHOLD') || '0.14');
+  if (isNaN(th)) th = 0.14;
+  var hits = AC_findAlerts(d, normal, th);
   hits.forEach(function (h) {
     var key = 'sent:' + d.today + ':alert:' + h.row;
     if (props.getProperty(key)) return;
@@ -340,14 +373,31 @@ function AC_checkAlerts_(props, d, dryRun) {
   });
 }
 
-/** 純粋関数：当日の回答のうち、測定結果が「通常」の値以外のもの */
-function AC_findAlerts(d, normal) {
+/**
+ * 純粋関数：測定結果が正常（しきい値以下）と読めるか。
+ * 「0.14mg/L以下」「0.00」「0.05mg/L」などは正常。「0.15mg/L以上」、しきい値を超える数値、
+ * 数値が読めない回答は正常としない（管理者が確認する）。
+ */
+function AC_isNormalResult(result, threshold) {
+  var s = String(result == null ? '' : result).replace(/[０-９．]/g, function (c) {
+    return c === '．' ? '.' : String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
+  }).replace(/\s/g, '');
+  var m = /(\d+(?:\.\d+)?)/.exec(s);
+  if (!m) return false;
+  var n = parseFloat(m[1]);
+  if (/以上|超/.test(s)) return false;
+  return n <= threshold + 1e-9;
+}
+
+/** 純粋関数：当日の回答のうち、測定結果が正常と読めないもの */
+function AC_findAlerts(d, normal, threshold) {
   var out = [];
+  if (threshold == null) threshold = 0.14;
   for (var i = 1; i < d.fv.length; i++) {
     var row = d.fv[i];
     if (d.toDate(row[0]) !== d.today) continue;
     var result = String(row[3] == null ? '' : row[3]).trim();
-    if (!result || normal.indexOf(result) !== -1) continue;
+    if (!result || (normal || []).indexOf(result) !== -1 || AC_isNormalResult(result, threshold)) continue;
     out.push({ row: i + 1, name: String(row[1]).trim(), label: String(row[2]).trim(), result: result, at: row[0] });
   }
   return out;
@@ -746,7 +796,42 @@ function AC_buildRegistry(values, today) {
 }
 
 function AC_loadRegistry_() {
-  return AC_buildRegistry(AC_masterSheet_().getDataRange().getValues(), AC_today_());
+  var reg = AC_buildRegistry(AC_masterSheet_().getDataRange().getValues(), AC_today_());
+  if (PropertiesService.getScriptProperties().getProperty('REQUIRE_DEVICE') !== 'true') return reg;
+  // 機器所持にチェックがある人だけに絞る。在庫シートが読めないときは誰にも送らない（安全側）
+  var devices;
+  try {
+    var sh = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_DEVICES);
+    devices = sh ? AC_deviceCodes(sh.getDataRange().getValues()) : null;
+  } catch (e) { devices = null; }
+  if (!devices) { Logger.log('機器所持の確認ができないため、本人通知を止めました'); return {}; }
+  return AC_filterRegistryByCodes(reg, devices);
+}
+
+/**
+ * 純粋関数：「アルコールチェッカー在庫」から、機器所持にチェックがある社員番号の集合を返す。
+ * 見出し行（「従業員コード」と「機器所持」を含む行）を探す。見つからなければ null。
+ */
+function AC_deviceCodes(values) {
+  for (var r = 0; r < (values || []).length; r++) {
+    var row = values[r].map(function (v) { return String(v == null ? '' : v).trim(); });
+    var cc = row.indexOf('従業員コード'), dc = row.indexOf('機器所持');
+    if (cc === -1 || dc === -1) continue;
+    var out = {};
+    for (var i = r + 1; i < values.length; i++) {
+      var code = AC_cellCode_(values[i][cc]);
+      if (values[i][dc] === true && /^\d{4,6}$/.test(code)) out[code] = true;
+    }
+    return out;
+  }
+  return null;
+}
+
+/** 純粋関数：登録簿のうち、社員番号が codes に含まれる人だけを残す */
+function AC_filterRegistryByCodes(reg, codes) {
+  var out = {};
+  Object.keys(reg).forEach(function (k) { if (codes[reg[k].code]) out[k] = reg[k]; });
+  return out;
 }
 
 /** 従業員マスタ（管理シートとは別ファイル）。無ければ作成する。 */
@@ -1042,5 +1127,6 @@ if (typeof module !== 'undefined') {
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
-    AC_notTargetReason: AC_notTargetReason };
+    AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes };
 }

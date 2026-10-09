@@ -9,7 +9,8 @@ vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.ur
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_planNotifications, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_namesForCode,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
-  AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason } = ctx.module.exports;
+  AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
+  AC_filterRegistryByCodes } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -303,4 +304,25 @@ test('GAS: 測定結果が「通常」の値以外の当日回答を拾う', () 
   const hits = AC_findAlerts(d, ['0.14mg/L以下']);
   assert.equal(hits.length, 1);
   assert.equal(hits[0].row, 3);
+});
+
+test('GAS: 0.14mg/L以下は正常、それを超える・読めない結果は要確認', () => {
+  for (const s of ['0.14mg/L以下', '0.00', '0.05mg/L', '０．１４', '0.14']) assert.equal(AC_isNormalResult(s, 0.14), true, s);
+  for (const s of ['0.15mg/L以上', '0.15', '0.2mg/L', '検知', '要確認', '0.14mg/L超']) assert.equal(AC_isNormalResult(s, 0.14), false, s);
+  const sv = shiftSheet([['試験 太郎', Array(6).fill('出勤')]]);
+  const fv = [['ts', '氏名', '区分', '結果'], [ts2('2026-10-06', '08:00'), '試験 太郎', '出勤前', '0.14mg/L以下'],
+    [ts2('2026-10-06', '09:00'), '試験 太郎', '退勤前', '0.25'], [ts2('2026-10-05', '09:00'), '試験 太郎', '出勤前', '0.25']];
+  const d = AC_buildDay({ today: '2026-10-06', sv, fv, toDate: toDate2 });
+  const hits = AC_findAlerts(d, [], 0.14);
+  assert.deepEqual([...hits.map(h => h.row)], [3]);
+});
+
+test('GAS: 機器所持にチェックがある社員番号だけに絞る（架空データ）', () => {
+  const inv = [[], ['', '従業員コード', '使用者', '備考', 'LINE追加', '機器郵送先', '機器所持'],
+    ['', 90001, '試験 太郎', '', true, '', true], ['', '90002', '試験 花子', '', true, '', false], ['', '', '', '', '', '', true]];
+  const codes = AC_deviceCodes(inv);
+  assert.deepEqual(Object.keys(codes), ['90001']);
+  assert.equal(AC_deviceCodes([['a', 'b']]), null);
+  const reg = { '試験太郎': { code: '90001', userId: 'U1' }, '試験花子': { code: '90002', userId: 'U2' } };
+  assert.deepEqual(Object.keys(AC_filterRegistryByCodes(reg, codes)), ['試験太郎']);
 });

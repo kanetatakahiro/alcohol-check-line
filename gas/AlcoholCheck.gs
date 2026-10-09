@@ -110,7 +110,7 @@ function alcoholCheckRegistryStatus() {
   var props = PropertiesService.getScriptProperties();
   var all = AC_buildRegistry(AC_masterSheet_().getDataRange().getValues(), AC_today_());
   var codes = function (r) { var s = {}; Object.keys(r).forEach(function (k) { s[r[k].code] = true; }); return Object.keys(s); };
-  var sh = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_DEVICES);
+  var sh = AC_deviceSheet_();
   var dev = sh ? AC_deviceCodes(sh.getDataRange().getValues()) : null;
   var d = AC_loadDay_(AC_today_());
   var reg = AC_loadRegistry_();
@@ -801,11 +801,20 @@ function AC_loadRegistry_() {
   // 機器所持にチェックがある人だけに絞る。在庫シートが読めないときは誰にも送らない（安全側）
   var devices;
   try {
-    var sh = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_DEVICES);
+    var sh = AC_deviceSheet_();
     devices = sh ? AC_deviceCodes(sh.getDataRange().getValues()) : null;
   } catch (e) { devices = null; }
   if (!devices) { Logger.log('機器所持の確認ができないため、本人通知を止めました'); return {}; }
   return AC_filterRegistryByCodes(reg, devices);
+}
+
+/** 「アルコールチェッカー在庫」シート。表記ゆれ（例：チャッカー）に備え、「在庫」を含む唯一のシートも許す */
+function AC_deviceSheet_() {
+  var ss = SpreadsheetApp.openById(AC_SPREADSHEET_ID);
+  var sh = ss.getSheetByName(AC_SHEET_DEVICES);
+  if (sh) return sh;
+  var c = ss.getSheets().filter(function (x) { return /アルコール.*在庫/.test(x.getName()); });
+  return c.length === 1 ? c[0] : null;
 }
 
 /**

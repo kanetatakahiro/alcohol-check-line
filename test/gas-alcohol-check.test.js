@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -502,4 +502,12 @@ test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の�
   assert.match(out, /遅くまでお疲れ様です！本当にありがとうございます！/);
   assert.match(out, /申請/);
   assert.match(AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {}), /申請をお願いいたします[\s\S]*ありがとうございます/);
+});
+
+test('GAS: LINE送信数のお知らせは80・95・100％の段階で、上限なしなら知らせない', () => {
+  assert.equal(AC_quotaLevel(5000, 3999), 0);
+  assert.equal(AC_quotaLevel(5000, 4000), 80);
+  assert.equal(AC_quotaLevel(5000, 4750), 95);
+  assert.equal(AC_quotaLevel(5000, 5000), 100);
+  assert.equal(AC_quotaLevel(0, 9999), 0);
 });

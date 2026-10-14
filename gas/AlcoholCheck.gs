@@ -604,6 +604,41 @@ function AC_checkTotSync_(props, today) {
     + 'さくらのVPSが止まっていないか、コントロールパネルで「稼働中」になっているか確認してください。');
 }
 
+/**
+ * 純粋関数：LINEの今月の送信数が上限のどこまで来たか（80・95・100％の段階、まだなら0）。
+ * 上限なし（limit が無い）のときは0。
+ */
+function AC_quotaLevel(limit, used) {
+  if (!(limit > 0)) return 0;
+  var r = used / limit;
+  return r >= 1 ? 100 : r >= 0.95 ? 95 : r >= 0.8 ? 80 : 0;
+}
+
+/** 朝の案内のとき：LINEの今月の送信数を確認し、80・95・100％に達したら管理者へ1回ずつ知らせる（読み取りのみ・無料） */
+function AC_checkLineQuota_(today) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+  if (!token) return;
+  var get = function (path) {
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/' + path, {
+      headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw AC_error_('LINE送信数の確認失敗 HTTP ' + res.getResponseCode());
+    return JSON.parse(res.getContentText());
+  };
+  var q = get('quota'), c = get('quota/consumption');
+  var limit = q.type === 'limited' ? Number(q.value) : 0, used = Number(c.totalUsage) || 0;
+  var level = AC_quotaLevel(limit, used);
+  Logger.log('LINE送信数 %s / %s', used, limit || '上限なし');
+  if (!level) return;
+  var state = AC_state_(), key = 'quota:' + today.slice(0, 7) + ':' + level;
+  if (state.getProperty(key)) return;
+  var msg = level >= 100
+    ? '【LINE送信数のお知らせ】今月のLINEの送信数が上限（' + limit + '通）に達しました🙇‍♀️\n今月はこれ以上お知らせが送れない状態です。LINE公式アカウントの管理画面で、プランの見直しをご検討ください。'
+    : '【LINE送信数のお知らせ】今月のLINEの送信数が上限の' + level + '％に達しました（' + used + '／' + limit + '通）。\n'
+      + '上限に達するとその月はお知らせが送れなくなりますので、必要に応じてプランの見直しをご検討ください。いつもありがとうございます！';
+  AC_pushLine_(msg);
+  state.setProperty(key, new Date().toISOString());
+}
+
 // ---------------- 内部処理 ----------------
 
 /** 1回分の通知を実行する。同じ日・同じ種類は1回だけ。データ不備のときは誰にも送らず管理者へ知らせる。 */
@@ -634,6 +669,7 @@ function AC_dispatch_(kind) {
   var infection = AC_infection_(today);   // 継続記録の感謝など天気以外の通知で使う
   var overrides = AC_templateOverrides_();
   if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
+  if (kind === 'morning' && !dryRun) { try { AC_checkLineQuota_(today); } catch (e) { Logger.log('LINE送信数の確認に失敗'); } }
   var people = AC_recipientsFor(kind, d);
   var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
   state.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
@@ -1842,5 +1878,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_todayStatusMessage: AC_todayStatusMessage };
 }

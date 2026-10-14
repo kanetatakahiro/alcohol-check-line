@@ -286,8 +286,11 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
     else if (shift === current) result = '一致';
     else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift }); }
     counts[result]++;
+    if (result === 'シフト表に無い') return;   // シフト表（運転する人）に載っていない人は件数だけ数える
     rows.push([it.date, who.code, who.name, it.pattern, shift || '', current === null ? '' : current, result]);
   });
+  var order = { 違い: 0, 要確認: 1, マスタに無い: 2, 未設定: 3, 一致: 4 };
+  rows.sort(function (a, b) { return (order[a[6]] - order[b[6]]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0); });
   return { rows: rows, updates: updates, counts: counts };
 }
 

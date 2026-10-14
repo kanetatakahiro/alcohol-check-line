@@ -342,7 +342,8 @@ test('GAS: TOTのCSVをマスタのTOTコードで結び、シフト表と比べ
   const items = AC_parseTotCsv(csv);
   assert.equal(items.length, 7);
   const r = AC_buildTotCompare(items, master, sv, toDate2);
-  assert.deepEqual([...r.rows.map(x => x[6])], ['一致', '一致', '違い', '未設定', '要確認', 'マスタに無い', 'シフト表に無い']);
+  assert.deepEqual([...r.rows.map(x => x[6])], ['違い', '要確認', 'マスタに無い', '未設定', '一致', '一致']);
+  assert.equal(r.counts['シフト表に無い'], 1);
   assert.deepEqual(JSON.parse(JSON.stringify(r.updates)), [{ row: 2, col: 5, date: '2026-10-03', value: '公休' }]);
   assert.throws(() => AC_parseTotCsv([['a', 'b']]), /列/);
 });

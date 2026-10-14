@@ -311,7 +311,10 @@ function AC_handleTotRaw_(body) {
   state.setProperty('tot:lastRelay', AC_today_());
   var summary = AC_totShape(body.results);
   Logger.log('TOT受信 %s', JSON.stringify(summary));
-  var failed = Object.keys(body.results).filter(function (k) { return body.results[k] && body.results[k]._error; });
+  var failed = Object.keys(body.results).filter(function (k) {
+    var v = body.results[k];
+    return v && (v._error || (Array.isArray(v) && v.some(function (x) { return x && x._error; })));
+  });
   if (failed.length) AC_adminNotice_('totfetch', '【エラー】TOTから一部のデータを読み取れませんでした🙇‍♀️\n対象：' + failed.join('、')
     + '\nTOTのトークンの権限・許可IP（133.167.110.249）が変わっていないか確認してください。');
   try { AC_processTotRaw_(body); } catch (e) {
@@ -452,6 +455,68 @@ function AC_processTotRaw_(body) {
     rs.setFrozenRows(1);
     if (rows.length) rs.getRange(2, 1, rows.length, AC_ATT_HEADER.length).setValues(rows);
   }
+  // 4. 管理者向けの見守り（朝の取り込みのとき）：36協定・未承認の申請・有給の年5日（月曜）
+  if (Array.isArray(R.employees) && body.mode !== 'night') {
+    try { AC_adminAttendanceChecks_(R, mv, ss, today, props); } catch (e) { Logger.log('見守りの処理に失敗：%s', e && e.message); }
+  }
+}
+
+/** 管理者向け：36協定の見守り、承認待ちの申請、有給の年5日。結果は従業員マスタのシートと管理者のLINEへ */
+function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
+  var names = AC_namesByTot_(mv, R.employees);
+  var nm = function (tot) { return names[AC_totKey(tot)] || 'TOTコード' + tot; };
+  var state = AC_state_(), month = today.slice(0, 7);
+  var writeSheet = function (name, header, rows) {
+    var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+    sh.clearContents();
+    sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    if (rows.length) sh.getRange(2, 1, rows.length, header.length).setValues(rows);
+  };
+  // 36協定
+  if (Array.isArray(R.monthlies) && R.monthlies.some(function (w) { return w && !w._error; })) {
+    var startMonth = Number(props.getProperty('AGREEMENT_START_MONTH')) || 4;
+    var byTot = AC_monthlyByTot(R.employees, R.monthlies), rows = [], fresh = [];
+    Object.keys(byTot).forEach(function (tot) {
+      var f = AC_agreementFigures(byTot[tot], startMonth, month);
+      var issues = AC_agreementCheck(byTot[tot], startMonth, month);
+      rows.push([tot, nm(tot), f.monthOt, f.monthTotal, f.avg + '（' + f.avgN + 'か月）', f.yearOt, f.over45,
+        issues.map(function (x) { return (x.level === 'over' ? '【超過】' : '【注意】') + x.text; }).join('\n')]);
+      issues.forEach(function (x) {
+        var k = 'agr:' + month + ':' + AC_totKey(tot) + ':' + x.kind + ':' + x.level;
+        if (state.getProperty(k)) return;
+        state.setProperty(k, today);
+        fresh.push((x.level === 'over' ? '🔴' : '🟡') + nm(tot) + 'さん：' + x.text);
+      });
+    });
+    rows.sort(function (a, b) { return b[3] - a[3]; });
+    writeSheet('36協定', ['TOTコード', '氏名', '今月の時間外(h)', '今月の時間外＋休日(h)', '2〜6か月平均の最大(h)', '協定年度の時間外(h)', '45h超の月数', '注意・超過'], rows);
+    if (fresh.length) AC_pushLine_(('【36協定の見守り】上限に近づいている方がいます。業務量の調整をご検討ください🙇‍♀️\n（協定年度は' + startMonth + '月始まりで計算）\n\n'
+      + fresh.join('\n') + '\n\n詳しくは従業員マスタの「36協定」シートをご覧ください。いつもありがとうございます！').slice(0, 4900));
+  }
+  // 承認待ちの申請
+  if (Array.isArray(R.requests)) {
+    var pend = AC_pendingRequests(R.employees, R.requests);
+    if (pend.length) {
+      AC_adminNotice_('requests', ('【承認待ちの申請】TOTで承認待ちの申請が' + pend.length + '件あります。お手すきの際にご確認をお願いします😊\n\n'
+        + pend.slice(0, 20).map(function (p) { return '・' + nm(p.tot) + 'さん　' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
+        + (pend.length > 20 ? '\n…ほか' + (pend.length - 20) + '件' : '') + '\n\nいつもありがとうございます！').slice(0, 4900));
+    }
+  }
+  // 有給の年5日（月曜の朝だけデータが届く）
+  if (Array.isArray(R.paidLeaves) && !R.paidLeaves.some(function (l) { return l && l._error; })) {
+    var st = AC_paidLeaveStatus(R.employees, R.paidLeaves, today), prow = [], alert = [];
+    st.forEach(function (x) {
+      var c = x.check;
+      prow.push([x.tot, nm(x.tot), x.period.start, x.period.end, x.used, Math.max(0, 5 - x.used),
+        c ? (c.level === 'over' ? '【急ぎ】' : '【注意】') + '残り' + c.daysLeft + '日であと' + c.need + '日' : (x.used >= 5 ? '達成' : '')]);
+      if (c) alert.push((c.level === 'over' ? '🔴' : '🟡') + nm(x.tot) + 'さん：あと' + c.need + '日（期限 ' + x.period.end + '、残り' + c.daysLeft + '日）');
+    });
+    prow.sort(function (a, b) { return a[3] < b[3] ? -1 : a[3] > b[3] ? 1 : 0; });
+    writeSheet('有給5日', ['TOTコード', '氏名', '基準期間の開始', '期限', '取得日数', 'あと何日', '状況'], prow);
+    if (alert.length) AC_adminNotice_('paidleave', ('【有給の年5日】期限までに5日の取得が必要な方がいます。取得日の調整をお願いします🙇‍♀️\n\n'
+      + alert.join('\n') + '\n\n詳しくは従業員マスタの「有給5日」シートをご覧ください。いつもありがとうございます！').slice(0, 4900));
+  }
 }
 
 /** 純粋関数：TOTコード → 氏名（マスタ優先、無ければTOTの氏名） */
@@ -482,16 +547,10 @@ function AC_addMonths(ym, n) {
  *  ・協定年度の時間外：720時間以内（600時間で注意）
  *  ・月45時間を超えた月の回数：年6回まで（5回で注意、今月が7回目なら超過）
  */
-function AC_agreementCheck(months, startMonth, month) {
+function AC_agreementFigures(months, startMonth, month) {
   var h = function (min) { return Math.floor((min || 0) / 6) / 10; };
   var get = function (ym) { var v = months[ym] || {}; return { ot: Number(v.overtime) || 0, hol: Number(v.holiday) || 0 }; };
-  var out = [];
-  var push = function (kind, value, warn, limit, overIf, text) {
-    var level = overIf ? 'over' : value >= warn ? 'warn' : null;
-    if (level) out.push({ kind: kind, level: level, value: value, limit: limit, text: text });
-  };
-  var cur = get(month), curTotal = h(cur.ot + cur.hol);
-  push('month100', curTotal, 80, 100, curTotal >= 100, '今月の時間外＋休日労働 ' + curTotal + '時間（上限100時間未満）');
+  var cur = get(month);
   var worst = null;
   for (var n = 2; n <= 6; n++) {
     var sum = 0;
@@ -499,15 +558,72 @@ function AC_agreementCheck(months, startMonth, month) {
     var avg = Math.floor(h(sum) / n * 10) / 10;
     if (!worst || avg > worst.avg) worst = { n: n, avg: avg };
   }
-  push('avg80', worst.avg, 70, 80, worst.avg > 80, '直近' + worst.n + 'か月平均の時間外＋休日労働 ' + worst.avg + '時間（上限80時間）');
   var y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7));
   var start = (m >= startMonth ? y : y - 1) + '-' + (startMonth < 10 ? '0' : '') + startMonth;
   var yearOt = 0, over45 = 0;
-  for (var ym = start; ym <= month; ym = AC_addMonths(ym, 1)) {
-    var g = get(ym); yearOt += g.ot; if (g.ot > 45 * 60) over45++;
-  }
-  push('year720', h(yearOt), 600, 720, h(yearOt) > 720, '協定年度（' + start + '〜）の時間外 ' + h(yearOt) + '時間（上限720時間）');
-  push('over45', over45, 5, 6, over45 > 6, '月45時間を超えた月 ' + over45 + '回（上限 年6回）');
+  for (var ym = start; ym <= month; ym = AC_addMonths(ym, 1)) { var g = get(ym); yearOt += g.ot; if (g.ot > 45 * 60) over45++; }
+  return { monthOt: h(cur.ot), monthTotal: h(cur.ot + cur.hol), avg: worst.avg, avgN: worst.n, start: start, yearOt: h(yearOt), over45: over45 };
+}
+
+function AC_agreementCheck(months, startMonth, month) {
+  var f = AC_agreementFigures(months, startMonth, month), out = [];
+  var push = function (kind, value, warn, limit, overIf, text) {
+    var level = overIf ? 'over' : value >= warn ? 'warn' : null;
+    if (level) out.push({ kind: kind, level: level, value: value, limit: limit, text: text });
+  };
+  push('month100', f.monthTotal, 80, 100, f.monthTotal >= 100, '今月の時間外＋休日労働 ' + f.monthTotal + '時間（上限100時間未満）');
+  push('avg80', f.avg, 70, 80, f.avg > 80, '直近' + f.avgN + 'か月平均の時間外＋休日労働 ' + f.avg + '時間（上限80時間）');
+  push('year720', f.yearOt, 600, 720, f.yearOt > 720, '協定年度（' + f.start + '〜）の時間外 ' + f.yearOt + '時間（上限720時間）');
+  push('over45', f.over45, 5, 6, f.over45 > 6, '月45時間を超えた月 ' + f.over45 + '回（上限 年6回）');
+  return out;
+}
+
+/** 純粋関数：TOTの月別勤怠を「TOTコード → { 'YYYY-MM': {overtime, holiday} }」に（分）。時間外＝残業＋深夜残業、休日労働＝法定休日の全時間 */
+function AC_monthlyByTot(employees, monthlies) {
+  var codeByKey = AC_totCodeByKey_(employees), out = {};
+  (monthlies || []).forEach(function (w) {
+    if (!w || w._error) return;
+    var tot = codeByKey[w.employeeKey];
+    if (!tot || !w.year || !w.month) return;
+    var ym = w.year + '-' + (w.month < 10 ? '0' : '') + w.month;
+    var lh = w.legalHolidayWork || {};
+    (out[tot] = out[tot] || {})[ym] = {
+      overtime: (Number(w.overtime) || 0) + (Number(w.nightOvertime) || 0),
+      holiday: (Number(lh.normal) || 0) + (Number(lh.night) || 0) + (Number(lh.overtime) || 0) + (Number(lh.nightOvertime) || 0),
+    };
+  });
+  return out;
+}
+
+/** 純粋関数：承認待ちの申請（applying）。古い順 */
+function AC_pendingRequests(employees, requests) {
+  var codeByKey = AC_totCodeByKey_(employees);
+  var label = { timerecords: '打刻申請', schedules: 'スケジュール（休暇など）申請', overtimes: '残業申請' };
+  var seen = {}, out = [];
+  (requests || []).forEach(function (r) {
+    if (!r || r._error || r.status !== 'applying') return;
+    var k = r.type + ':' + (r.requestKey || r.employeeKey + r.date);
+    if (seen[k]) return; seen[k] = 1;
+    out.push({ tot: codeByKey[r.employeeKey] || '', type: label[r.type] || r.type, date: r.date, requestedDate: String(r.requestedDate || '').slice(0, 10) });
+  });
+  out.sort(function (a, b) { return a.requestedDate < b.requestedDate ? -1 : a.requestedDate > b.requestedDate ? 1 : 0; });
+  return out;
+}
+
+/** 純粋関数：有給の年5日（入社日・取得した有休の日から、一人ずつ） */
+function AC_paidLeaveStatus(employees, leaves, today) {
+  var byKey = {};
+  (leaves || []).forEach(function (l) { if (l && !l._error) (byKey[l.employeeKey] = byKey[l.employeeKey] || []).push(l); });
+  var out = [];
+  (employees || []).forEach(function (e) {
+    var period = AC_paidLeavePeriod(e.hiredDate, today);
+    if (!period) return;
+    var used = 0, seen = {};
+    (byKey[e.key] || []).forEach(function (l) {
+      if (l.date >= period.start && l.date <= today && !seen[l.date]) { seen[l.date] = 1; used += Number(l.days) || 0; }
+    });
+    out.push({ tot: String(e.code || ''), period: period, used: used, check: AC_paidLeaveCheck(period, used, today) });
+  });
   return out;
 }
 
@@ -2022,5 +2138,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

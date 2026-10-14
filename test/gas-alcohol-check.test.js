@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -555,4 +555,25 @@ test('GAS: 有給の年5日（入社6か月後が基準日）', () => {
   assert.equal(AC_paidLeaveCheck(p, 2, '2026-10-14').need, 3);
   assert.equal(AC_paidLeaveCheck({ start: '2026-04-01', end: '2027-03-31' }, 0, '2026-10-14'), null);   // まだ半年近くある
   assert.equal(AC_paidLeaveCheck({ start: '2026-02-01', end: '2027-01-31' }, 1, '2026-10-14').level, 'warn');
+});
+
+test('GAS: 月別勤怠・承認待ちの申請・有給の取得状況を組み立てる（架空データ）', () => {
+  const emp = [{ key: 'k1', code: '0001', hiredDate: '2025-04-01' }, { key: 'k2', code: '0002', hiredDate: '2026-09-01' }];
+  const m = JSON.parse(JSON.stringify(AC_monthlyByTot(emp, [
+    { year: 2026, month: 10, employeeKey: 'k1', overtime: 600, nightOvertime: 60, legalHolidayWork: { normal: 480, night: 0, overtime: 0, nightOvertime: 0 } },
+    { _error: 403 },
+  ])));
+  assert.deepEqual(m, { '0001': { '2026-10': { overtime: 660, holiday: 480 } } });
+  const p = JSON.parse(JSON.stringify(AC_pendingRequests(emp, [
+    { type: 'timerecords', status: 'applying', employeeKey: 'k1', date: '2026-10-02', requestedDate: '2026-10-03T10:00:00+09:00', requestKey: 'r1' },
+    { type: 'timerecords', status: 'applying', employeeKey: 'k1', date: '2026-10-02', requestedDate: '2026-10-03T10:00:00+09:00', requestKey: 'r1' },
+    { type: 'schedules', status: 'approved', employeeKey: 'k2', date: '2026-10-05', requestKey: 'r2' },
+  ])));
+  assert.deepEqual(p, [{ tot: '0001', type: '打刻申請', date: '2026-10-02', requestedDate: '2026-10-03' }]);
+  const st = JSON.parse(JSON.stringify(AC_paidLeaveStatus(emp, [
+    { employeeKey: 'k1', date: '2026-10-05', days: 1 }, { employeeKey: 'k1', date: '2026-09-20', days: 1 }, { employeeKey: 'k1', date: '2026-10-06', days: 0.5 },
+  ], '2026-10-14')));
+  assert.equal(st.length, 1);   // k2 はまだ付与前
+  assert.equal(st[0].period.start, '2026-10-01');
+  assert.equal(st[0].used, 1.5);   // 期間開始前の9/20は数えない
 });

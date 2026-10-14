@@ -311,7 +311,13 @@ function AC_handleTotRaw_(body) {
   state.setProperty('tot:lastRelay', AC_today_());
   var summary = AC_totShape(body.results);
   Logger.log('TOT受信 %s', JSON.stringify(summary));
-  try { AC_processTotRaw_(body); } catch (e) { Logger.log('TOT処理の失敗：%s', e && e.message); }
+  var failed = Object.keys(body.results).filter(function (k) { return body.results[k] && body.results[k]._error; });
+  if (failed.length) AC_adminNotice_('totfetch', '【エラー】TOTから一部のデータを読み取れませんでした🙇‍♀️\n対象：' + failed.join('、')
+    + '\nTOTのトークンの権限・許可IP（133.167.110.249）が変わっていないか確認してください。');
+  try { AC_processTotRaw_(body); } catch (e) {
+    Logger.log('TOT処理の失敗：%s', e && e.message);
+    AC_adminNotice_('totprocess', '【エラー】TOTの勤怠データの処理中に問題がありました🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
+  }
   return 'OK ' + JSON.stringify(summary).slice(0, 300);
 }
 
@@ -377,7 +383,7 @@ function AC_processTotRaw_(body) {
         if (state.getProperty(key + ':test')) return;
         state.setProperty(key + ':test', new Date().toISOString());
         testLines.push('■' + (names[AC_totKey(tot)] || 'TOTコード' + tot) + 'さん宛て' + (line[AC_totKey(tot)] ? '' : '（LINE未登録のため本番では届きません）')
-          + '\n' + text.replace(/^お疲れさまです。\n/, ''));
+          + '\n' + text);
         return;
       }
       if (state.getProperty(key)) return;
@@ -490,18 +496,21 @@ function AC_lineByTotCode(masterValues, today) {
 
 function AC_punchMessage(date) {
   var w = '日月火水木金土'.charAt(new Date(date + 'T00:00:00+09:00').getDay());
-  return 'お疲れさまです。\n' + Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + w + '）の勤怠に、確認が必要な点がありました（打刻漏れなど）。\n'
-    + 'お手数ですが、TOTで内容をご確認のうえ、必要に応じて修正の申請をお願いします🙏';
+  return 'お疲れさまです😊\n\n' + Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + w + '）の勤怠で、打刻が抜けているかもしれない日がありました。\n\n'
+    + '忙しいと、つい忘れちゃいますよね。\nお手すきのときにTOTを見ていただいて、必要なら修正の申請をお願いします🙏\n\n'
+    + 'わからないことがあれば、いつでも気軽に聞いてくださいね。';
 }
 
 function AC_overtimeMessage(min, level) {
   var h = (Math.floor(min / 6) / 10).toFixed(1);
   if (level >= 45) {
-    return 'お疲れさまです。\n今月の残業時間が45時間を超えました（現在 ' + h + '時間）。\n'
-      + '法律で定められた原則の上限に達しています。上長と業務の調整をお願いします。いつもありがとうございます。';
+    return 'いつも本当にありがとうございます。\n\n今月の残業が45時間を超えました（今 ' + h + '時間）。\n'
+      + 'これは法律で決められている、原則の上限にあたる時間です。\n\n'
+      + 'がんばってくれている分、体と心がとても心配です。\nひとりで抱え込まずに、上長と一緒に業務の調整をしていきましょう。いつでも相談してくださいね🍀';
   }
-  return 'お疲れさまです。\n今月の残業時間が30時間を超えました（現在 ' + h + '時間）。\n'
-    + '無理のないよう、体調に気をつけてくださいね。業務の調整が必要なときは遠慮なく相談してください。';
+  return 'いつもお仕事ありがとうございます😊\n\n今月の残業が30時間を超えました（今 ' + h + '時間）。\n\n'
+    + 'がんばってくれている分、無理をしていないか少し心配です。\n'
+    + '業務の量や進め方で困っていることがあれば、遠慮なく相談してくださいね。体を大事にしてください🍀';
 }
 
 var AC_ATT_HEADER = ['月', '社員番号', '氏名', 'TOTコード', '出勤日数', '残業（時間）', '遅刻（回）', '早退（回）', '有休（日）', '欠勤（日）', 'エラー勤務（日）', '未締め（日）', 'LINE登録'];
@@ -541,19 +550,13 @@ function AC_attendanceReport(R, masterValues, today) {
   return rows;
 }
 
-/** 朝の案内のとき：TOT_IMPORT_REMIND_DAYS 日以上CSVが届いていなければ管理者へ知らせる（未設定なら何もしない） */
+/** 朝の案内のとき：今朝のTOT取り込み（さくらのVPS 7:05）が届いていなければ管理者へ知らせる */
 function AC_checkTotSync_(props, today) {
-  var days = Number(props.getProperty('TOT_IMPORT_REMIND_DAYS') || 0);
-  if (!days) return;
-  var last = AC_state_().getProperty('tot:lastImport');
-  var limit = Utilities.formatDate(new Date(Date.now() - days * 86400000), AC_TZ, 'yyyy-MM-dd');
-  if (last && last > limit) return;
-  var key = 'sent:' + today + ':totremind';
-  var state = AC_state_();
-  if (state.getProperty(key)) return;
-  AC_pushLine_('【TOT取り込み】最近' + days + '日、シフトのCSVが届いていません（最終 ' + (last || 'なし') + '）。\n'
-    + 'TOTの「日別データ[CSV]」をドライブの「TOT取り込み」フォルダに置いてください。');
-  state.setProperty(key, new Date().toISOString());
+  if (props.getProperty('TOT_RELAY_CHECK') === 'false') return;
+  var last = AC_state_().getProperty('tot:lastRelay');
+  if (!last || last === today) return;   // まだ一度も動いていない場合は知らせない
+  AC_adminNotice_('totrelay', '【エラー】今朝のTOTの取り込みが届いていません🙇‍♀️（最後に届いた日：' + last + '）\n'
+    + 'さくらのVPSが止まっていないか、コントロールパネルで「稼働中」になっているか確認してください。');
 }
 
 // ---------------- 内部処理 ----------------
@@ -576,7 +579,7 @@ function AC_dispatch_(kind) {
   } catch (e) {
     Logger.log('照合失敗：%s %s', e && e.code ? e.code : 'unknown', e && e.message ? e.message : '');
     if (!dryRun) {
-      AC_pushLine_('【アルコールチェック】' + today + ' の確認ができませんでした。シートを確認してください。（'
+      AC_pushLine_('【エラー】' + today + ' のアルコールチェックの確認がうまくできませんでした🙇‍♀️\nシフト表（2026-2028）やフォームの回答シートに変わったところがないか、見ていただけますか？（'
         + (e && e.code ? e.code : '不明なエラー') + '）');
       state.setProperty(runKey, new Date().toISOString());
     }
@@ -767,6 +770,7 @@ function alcoholCheckAlerts() {
     AC_checkAlerts_(props, AC_loadDay_(AC_today_()), props.getProperty('DRY_RUN') !== 'false');
   } catch (e) {
     Logger.log('検知確認の失敗：%s', e && e.message ? e.message : e);
+    AC_adminNotice_('alerts', '【エラー】飲酒検知の確認がうまくできませんでした🙇‍♀️\n管理シートが開けるか、見出しが変わっていないかを確認してください。\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
   } finally { lock.releaseLock(); }
 }
 
@@ -788,8 +792,8 @@ function AC_checkAlerts_(props, d, dryRun) {
     Logger.log('要確認の測定結果：%s行目', h.row);
     if (dryRun) return;
     var time = Utilities.formatDate(h.at, AC_TZ, 'HH:mm');
-    AC_pushLine_('【至急・要確認】アルコールチェックの測定結果\n' + time + ' ' + h.name + '（' + h.label + '）\n測定結果：'
-      + h.result + '\n本人の運転可否を確認してください。');
+    AC_pushLine_('【至急・確認のお願い】アルコールチェックの測定結果\n' + time + ' ' + h.name + 'さん（' + h.label + '）\n測定結果：'
+      + h.result + '\n\n念のため、ご本人に体調と運転できるかを確認してあげてください。責めずに、まずは安全を一緒に確認しましょう🙏');
     state.setProperty(key, new Date().toISOString());
   });
 }
@@ -927,20 +931,20 @@ function AC_pick(list, today) {
 function AC_messageFor(kind, today, weather) {
   if (kind === 'morning') return AC_morningMessage(today, weather);
   if (kind === 'followBefore') {
-    return 'おはようございます！\n\n本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
-      + 'すでにアルコールチェックを実施済みの場合は、お手数ですがフォームへの入力をお願いいたします😊\n\n'
-      + 'もし忘れてしまっていた場合は、次回から忘れずに対応いただけると助かります！\n\n'
-      + '本日これから運転する予定がある場合は、必ず運転前にアルコールチェックをお願いいたします🚗\n\nよろしくお願いします！';
+    return 'おはようございます☀️\n\n今日の出勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした。\n\n'
+      + 'もう済ませていたら、お手すきのときに入力だけしていただけるとうれしいです😊\n'
+      + '朝はバタバタしますよね。気にしすぎなくて大丈夫です！\n\n'
+      + 'これから運転する予定があれば、運転前のチェックだけお願いします🚗\n\n今日も一日、よろしくお願いします✨';
   }
   if (kind === 'evening') {
-    return 'お疲れ様です！😊\n\n本日もお仕事ありがとうございます！\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします🚗\n\n'
-      + 'お帰りの際も、安全運転でお気をつけてください✨';
+    return 'お疲れさまです😊\n\n今日も一日、本当にありがとうございました！\n\n帰る前のアルコールチェックと、フォームへの入力をお願いします🚗\n\n'
+      + '帰り道も、どうか気をつけてくださいね✨';
   }
   if (kind === 'followAfter') {
-    return 'お疲れ様です！\n\n本日の退勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
-      + 'すでに実施済みの場合は、お手数ですがフォームへの入力をお願いいたします😊\n\n'
-      + 'もし忘れてしまっていた場合は、次回から忘れずに対応いただけると助かります！\n\n'
-      + 'お忙しい中お手数をおかけしますが、引き続きご協力よろしくお願いいたします🙇‍♀️';
+    return 'お疲れさまです🌙\n\n今日の退勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした。\n\n'
+      + 'もう済ませていたら、お手すきのときに入力だけお願いできると助かります😊\n'
+      + '一日がんばったあとだと、うっかりしちゃいますよね。大丈夫です！\n\n'
+      + '今日も遅くまでありがとうございました。ゆっくり休んでくださいね🍵';
   }
   return '';
 }
@@ -1086,6 +1090,16 @@ function AC_planNotifications(missingNames, registry) {
   return { send: send, unregistered: unregistered, registryUsed: Object.keys(registry).length > 0 };
 }
 
+/** 管理者へのお知らせ（エラーや確認のお願い）。同じ種類は1日1回まで */
+function AC_adminNotice_(kind, text) {
+  try {
+    var state = AC_state_(), key = 'sent:' + AC_today_() + ':notice:' + kind;
+    if (state.getProperty(key)) return;
+    AC_pushLine_(text);
+    state.setProperty(key, new Date().toISOString());
+  } catch (e) { Logger.log('管理者へのお知らせに失敗'); }
+}
+
 function AC_pushLine_(text) {
   AC_pushTo_(PropertiesService.getScriptProperties().getProperty('LINE_ADMIN_USER_ID'), text);
 }
@@ -1126,6 +1140,7 @@ function doPost(e) {
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
+    AC_adminNotice_('webhook', '【エラー】公式LINEに届いたメッセージの処理で問題がありました🙇‍♀️\n（' + (err && err.message ? err.message : '不明なエラー') + '）');
   }
   return ContentService.createTextOutput('OK');
 }
@@ -1134,7 +1149,7 @@ function AC_handleEvent_(ev) {
   var src = ev && ev.source;
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (ev.type === 'follow') {
-    AC_reply_(ev.replyToken, '友だち追加ありがとうございます。\n通知を受け取るため、社員番号（数字のみ）を送ってください。');
+    AC_reply_(ev.replyToken, '友だち追加ありがとうございます😊\nREBIRTH 管理本部です。\n\nお知らせをお届けするために、社員番号（数字だけ）を送っていただけますか？');
     return;
   }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
@@ -1170,11 +1185,20 @@ function AC_handleEvent_(ev) {
     lock.releaseLock();
   }
   var replies = {
-    fill: '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、通知が届くようになります。',
-    new: '社員番号 ' + code + ' で受け付けました。\n管理者の確認後、通知が届くようになります。',
-    same: '社員番号 ' + code + ' は登録済みです。',
-    conflict: '社員番号 ' + code + ' で受け付けました。管理者が確認します。',
+    fill: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n管理者が確認したら、お知らせが届くようになります。もう少しだけお待ちくださいね。',
+    new: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n管理者が確認したら、お知らせが届くようになります。もう少しだけお待ちくださいね。',
+    same: '社員番号 ' + code + ' はもう登録できています😊 ありがとうございます！',
+    conflict: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n念のため管理者が確認しますので、少しだけお待ちくださいね。',
   };
+  // 管理者へ：確認のお願い（本人確認して「LINE確認済み」にチェック）
+  if (result === 'fill' || result === 'new' || result === 'conflict') {
+    try {
+      AC_pushLine_('【確認のお願い】LINE登録がありました\n社員番号：' + code + '（LINE表示名：' + displayName + '）\n'
+        + (result === 'conflict' ? 'この社員番号には別のLINEがすでに登録されています。「LINE登録の要確認」シートを見てください。'
+          : result === 'new' ? '従業員マスタに無い社員番号です。新しい行に氏名を入れ、本人確認のうえ「LINE確認済み」にチェックをお願いします。'
+          : '本人確認のうえ、従業員マスタの「LINE確認済み」にチェックをお願いします。'));
+    } catch (e) { Logger.log('管理者への登録連絡に失敗'); }
+  }
   AC_reply_(ev.replyToken, replies[result]);
 }
 

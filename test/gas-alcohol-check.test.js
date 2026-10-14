@@ -69,11 +69,11 @@ test('GAS: 未実施者を本人通知と未登録に分け、管理者一覧に
   assert.match(AC_buildMessage('2026-10-08', '出勤前', { targets: ['a'], missing: ['試験 太郎'] }, plan, ['試験 太郎']), /本人通知に失敗/);
 });
 
-test('GAS: 本人向け文面（仕様書の文面、他人の情報を含めない）', () => {
-  assert.match(AC_messageFor('followBefore', '2026-10-08'), /本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした/);
-  assert.match(AC_messageFor('followAfter', '2026-10-08'), /本日の退勤前アルコールチェックについて/);
-  assert.match(AC_messageFor('evening', '2026-10-08'), /退勤前のアルコールチェックと、フォームへの入力をお願いいたします/);
-  for (const k of ['morning', 'followBefore', 'evening', 'followAfter']) assert.doesNotMatch(AC_messageFor(k, '2026-10-08', null), /試験|未実施です/);
+test('GAS: 本人向け文面（やさしく寄り添う言い方、責めない、他人の情報を含めない）', () => {
+  assert.match(AC_messageFor('followBefore', '2026-10-08'), /出勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした/);
+  assert.match(AC_messageFor('followAfter', '2026-10-08'), /退勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした/);
+  assert.match(AC_messageFor('evening', '2026-10-08'), /帰る前のアルコールチェックと、フォームへの入力をお願いします/);
+  for (const k of ['morning', 'followBefore', 'evening', 'followAfter']) assert.doesNotMatch(AC_messageFor(k, '2026-10-08', null), /試験|未実施です|次回から忘れず|必ず/);
 });
 
 const d = s => new Date(`${s}T00:00:00+09:00`);
@@ -382,8 +382,8 @@ test('GAS: 打刻漏れ等（エラー勤務・7日以内）と今月の残業�
   const f = AC_attendanceFindings(totR, '2026-10-09');
   assert.deepEqual(JSON.parse(JSON.stringify(f.punchErrors)), [{ tot: '0501', date: '2026-10-08' }]);   // 10/1は8日前なので対象外
   assert.equal(f.overtime['0501'], 1900);   // 9月分は含めない
-  assert.match(AC_punchMessage('2026-10-08'), /10\/8（木）の勤怠/);
-  assert.match(AC_overtimeMessage(1900, 30), /30時間を超えました（現在 31\.6時間）/);
+  assert.match(AC_punchMessage('2026-10-08'), /10\/8（木）の勤怠で、打刻が抜けているかもしれない/);
+  assert.match(AC_overtimeMessage(1900, 30), /30時間を超えました（今 31\.6時間）/);
   assert.match(AC_overtimeMessage(2800, 45), /45時間/);
 });
 

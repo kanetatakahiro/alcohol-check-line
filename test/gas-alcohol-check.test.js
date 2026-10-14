@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -75,7 +75,7 @@ test('GAS: 本人向け文面（管理本部の標準ルール：丁寧で親し
   assert.match(fb, /すでに実施済みの場合は、お手数ですが入力をお願いいたします/);
   assert.match(fb, /まだ実施していない場合は、これから運転する前に必ず実施/);   // 実施済み／未実施を分けて案内
   assert.match(AC_messageFor('followAfter', '2026-10-08', null), /本日もお仕事お疲れ様でした/);
-  assert.match(AC_messageFor('evening', '2026-10-08', null), /本日もお仕事ありがとうございます[\s\S]*退勤前のアルコールチェック/);
+  assert.match(AC_messageFor('evening', '2026-10-08', null), /本日も一日、本当にありがとうございました[\s\S]*退勤前のアルコールチェック/);
   const avoid = /バタバタしますよね|つい忘れちゃいますよね|気にしすぎなくて大丈夫|体を大事にしてくださいね|一緒に頑張りましょう|もう少しだけお待ちくださいね|至急入力|未実施です/;
   for (const k of ['morning', 'followBefore', 'evening', 'followAfter']) {
     const m = AC_messageFor(k, '2026-10-08', null);
@@ -480,4 +480,26 @@ test('GAS: 気遣いは1日の最初のLINEだけ（2通目以降は用件のみ
   assert.doesNotMatch(AC_punchMessage('2026-10-08', { careUsed: true }), /季節の変わり目|いつも業務へのご協力/);
   assert.doesNotMatch(AC_overtimeMessage(1900, 30, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ|季節の変わり目/);
   assert.doesNotMatch(AC_thanksMessage(5, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ/);
+});
+
+test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の打刻なしを見つけ、やさしい文面にする', () => {
+  const R = {
+    employees: [{ key: 'k1', code: '0001' }, { key: 'k2', code: '0002' }, { key: 'k3', code: '0003' }, { key: 'k4', code: '0004' }],
+    timerecord: [{ date: '2026-10-14', dailyWorkings: [
+      { date: '2026-10-14', employeeKey: 'k1', timeRecord: [{ code: '1' }] },
+      { date: '2026-10-14', employeeKey: 'k2', timeRecord: [{ code: '1' }, { code: '2' }] },
+    ] }],
+    schedules: [{ date: '2026-10-14', dailySchedules: [
+      { date: '2026-10-14', employeeKey: 'k2', clockInSchedule: '2026-10-14T09:00:00+09:00' },
+      { date: '2026-10-14', employeeKey: 'k3', clockInSchedule: '2026-10-14T09:00:00+09:00' },
+      { date: '2026-10-14', employeeKey: 'k4' },
+    ] }],
+  };
+  const r = JSON.parse(JSON.stringify(AC_todayStatus(R, '2026-10-14')));
+  assert.deepEqual(r, [{ tot: '0001', kind: 'noClockOut' }, { tot: '0003', kind: 'noClockIn' }]);
+  const out = AC_todayStatusMessage('noClockOut', '2026-10-14', {}, {});
+  assert.match(out, /現在も勤務中の場合は、退勤の打刻を忘れずに/);
+  assert.match(out, /遅くまでお疲れ様です！本当にありがとうございます！/);
+  assert.match(out, /申請/);
+  assert.match(AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {}), /申請をお願いいたします[\s\S]*ありがとうございます/);
 });

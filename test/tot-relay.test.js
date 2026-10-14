@@ -31,3 +31,8 @@ test('TOT中継: 設定不足・利用禁止時間帯では止まる', async () 
   await assert.rejects(runRelay({ env: { TOT_ACCESS_TOKEN: 't', GAS_WEBAPP_URL: 'https://script.google.com/macros/s/abc/exec', TOT_SYNC_SECRET: 's' },
     fetchImpl: async () => ({ ok: true }), now: () => new Date('2026-10-14T00:00:00Z') }), /禁止時間帯/);
 });
+
+test('TOT中継: 夜（20時以降）は今日の打刻まで取る', () => {
+  assert.ok(plan('2026-10-14', 'night').find(x => x.name === 'timerecord').path.endsWith('end=2026-10-14'));
+  assert.ok(plan('2026-10-14').find(x => x.name === 'timerecord').path.endsWith('end=2026-10-13'));
+});

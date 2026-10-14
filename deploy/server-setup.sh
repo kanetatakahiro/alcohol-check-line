@@ -26,7 +26,10 @@ fi
 APP="$HOME/alcohol-check-line"
 if [ -d "$APP/.git" ]; then git -C "$APP" pull --ff-only; else git clone https://github.com/kanetatakahiro/alcohol-check-line.git "$APP"; fi
 # 毎朝7:05に実行（TOTの利用禁止時間帯 8:30〜10:00・17:30〜18:30 を避ける）。ログは件数と状態のみ。
-LINE="5 7 * * * cd $APP && $(command -v node) --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1"
-( crontab -l 2>/dev/null | grep -v 'tot-relay.js' ; echo "$LINE" ) | crontab -
+# 朝7:05（シフト反映・勤怠チェック表）と夜22:30（当日の勤怠状況のお知らせ）
+N="$(command -v node)"
+( crontab -l 2>/dev/null | grep -v 'tot-relay.js' ; \
+  echo "5 7 * * * cd $APP && $N --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1" ; \
+  echo "30 22 * * * cd $APP && $N --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1" ) | crontab -
 echo "== 準備完了（node $(node -v)） =="
 echo "続けて： bash $APP/deploy/set-env.sh"

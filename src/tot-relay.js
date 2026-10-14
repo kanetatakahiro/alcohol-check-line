@@ -17,17 +17,27 @@ export function addDays(date, n) {
   return t.toISOString().slice(0, 10);
 }
 
-/** 取得する範囲：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（月末チェック・残業集計用） */
-export function plan(today) {
+/**
+ * 取得する範囲。
+ *  朝（morning）：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（シフト反映・勤怠チェック表）
+ *  夜（night、20時以降）：上に加えて、今日の予定と打刻（当日の勤怠状況のお知らせ用）
+ */
+export function plan(today, mode = 'morning') {
   const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
   const prev = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, '0')}-01`;
   const yesterday = addDays(today, -1);
+  const night = mode === 'night';
   return [
     { name: 'employees', path: `/employees?date=${today}&includeResigner=false` },
     { name: 'schedules', path: `/daily-schedules?start=${today}&end=${addDays(today, 30)}` },
     { name: 'workings', path: `/daily-workings?start=${prev}&end=${yesterday}` },
-    { name: 'timerecord', path: `/daily-workings/timerecord?start=${addDays(today, -7)}&end=${yesterday}` },
+    { name: 'timerecord', path: `/daily-workings/timerecord?start=${addDays(today, -7)}&end=${night ? today : yesterday}` },
   ];
+}
+
+/** 日本時間の時（0〜23） */
+export function japanHour(d) {
+  return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', hourCycle: 'h23' }).format(d));
 }
 
 export async function runRelay({ env = process.env, fetchImpl = fetch, now = () => new Date(),
@@ -36,9 +46,10 @@ export async function runRelay({ env = process.env, fetchImpl = fetch, now = () 
   if (!token || !url || !secret) throw new Error('サーバーの .env に TOT_ACCESS_TOKEN / GAS_WEBAPP_URL / TOT_SYNC_SECRET を設定してください。');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('GAS_WEBAPP_URL の形式を確認してください。');
   const today = japanDate(now());
+  const mode = japanHour(now()) >= 20 ? 'night' : 'morning';   // 20時以降の実行は当日の勤怠状況用
   const results = {}, status = {};
   let first = true;
-  for (const item of plan(today)) {
+  for (const item of plan(today, mode)) {
     if (!first) await wait(1100);
     first = false;
     assertAllowedTime(now());
@@ -58,10 +69,10 @@ export async function runRelay({ env = process.env, fetchImpl = fetch, now = () 
   const res = await fetchImpl(url, {
     method: 'POST', redirect: 'follow', signal: AbortSignal.timeout(120000),
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'tot-raw', secret, fetchedAt: now().toISOString(), today, results }),
+    body: JSON.stringify({ type: 'tot-raw', secret, fetchedAt: now().toISOString(), today, mode, results }),
   });
   const text = await res.text();
-  log(JSON.stringify({ today, status, gas: res.status, result: text.slice(0, 120) }));
+  log(JSON.stringify({ today, mode, status, gas: res.status, result: text.slice(0, 120) }));
   if (!res.ok || !/^OK/.test(text)) throw new Error(`Apps Scriptへの受け渡しに失敗しました（HTTP ${res.status}）。`);
 }
 

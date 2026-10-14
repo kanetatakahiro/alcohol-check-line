@@ -369,7 +369,8 @@ function AC_processTotRaw_(body) {
     }
     Logger.log('シフト比較 %s／書き換え %s件', JSON.stringify(cmp.counts), applied);
   }
-  // 2. 打刻漏れ・残業
+  // 2. 打刻漏れ・残業・当日の勤怠状況（お知らせは夜22:30の取り込みのときだけ送る）
+  var night = body.mode === 'night';
   if (Array.isArray(R.employees) && Array.isArray(R.workings)) {
     var f = AC_attendanceFindings(R, today);
     var line = AC_lineByTotCode(mv, today);
@@ -379,6 +380,7 @@ function AC_processTotRaw_(body) {
     var names = AC_namesByTot_(mv, R.employees);
     var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
     var send = function (tot, key, text) {
+      if (!night) return;
       var build = function () { return typeof text === 'function' ? text(careCtx(tot)) : text; };   // 送るときだけ気遣いを決める
       if (test) {
         if (state.getProperty(key + ':test')) return;
@@ -406,6 +408,11 @@ function AC_processTotRaw_(body) {
       return { infection: infection, infectionUsed: used, careUsed: careUsed };
     };
     var careGiven = {};
+    if (night && Array.isArray(R.timerecord)) {
+      AC_todayStatus(R, today).forEach(function (t) {
+        send(t.tot, 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), function (c) { return AC_todayStatusMessage(t.kind, today, c, overrides); });
+      });
+    }
     f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }); });
     Object.keys(f.overtime).forEach(function (tot) {
       var min = f.overtime[tot];
@@ -413,7 +420,7 @@ function AC_processTotRaw_(body) {
         send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 45, today, overrides, c); });
         // 36協定の管理のため、管理者にも必ず知らせる（本人への通知だけで終わらせない）
         var akey = 'att:' + month + ':ot45admin:' + AC_totKey(tot);
-        if ((notify || test) && !state.getProperty(akey)) {
+        if (night && (notify || test) && !state.getProperty(akey)) {
           var to = line[AC_totKey(tot)] || {};
           try {
             AC_pushLine_(AC_render('ot45Admin', today, { name: names[AC_totKey(tot)] || 'TOTコード' + tot, code: to.code || '－',
@@ -505,6 +512,37 @@ function AC_addDays_(date, n) {
   var t = new Date(date + 'T00:00:00Z');
   t.setUTCDate(t.getUTCDate() + n);
   return t.toISOString().slice(0, 10);
+}
+
+/**
+ * 純粋関数：当日の勤怠状況（夜22:30に確認）。
+ *  noClockOut：出勤の打刻はあるが、退勤の打刻がまだ無い（勤務中、または退勤の打刻漏れ）
+ *  noClockIn：今日が出勤予定（時刻あり）なのに、打刻が1つも無い
+ */
+function AC_todayStatus(R, today) {
+  var codeByKey = AC_totCodeByKey_(R.employees);
+  var punches = {};
+  AC_totFlat_(R.timerecord).forEach(function (t) {
+    if (t.date !== today) return;
+    var p = punches[t.employeeKey] = punches[t.employeeKey] || { in: 0, out: 0 };
+    (t.timeRecord || []).forEach(function (r) { if (String(r.code) === '1') p.in++; if (String(r.code) === '2') p.out++; });
+  });
+  var out = [], seen = {};
+  Object.keys(punches).forEach(function (k) {
+    var p = punches[k], tot = codeByKey[k];
+    if (tot && p.in > p.out) { out.push({ tot: tot, kind: 'noClockOut' }); seen[k] = 1; }
+  });
+  AC_totFlat_(R.schedules).forEach(function (s) {
+    if (s.date !== today || seen[s.employeeKey] || !s.clockInSchedule) return;
+    var tot = codeByKey[s.employeeKey];
+    if (tot && !punches[s.employeeKey]) { out.push({ tot: tot, kind: 'noClockIn' }); seen[s.employeeKey] = 1; }
+  });
+  return out;
+}
+
+function AC_todayStatusMessage(kind, today, ctx, overrides) {
+  var key = kind === 'noClockIn' ? 'todayNoClockIn' : 'todayNoClockOut';
+  return AC_render(key, today, { care: AC_careLine(key, today, ctx, overrides).text }, overrides);
 }
 
 /** 純粋関数：従業員マスタから「TOTコード → {code, userId}」（LINE確認済み・退職でない人。アルコール対象かは問わない） */
@@ -961,32 +999,38 @@ function AC_pick(list, today) {
 // 1つの欄に「||」で区切って複数書くと、日替わりで使い分ける。
 // 差し込み：{care} 気遣いの一文／{date} 日付／{hours} 時間／{n} 日数／{code} 社員番号／{name} 氏名
 var AC_TEMPLATES = {
-  morning: ['おはようございます！{icon}\n\n{care}\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いいたします！\n今日も一日、よろしくお願いします😊',
-    'おはようございます！{icon}\n\n{care}\n\n運転前のアルコールチェックと、フォームへの入力を本日もよろしくお願いいたします！\n今日も一日、よろしくお願いします😊'],
+  morning: ['おはようございます！{icon}\n\n{care}\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いいたします！\nいつもご協力いただき、本当にありがとうございます。今日も一日、よろしくお願いします😊',
+    'おはようございます！{icon}\n\n{care}\n\n運転前のアルコールチェックと、フォームへの入力を本日もよろしくお願いいたします！\n毎日のご協力、とても助かっています。ありがとうございます😊'],
   followBefore: ['おはようございます！\n\n{care}\n\n本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
     + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
     + 'まだ実施していない場合は、これから運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
-    + '引き続きご協力よろしくお願いいたします！'],
-  evening: ['お疲れ様です！\n本日もお仕事ありがとうございます😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします。\n\n{care}'],
+    + 'いつもご協力ありがとうございます！引き続きよろしくお願いいたします。'],
+  evening: ['お疲れ様です！\n本日も一日、本当にありがとうございました😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします。\n\n{care}'],
   followAfter: ['お疲れ様です！\n\n本日の退勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
     + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
     + 'まだ実施していない場合は、運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
-    + '{care}\n本日もお仕事お疲れ様でした！'],
-  punch: ['お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお手数ですが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\nよろしくお願いいたします😊',
-    'お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお忙しいところ恐れ入りますが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\n引き続きよろしくお願いいたします😊'],
-  ot30: ['お疲れ様です！\nいつも業務へのご協力ありがとうございます。\n\n今月の残業時間が30時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
-    + 'お忙しい時期かと思いますが、勤務時間や体調にもお気をつけいただければと思います。\n{care}\n\n引き続きよろしくお願いいたします。'],
-  ot45: ['お疲れ様です！\nいつも業務にご対応いただき、ありがとうございます。\n\n今月の残業時間が45時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
-    + '勤務時間が長くなっておりますので、今後の業務量や勤務時間について、上長とご相談をお願いいたします。\n{care}\n\nお忙しいところ恐れ入りますが、よろしくお願いいたします。'],
+    + '{care}\n本日もお仕事お疲れ様でした！いつも本当にありがとうございます。'],
+  punch: ['お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお手数ですが、TOTでご確認のうえ、必要な修正の申請をお願いいたします。\n\nいつもご協力いただき、ありがとうございます😊',
+    'お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお忙しいところ恐れ入りますが、TOTでご確認のうえ、必要な修正の申請をお願いいたします。\n\nいつも丁寧にご対応いただき、ありがとうございます😊'],
+  todayNoClockOut: ['お疲れ様です！\n{care}\n\n本日の退勤の打刻が、まだ確認できていませんでした。\n\n'
+    + '現在も勤務中の場合は、退勤の打刻を忘れずにお願いいたします。遅くまでお疲れ様です！本当にありがとうございます！\n\n'
+    + 'すでに退勤されている場合は、お手数ですがTOTから退勤時刻の修正の申請をお願いいたします。\n\n今日も一日ありがとうございました😊'],
+  todayNoClockIn: ['お疲れ様です！\n{care}\n\n本日は出勤の予定でしたが、出勤の打刻が確認できませんでした。\n\n'
+    + '出勤されていた場合は、お手数ですがTOTから打刻の修正の申請をお願いいたします。\n'
+    + 'お休みに変わっていた場合も、TOTで休暇などの申請をお願いいたします。\n\nいつもご協力いただき、ありがとうございます😊'],
+  ot30: ['お疲れ様です！\nいつも業務へのご協力、本当にありがとうございます。とても助かっています。\n\n今月の残業時間が30時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
+    + 'お忙しい時期かと思いますが、勤務時間や体調にもお気をつけいただければと思います。\n{care}\n\nいつもありがとうございます。引き続きよろしくお願いいたします。'],
+  ot45: ['お疲れ様です！\nいつも業務にご対応いただき、本当にありがとうございます。\n\n今月の残業時間が45時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
+    + '勤務時間が長くなっておりますので、今後の業務量や勤務時間について、上長とご相談をお願いいたします。\n{care}\n\nお忙しいところ恐れ入りますが、よろしくお願いいたします。いつもありがとうございます。'],
   ot45Admin: ['【残業45時間到達のお知らせ】\n{name}さん（社員番号 {code}）の今月の残業時間が45時間に達しました（現在 {hours}時間）。\n'
     + '36協定の管理のため、勤務状況の確認と、上長による業務量の調整をお願いいたします。\n（ご本人にも、上長へ相談するようご案内しています）'],
-  thanks5: ['お疲れ様です！\n\nアルコールチェックについて、5勤務日連続でのご対応ありがとうございます！😊\n毎日忘れずに入力していただけて、とても助かっています。\n{care}\n\n引き続きご協力よろしくお願いいたします！'],
-  thanks10: ['お疲れ様です！\n\nアルコールチェック、10勤務日連続でのご対応ありがとうございます！✨\n日々の業務でお忙しい中、継続してご対応いただき、本当にありがとうございます。\n{care}\n\n引き続きよろしくお願いいたします！'],
-  thanksN: ['お疲れ様です！\n\nアルコールチェック、{n}勤務日連続でのご対応ありがとうございます！✨\n日々の業務でお忙しい中、毎日継続していただき、本当に助かっています。\n{care}\n\n引き続きよろしくお願いいたします！'],
-  follow: ['友だち追加ありがとうございます！\nREBIRTH 管理本部です😊\n\nお知らせをお届けするため、社員番号（数字のみ）を送っていただけますでしょうか。'],
-  registered: ['社員番号 {code} で受け付けました。ご対応ありがとうございます😊\n管理本部で確認が済み次第、お知らせが届くようになります。'],
-  registeredSame: ['社員番号 {code} は登録済みです。ご対応ありがとうございます😊'],
-  registeredCheck: ['社員番号 {code} で受け付けました。ご対応ありがとうございます😊\n念のため管理本部で確認いたしますので、確認が済み次第、お知らせが届くようになります。'],
+  thanks5: ['お疲れ様です！\n\nアルコールチェックについて、5勤務日連続でのご対応ありがとうございます！😊\n毎日忘れずに入力していただけて、とても助かっています。本当にありがとうございます。\n{care}\n\n引き続きご協力よろしくお願いいたします！'],
+  thanks10: ['お疲れ様です！\n\nアルコールチェック、10勤務日連続でのご対応ありがとうございます！✨\n日々の業務でお忙しい中、継続してご対応いただき、本当にありがとうございます。いつも頼りにしています。\n{care}\n\n引き続きよろしくお願いいたします！'],
+  thanksN: ['お疲れ様です！\n\nアルコールチェック、{n}勤務日連続でのご対応ありがとうございます！✨\n毎日の積み重ねに、心から感謝しています。いつも本当にありがとうございます。\n{care}\n\n引き続きよろしくお願いいたします！'],
+  follow: ['友だち追加ありがとうございます！\nREBIRTH 管理本部です😊\n\nお知らせをお届けするため、社員番号（数字のみ）を送っていただけますでしょうか。\nご協力ありがとうございます。'],
+  registered: ['社員番号 {code} で受け付けました。ご対応いただき、ありがとうございます😊\n管理本部で確認が済み次第、お知らせが届くようになります。'],
+  registeredSame: ['社員番号 {code} は登録済みです。ご丁寧にありがとうございます😊'],
+  registeredCheck: ['社員番号 {code} で受け付けました。ご対応いただき、ありがとうございます😊\n念のため管理本部で確認いたしますので、確認が済み次第、お知らせが届くようになります。'],
   alcoholAlert: ['【アルコール検知のお知らせ】\nアルコールチェックにて、アルコールが検知されました。\n\n{time} {name}さん（{label}）\n測定結果：{result}\n\n'
     + '該当従業員の運転を開始・継続させず、測定結果および状況の確認をお願いいたします。\n速やかなご対応をお願いいたします。'],
 };
@@ -1028,7 +1072,7 @@ var AC_CARE = {
   season3: ['年度末でお忙しい時期かと思いますが、いつもありがとうございます。'],
   season4: ['新年度もどうぞよろしくお願いいたします。'],
   seasonChange: ['季節の変わり目ですので、体調を崩されませんようお気をつけください。'],
-  thanks: ['いつもお仕事ありがとうございます。', 'いつも業務へのご協力ありがとうございます。'],
+  thanks: ['いつもお仕事ありがとうございます。', 'いつも業務へのご協力ありがとうございます。', '毎日のお仕事、本当にありがとうございます。', 'いつも頼りにしています。ありがとうございます。'],
 };
 
 var AC_ALCOHOL_KINDS = { morning: 1, followBefore: 1, evening: 1, followAfter: 1 };
@@ -1069,7 +1113,7 @@ function AC_careLine(purpose, today, ctx, overrides) {
   if (m === 3) return res(pick('season3'));
   if (m === 4 && d <= 15) return res(pick('season4'));
   if (m === 10 || m === 11 || m === 5) return res(pick('seasonChange'));
-  return res(purpose === 'punch' ? pick('thanks') : '');
+  return res(/^(punch|todayNoClockOut|todayNoClockIn)$/.test(purpose) ? pick('thanks') : '');
 }
 
 /** 純粋関数：テンプレートを選んで差し込む（{care} が空なら、その行ごと詰める） */
@@ -1798,5 +1842,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_todayStatusMessage: AC_todayStatusMessage };
 }

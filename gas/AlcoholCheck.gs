@@ -138,6 +138,100 @@ function alcoholCheckEstimate() {
     Object.keys(counts).reduce(function (a, k) { return a + counts[k]; }, 0));
 }
 
+// ---------------- TOT（勤怠）の勤務予定の取り込み ----------------
+// 固定IPのサーバー（src/tot-sync.js）が毎朝、TOTの勤務予定をこのWebアプリへ送る。
+// まずは確認用：従業員マスタのファイルに「TOT取り込み」シートを作り、シフト表（2026-2028）と並べて表示する。
+// 管理シートへの書き込みはしない。合言葉（TOT_SYNC_SECRET）が一致しない受け渡しは無視する。
+var AC_TOT_SHEET = 'TOT取り込み';
+var AC_TOT_HEADER = ['日付', '社員番号', '氏名', 'TOTの勤務予定（要約）', 'シフト表の値', '比較', 'TOTの元データ'];
+
+function AC_handleTotSync_(body) {
+  var secret = PropertiesService.getScriptProperties().getProperty('TOT_SYNC_SECRET');
+  if (!secret || body.secret !== secret || !Array.isArray(body.days)) return 'NG';
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var master = AC_masterSheet_();
+    var sv = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE).getDataRange().getValues();
+    var rows = AC_buildTotRows(body.days, master.getDataRange().getValues(), sv, AC_toDateFn_());
+    var ss = master.getParent();
+    var sh = ss.getSheetByName(AC_TOT_SHEET) || ss.insertSheet(AC_TOT_SHEET);
+    sh.clearContents();
+    sh.getRange(1, 1, 1, AC_TOT_HEADER.length).setValues([AC_TOT_HEADER]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    if (rows.length) sh.getRange(2, 1, rows.length, AC_TOT_HEADER.length).setValues(rows);
+    var today = AC_today_();
+    AC_state_().setProperty('tot:lastSync', today);
+    Logger.log('TOT取り込み %s行', rows.length);
+    return 'OK ' + rows.length;
+  } finally { lock.releaseLock(); }
+}
+
+/** 純粋関数：TOTの勤務予定を「日付・社員番号・氏名・要約・シフト表の値・比較・元データ」の行にする */
+function AC_buildTotRows(days, masterValues, sv, toDate) {
+  var byTot = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var m = masterValues[i], tot = AC_cellCode_(m[AC_COL.totCode]);
+    if (tot && String(m[AC_COL.status]).trim() !== '退職') byTot[tot] = { code: AC_cellCode_(m[AC_COL.code]), name: String(m[AC_COL.name]).trim() };
+  }
+  var out = [];
+  (days || []).forEach(function (d) {
+    (d.rows || []).forEach(function (r) {
+      var who = byTot[String(r.code)] || { code: '', name: '（マスタに無いTOTコード ' + r.code + '）' };
+      var summary = AC_totSummary(r.schedule);
+      var shift = who.name ? AC_shiftValue(sv, who.name, r.date || d.date, toDate) : '';
+      var compare = shift === null ? 'シフト表に無い' : AC_totMatches(summary, shift) ? '一致' : '要確認';
+      out.push([r.date || d.date, who.code, who.name, summary, shift === null ? '' : shift, compare,
+        JSON.stringify(r.schedule || {}).slice(0, 500)]);
+    });
+  });
+  return out;
+}
+
+/** 純粋関数：TOTの1件を「出勤／公休／有給…」に近い言葉へまとめる（項目名は実データ確認後に調整） */
+function AC_totSummary(s) {
+  s = s || {};
+  var names = [];
+  ['scheduleTypeName', 'workPlaceDivisionName', 'holidayTypeName', 'holidaysObtainedName'].forEach(function (k) {
+    if (s[k]) names.push(String(s[k]));
+  });
+  (s.holidaysObtained || s.holidays || []).forEach && (s.holidaysObtained || s.holidays || []).forEach(function (h) {
+    if (h && (h.name || h.typeName)) names.push(String(h.name || h.typeName));
+  });
+  if (s.clockInSchedule || s.startTime) names.push('予定' + String(s.clockInSchedule || s.startTime).slice(11, 16));
+  return names.join(' / ') || '（不明）';
+}
+
+function AC_totMatches(summary, shift) {
+  var s = String(shift || '').trim();
+  if (!s) return false;
+  if (s === '出勤') return /予定\d|出勤|通常/.test(summary) && !/休/.test(summary);
+  return summary.indexOf(s) !== -1;
+}
+
+/** 純粋関数：シフト表で、その人のシフト行・その日の値。人か日付が無ければ null */
+function AC_shiftValue(sv, name, date, toDate) {
+  if (!sv || sv.length < 3) return null;
+  var col = -1;
+  for (var c = 3; c < sv[1].length; c++) if (toDate(sv[1][c]) === date) { col = c; break; }
+  if (col === -1) return null;
+  var key = AC_normalizeName(name), current = '';
+  for (var r = 2; r < sv.length; r++) {
+    if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
+    if (String(sv[r][2]).trim() === 'シフト' && AC_normalizeName(current) === key) return String(sv[r][col]).trim();
+  }
+  return null;
+}
+
+/** 朝の案内のときに、今日のTOT取り込みが届いているかを確認し、届いていなければ管理者へ知らせる */
+function AC_checkTotSync_(props, today) {
+  if (props.getProperty('TOT_SYNC_EXPECTED') !== 'true') return;
+  var last = AC_state_().getProperty('tot:lastSync');
+  if (last === today) return;
+  AC_pushLine_('【TOT取り込み】' + today + ' の勤務予定が届いていません（最終 ' + (last || 'なし') + '）。\n'
+    + '無料サーバーが停止・回収されていないか確認してください。');
+}
+
 // ---------------- 内部処理 ----------------
 
 /** 1回分の通知を実行する。同じ日・同じ種類は1回だけ。データ不備のときは誰にも送らず管理者へ知らせる。 */
@@ -165,6 +259,7 @@ function AC_dispatch_(kind) {
     return;
   }
   var weather = kind === 'morning' ? AC_fetchWeather_(today) : null;
+  if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
   var people = AC_recipientsFor(kind, d);
   var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
   state.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
@@ -703,6 +798,7 @@ var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineNa
 function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
+    if (body.type === 'tot-sync') return ContentService.createTextOutput(AC_handleTotSync_(body));
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
@@ -1157,5 +1253,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_buildTotRows: AC_buildTotRows, AC_shiftValue: AC_shiftValue };
 }

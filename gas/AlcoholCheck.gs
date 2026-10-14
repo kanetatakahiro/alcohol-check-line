@@ -295,6 +295,45 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
   return { rows: rows, updates: updates, counts: counts };
 }
 
+// ---------------- TOT（API・さくらのVPS経由）の受け取り ----------------
+// VPS（src/tot-relay.js）が毎朝、TOTの従業員・日別スケジュール・日別勤務・打刻を送ってくる。
+// 合言葉（TOT_SYNC_SECRET）が一致したときだけ、ドライブの「TOT取り込み」フォルダに tot-latest.json として保存する。
+function AC_handleTotRaw_(body) {
+  var secret = PropertiesService.getScriptProperties().getProperty('TOT_SYNC_SECRET');
+  if (!secret || body.secret !== secret || !body.results) return 'NG';
+  var folder = AC_totFolder_();
+  var json = JSON.stringify({ today: body.today, fetchedAt: body.fetchedAt, results: body.results });
+  var it = folder.getFilesByName('tot-latest.json');
+  if (it.hasNext()) it.next().setContent(json); else folder.createFile('tot-latest.json', json, MimeType.PLAIN_TEXT);
+  var state = AC_state_();
+  state.setProperty('tot:lastRelay', AC_today_());
+  var summary = AC_totShape(body.results);
+  Logger.log('TOT受信 %s', JSON.stringify(summary));
+  try { AC_processTotRaw_(body); } catch (e) { Logger.log('TOT処理の失敗：%s', e && e.message); }
+  return 'OK ' + JSON.stringify(summary).slice(0, 300);
+}
+
+/** 純粋関数：受け取ったデータの形（件数・項目名）だけをまとめる。値は含めない */
+function AC_totShape(results) {
+  var out = {};
+  Object.keys(results || {}).forEach(function (k) {
+    var v = results[k];
+    if (v && v._error) { out[k] = { error: v._error, errors: v.errors }; return; }
+    var arr = Array.isArray(v) ? v : null, inner = null;
+    if (!arr && v && typeof v === 'object') {
+      Object.keys(v).forEach(function (kk) { if (Array.isArray(v[kk]) && !arr) { arr = v[kk]; inner = kk; } });
+    }
+    out[k] = { count: arr ? arr.length : null, inner: inner, top: Array.isArray(v) ? 'array' : Object.keys(v || {}).slice(0, 10),
+      keys: arr && arr[0] && typeof arr[0] === 'object' ? Object.keys(arr[0]).slice(0, 40) : null };
+  });
+  return out;
+}
+
+/** 受け取ったデータの処理（実データの形を確認してから中身を作る） */
+function AC_processTotRaw_(body) {
+  return;
+}
+
 /** 朝の案内のとき：TOT_IMPORT_REMIND_DAYS 日以上CSVが届いていなければ管理者へ知らせる（未設定なら何もしない） */
 function AC_checkTotSync_(props, today) {
   var days = Number(props.getProperty('TOT_IMPORT_REMIND_DAYS') || 0);
@@ -876,6 +915,7 @@ var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineNa
 function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
+    if (body.type === 'tot-raw') return ContentService.createTextOutput(AC_handleTotRaw_(body));
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');

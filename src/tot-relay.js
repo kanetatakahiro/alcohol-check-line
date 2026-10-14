@@ -1,0 +1,70 @@
+// さくらのVPS（固定IP）で動かす中継役：TOTのAPIから勤怠データを読み取り（GETのみ）、
+// 合言葉付きでApps Script（Webアプリ）へそのまま渡す。判定や通知はApps Script側で行う。
+// トークン・合言葉・取得データはログに出さない（件数とHTTP状態のみ）。
+// 必要な環境変数（サーバーの .env。Gitには入れない）：
+//   TOT_ACCESS_TOKEN  TOTのアクセストークン
+//   GAS_WEBAPP_URL    Apps ScriptのWebアプリURL（/exec）
+//   TOT_SYNC_SECRET   Apps Script側の TOT_SYNC_SECRET と同じ合言葉
+import { assertAllowedTime, validateDate } from './tot-client.js';
+import { japanDate } from './reconcile.js';
+
+const API = 'https://api.kingtime.jp/v1.0';
+
+export function addDays(date, n) {
+  validateDate(date);
+  const t = new Date(`${date}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+}
+
+/** 取得する範囲：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（月末チェック・残業集計用） */
+export function plan(today) {
+  const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+  const prev = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, '0')}-01`;
+  const yesterday = addDays(today, -1);
+  return [
+    { name: 'employees', path: `/employees?date=${today}&includeResigner=false` },
+    { name: 'schedules', path: `/daily-schedules?start=${today}&end=${addDays(today, 30)}` },
+    { name: 'workings', path: `/daily-workings?start=${prev}&end=${yesterday}` },
+    { name: 'timerecord', path: `/daily-workings/timerecord?start=${addDays(today, -7)}&end=${yesterday}` },
+  ];
+}
+
+export async function runRelay({ env = process.env, fetchImpl = fetch, now = () => new Date(),
+  wait = ms => new Promise(r => setTimeout(r, ms)), log = console.log } = {}) {
+  const token = env.TOT_ACCESS_TOKEN, url = env.GAS_WEBAPP_URL, secret = env.TOT_SYNC_SECRET;
+  if (!token || !url || !secret) throw new Error('サーバーの .env に TOT_ACCESS_TOKEN / GAS_WEBAPP_URL / TOT_SYNC_SECRET を設定してください。');
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('GAS_WEBAPP_URL の形式を確認してください。');
+  const today = japanDate(now());
+  const results = {}, status = {};
+  let first = true;
+  for (const item of plan(today)) {
+    if (!first) await wait(1100);
+    first = false;
+    assertAllowedTime(now());
+    const res = await fetchImpl(`${API}${item.path}`, {
+      method: 'GET', redirect: 'error', signal: AbortSignal.timeout(30000),
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+    status[item.name] = res.status;
+    if (res.ok) results[item.name] = await res.json();
+    else {
+      // エラー本文はTOTのエラーコードと文言だけを取り出す（個人情報は含まれない）
+      let errors = null;
+      try { errors = ((await res.json()).errors || []).map(e => ({ code: e.code, message: e.message })); } catch { /* 本文なし */ }
+      results[item.name] = { _error: res.status, errors };
+    }
+  }
+  const res = await fetchImpl(url, {
+    method: 'POST', redirect: 'follow', signal: AbortSignal.timeout(120000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'tot-raw', secret, fetchedAt: now().toISOString(), today, results }),
+  });
+  const text = await res.text();
+  log(JSON.stringify({ today, status, gas: res.status, result: text.slice(0, 120) }));
+  if (!res.ok || !/^OK/.test(text)) throw new Error(`Apps Scriptへの受け渡しに失敗しました（HTTP ${res.status}）。`);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runRelay().catch(e => { console.error(e.message); process.exitCode = 1; });
+}

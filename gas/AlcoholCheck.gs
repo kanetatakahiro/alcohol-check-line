@@ -465,6 +465,84 @@ function AC_namesByTot_(masterValues, employees) {
   return out;
 }
 
+/** 純粋関数：YYYY-MM に n か月足す */
+function AC_addMonths(ym, n) {
+  var y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7)) - 1 + n;
+  y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+  return y + '-' + (m < 9 ? '0' : '') + (m + 1);
+}
+
+/**
+ * 純粋関数：36協定（特別条項あり）の見守り。
+ * months：{ 'YYYY-MM': { overtime: 分（時間外）, holiday: 分（法定休日労働） } }（1人分）
+ * startMonth：協定の起算月（1〜12）。month：今月（YYYY-MM）。
+ * 返り値：引っかかった項目の一覧 [{ kind, level: 'warn'|'over', value, limit, text }]
+ *  ・月の時間外＋休日労働：100時間未満（80時間で注意）
+ *  ・2〜6か月平均（時間外＋休日労働）：80時間以内（70時間で注意）
+ *  ・協定年度の時間外：720時間以内（600時間で注意）
+ *  ・月45時間を超えた月の回数：年6回まで（5回で注意、今月が7回目なら超過）
+ */
+function AC_agreementCheck(months, startMonth, month) {
+  var h = function (min) { return Math.floor((min || 0) / 6) / 10; };
+  var get = function (ym) { var v = months[ym] || {}; return { ot: Number(v.overtime) || 0, hol: Number(v.holiday) || 0 }; };
+  var out = [];
+  var push = function (kind, value, warn, limit, overIf, text) {
+    var level = overIf ? 'over' : value >= warn ? 'warn' : null;
+    if (level) out.push({ kind: kind, level: level, value: value, limit: limit, text: text });
+  };
+  var cur = get(month), curTotal = h(cur.ot + cur.hol);
+  push('month100', curTotal, 80, 100, curTotal >= 100, '今月の時間外＋休日労働 ' + curTotal + '時間（上限100時間未満）');
+  var worst = null;
+  for (var n = 2; n <= 6; n++) {
+    var sum = 0;
+    for (var i = 0; i < n; i++) { var v = get(AC_addMonths(month, -i)); sum += v.ot + v.hol; }
+    var avg = Math.floor(h(sum) / n * 10) / 10;
+    if (!worst || avg > worst.avg) worst = { n: n, avg: avg };
+  }
+  push('avg80', worst.avg, 70, 80, worst.avg > 80, '直近' + worst.n + 'か月平均の時間外＋休日労働 ' + worst.avg + '時間（上限80時間）');
+  var y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7));
+  var start = (m >= startMonth ? y : y - 1) + '-' + (startMonth < 10 ? '0' : '') + startMonth;
+  var yearOt = 0, over45 = 0;
+  for (var ym = start; ym <= month; ym = AC_addMonths(ym, 1)) {
+    var g = get(ym); yearOt += g.ot; if (g.ot > 45 * 60) over45++;
+  }
+  push('year720', h(yearOt), 600, 720, h(yearOt) > 720, '協定年度（' + start + '〜）の時間外 ' + h(yearOt) + '時間（上限720時間）');
+  push('over45', over45, 5, 6, over45 > 6, '月45時間を超えた月 ' + over45 + '回（上限 年6回）');
+  return out;
+}
+
+/** 純粋関数：入社日から、いまの有給の基準期間（6か月後の日から1年ごと）。まだ付与前なら null */
+function AC_paidLeavePeriod(hiredDate, today) {
+  if (!/^\d{4}-\d{2}-\d{2}/.test(String(hiredDate || ''))) return null;
+  var addM = function (d, n) {
+    var y = Number(d.slice(0, 4)), mo = Number(d.slice(5, 7)) - 1 + n, day = Number(d.slice(8, 10));
+    y += Math.floor(mo / 12); mo = ((mo % 12) + 12) % 12;
+    var last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+    return y + '-' + (mo < 9 ? '0' : '') + (mo + 1) + '-' + (Math.min(day, last) < 10 ? '0' : '') + Math.min(day, last);
+  };
+  var first = addM(String(hiredDate).slice(0, 10), 6);
+  if (first > today) return null;
+  var start = first;
+  while (addM(start, 12) <= today) start = addM(start, 12);
+  return { start: start, end: AC_addDays_(addM(start, 12), -1) };
+}
+
+/**
+ * 純粋関数：有給の年5日。used は期間内に取った日数（半休は0.5）。
+ * 残りの日数に対して、取らないといけない日数が多いほど早めに知らせる。
+ * 返り値：null（問題なし）か { level: 'warn'|'over', need, daysLeft }
+ */
+function AC_paidLeaveCheck(period, used, today) {
+  if (!period) return null;
+  var need = Math.max(0, 5 - (Number(used) || 0));
+  if (!need) return null;
+  var daysLeft = Math.round((Date.parse(period.end) - Date.parse(today)) / 86400000) + 1;
+  if (daysLeft <= 0) return null;
+  if (daysLeft <= 60) return { level: 'over', need: need, daysLeft: daysLeft };
+  if (daysLeft <= 120) return { level: 'warn', need: need, daysLeft: daysLeft };
+  return null;
+}
+
 /** 純粋関数：翌月（YYYY-MM） */
 function AC_nextMonth(today) {
   var y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
@@ -1944,5 +2022,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

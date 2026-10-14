@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -524,4 +524,35 @@ test('GAS: 翌月シフトの反映は翌月の日付だけ・数式のセルは
   const r = JSON.parse(JSON.stringify(AC_monthlyApplyPlan(updates, formulas, '2026-11')));
   assert.deepEqual(r.apply.map(u => u.date), ['2026-11-01']);
   assert.deepEqual(r.skipped.map(u => u.date), ['2026-11-02']);
+});
+
+test('GAS: 36協定（特別条項あり）の見守り', () => {
+  assert.equal(AC_addMonths('2026-01', -2), '2025-11');
+  assert.equal(AC_addMonths('2026-11', 3), '2027-02');
+  const H = h => h * 60;
+  // 問題なし
+  assert.equal(AC_agreementCheck({ '2026-10': { overtime: H(20) } }, 4, '2026-10').length, 0);
+  // 今月 時間外90h＋休日15h → 100h以上で超過、2か月平均も超過
+  const r = JSON.parse(JSON.stringify(AC_agreementCheck({ '2026-10': { overtime: H(90), holiday: H(15) }, '2026-09': { overtime: H(70) } }, 4, '2026-10')));
+  assert.equal(r.find(x => x.kind === 'month100').level, 'over');
+  assert.equal(r.find(x => x.kind === 'avg80').level, 'over');
+  // 45h超が今年度6回 → 注意、7回 → 超過（起算月4月）
+  const m6 = {}; ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'].forEach(k => { m6[k] = { overtime: H(46) }; });
+  assert.equal(AC_agreementCheck(m6, 4, '2026-10').find(x => x.kind === 'over45').level, 'warn');
+  m6['2026-10'] = { overtime: H(46) };
+  assert.equal(AC_agreementCheck(m6, 4, '2026-10').find(x => x.kind === 'over45').level, 'over');
+  // 起算月より前の月は数えない
+  assert.equal(AC_agreementCheck({ '2026-03': { overtime: H(500) }, '2026-10': { overtime: H(10) } }, 4, '2026-10').find(x => x.kind === 'year720'), undefined);
+});
+
+test('GAS: 有給の年5日（入社6か月後が基準日）', () => {
+  assert.equal(AC_paidLeavePeriod('2026-06-01', '2026-10-14'), null);   // まだ付与前
+  assert.deepEqual({ ...AC_paidLeavePeriod('2025-04-01', '2026-10-14') }, { start: '2026-10-01', end: '2027-09-30' });
+  assert.deepEqual({ ...AC_paidLeavePeriod('2025-08-31', '2026-10-14') }, { start: '2026-02-28', end: '2027-02-27' });
+  const p = { start: '2025-11-01', end: '2026-10-31' };
+  assert.equal(AC_paidLeaveCheck(p, 5, '2026-10-14'), null);
+  assert.equal(AC_paidLeaveCheck(p, 2, '2026-10-14').level, 'over');
+  assert.equal(AC_paidLeaveCheck(p, 2, '2026-10-14').need, 3);
+  assert.equal(AC_paidLeaveCheck({ start: '2026-04-01', end: '2027-03-31' }, 0, '2026-10-14'), null);   // まだ半年近くある
+  assert.equal(AC_paidLeaveCheck({ start: '2026-02-01', end: '2027-01-31' }, 1, '2026-10-14').level, 'warn');
 });

@@ -284,7 +284,7 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
     var current = r != null && c != null ? String(sv[r][c] == null ? '' : sv[r][c]).trim() : null;
     var result;
     if (current === null) result = 'シフト表に無い';
-    else if (shift === null) result = '未設定';
+    else if (shift === null || (current === '' && AC_isRestDay_(shift))) result = '未設定';   // 未入力の日をTOTの既定の「公休」で埋めない
     else if (shift === '要確認') result = '要確認';
     else if (shift === current || (AC_isRestDay_(shift) && AC_isRestDay_(current))) result = '一致';   // 公休と希望休は同じ「休み」として扱う
     else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift }); }

@@ -401,3 +401,13 @@ test('GAS: 勤怠チェック表（前月・今月、昨日まで）（架空デ
   assert.ok(rows.some(r => r[0] === '2026-10' && /マスタに無い/.test(r[2]) && r[9] === 1));
   assert.ok(rows.some(r => r[0] === '2026-09' && r[5] === 10));
 });
+
+test('GAS: シフト表が空欄の日は、TOTの「公休」では埋めない（出勤・有給は埋める）', () => {
+  const m = (code, name, tot) => { const r = mrow(code, name); r[11] = ''; r[12] = tot; r[13] = ''; return r; };
+  const sv = shiftSheet([['試験 太郎', ['', '', '出勤', '出勤', '出勤', '出勤']]]);
+  const r = AC_buildTotCompare([{ tot: '501', date: '2026-10-01', pattern: '公休' }, { tot: '501', date: '2026-10-02', pattern: '10:00-19:00' }],
+    [MASTER_HEADER, m('90001', '試験 太郎', '501')], sv, toDate2);
+  assert.equal(r.counts['未設定'], 1);
+  assert.equal(r.updates.length, 1);
+  assert.equal(r.updates[0].value, '出勤');
+});

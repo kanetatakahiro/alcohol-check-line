@@ -392,11 +392,24 @@ function AC_processTotRaw_(body) {
       if (!notify) return;
       try { AC_pushTo_(to.userId, text); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
     };
-    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), AC_punchMessage(p.date)); });
+    var overrides = AC_templateOverrides_(), wToday = AC_weatherToday_(today);
+    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), AC_punchMessage(p.date, wToday, overrides)); });
     Object.keys(f.overtime).forEach(function (tot) {
       var min = f.overtime[tot];
-      if (min >= 45 * 60) send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), AC_overtimeMessage(min, 45));
-      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), AC_overtimeMessage(min, 30));
+      if (min >= 45 * 60) {
+        send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), AC_overtimeMessage(min, 45, today, overrides));
+        // 36協定の管理のため、管理者にも必ず知らせる（本人への通知だけで終わらせない）
+        var akey = 'att:' + month + ':ot45admin:' + AC_totKey(tot);
+        if ((notify || test) && !state.getProperty(akey)) {
+          var to = line[AC_totKey(tot)] || {};
+          try {
+            AC_pushLine_(AC_render('ot45Admin', today, { name: names[AC_totKey(tot)] || 'TOTコード' + tot, code: to.code || '－',
+              hours: (Math.floor(min / 6) / 10).toFixed(1) }, overrides));
+            state.setProperty(akey, new Date().toISOString());
+          } catch (e) { Logger.log('45時間の管理者通知に失敗'); }
+        }
+      }
+      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), AC_overtimeMessage(min, 30, today, overrides));
     });
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
@@ -494,25 +507,6 @@ function AC_lineByTotCode(masterValues, today) {
   return out;
 }
 
-function AC_punchMessage(date) {
-  var w = '日月火水木金土'.charAt(new Date(date + 'T00:00:00+09:00').getDay());
-  return 'お疲れさまです😊\n\n' + Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + w + '）の勤怠で、打刻が抜けているかもしれない日がありました。\n\n'
-    + '忙しいと、つい忘れちゃいますよね。\nお手すきのときにTOTを見ていただいて、必要なら修正の申請をお願いします🙏\n\n'
-    + 'わからないことがあれば、いつでも気軽に聞いてくださいね。';
-}
-
-function AC_overtimeMessage(min, level) {
-  var h = (Math.floor(min / 6) / 10).toFixed(1);
-  if (level >= 45) {
-    return 'いつも本当にありがとうございます。\n\n今月の残業が45時間を超えました（今 ' + h + '時間）。\n'
-      + 'これは法律で決められている、原則の上限にあたる時間です。\n\n'
-      + 'がんばってくれている分、体と心がとても心配です。\nひとりで抱え込まずに、上長と一緒に業務の調整をしていきましょう。いつでも相談してくださいね🍀';
-  }
-  return 'いつもお仕事ありがとうございます😊\n\n今月の残業が30時間を超えました（今 ' + h + '時間）。\n\n'
-    + 'がんばってくれている分、無理をしていないか少し心配です。\n'
-    + '業務の量や進め方で困っていることがあれば、遠慮なく相談してくださいね。体を大事にしてください🍀';
-}
-
 var AC_ATT_HEADER = ['月', '社員番号', '氏名', 'TOTコード', '出勤日数', '残業（時間）', '遅刻（回）', '早退（回）', '有休（日）', '欠勤（日）', 'エラー勤務（日）', '未締め（日）', 'LINE登録'];
 
 /** 純粋関数：前月と今月（昨日まで）の勤怠チェック表。エラー勤務・欠勤・残業が多い順 */
@@ -585,7 +579,9 @@ function AC_dispatch_(kind) {
     }
     return;
   }
-  var weather = kind === 'morning' ? AC_fetchWeather_(today) : null;
+  var weather = (kind === 'morning' || kind === 'followBefore' || kind === 'evening') ? AC_weatherToday_(today) : null;
+  var infection = AC_infection_(today);
+  var overrides = AC_templateOverrides_();
   if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
   var people = AC_recipientsFor(kind, d);
   var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
@@ -601,18 +597,34 @@ function AC_dispatch_(kind) {
   var deliver = function (name, text, tag) {
     var key = AC_normalizeName(name);
     var test = tests[key], reg = registry[key];
-    var dedupe = 'sent:' + today + ':' + tag + ':' + (test ? 'test:' + test.code : reg ? reg.code : key);
+    var who = test ? 'test:' + test.code : reg ? reg.code : key;
+    var dedupe = 'sent:' + today + ':' + tag + ':' + who;
     if (state.getProperty(dedupe)) return;
+    if (typeof text === 'function') {   // 気遣いの重複を防ぐ：天気の話は1人1日1回、感染症は7日に1回
+      var careKey = 'att:' + today + ':care:' + who, infKey = 'infLast:' + who;
+      var lastInf = state.getProperty(infKey);
+      var m = text({ weatherUsed: !!state.getProperty(careKey), infectionUsed: !!lastInf && lastInf > AC_addDays_(today, -7) });
+      text = m.text;
+      var markCare = function () {
+        if (m.usedWeather) state.setProperty(careKey, '1');
+        if (m.usedInfection) state.setProperty(infKey, today);
+      };
+    }
     try {
       if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
       else if (reg) AC_pushTo_(reg.userId, text);
       else { unregistered.push(name); return; }
       state.setProperty(dedupe, new Date().toISOString());
+      if (markCare) markCare();
       sent++;
     } catch (e) { failed.push(name); }
   };
-  people.forEach(function (name) { deliver(name, AC_messageFor(kind, today, weather), kind); });
-  thanks.forEach(function (t) { deliver(t.name, AC_thanksMessage(t.streak), 'thanks'); });
+  people.forEach(function (name) {
+    deliver(name, function (c) {
+      return AC_composeMessage(kind, today, { weather: weather, infection: infection, weatherUsed: c.weatherUsed, infectionUsed: c.infectionUsed }, overrides);
+    }, kind);
+  });
+  thanks.forEach(function (t) { deliver(t.name, AC_thanksMessage(t.streak, today, overrides), 'thanks'); });
   // テスト対象が今日の対象外（休み・実施済み）でも、動作確認のため状況を管理者へ知らせる
   Object.keys(tests).forEach(function (k) {
     var t = tests[k];
@@ -792,8 +804,7 @@ function AC_checkAlerts_(props, d, dryRun) {
     Logger.log('要確認の測定結果：%s行目', h.row);
     if (dryRun) return;
     var time = Utilities.formatDate(h.at, AC_TZ, 'HH:mm');
-    AC_pushLine_('【至急・確認のお願い】アルコールチェックの測定結果\n' + time + ' ' + h.name + 'さん（' + h.label + '）\n測定結果：'
-      + h.result + '\n\n念のため、ご本人に体調と運転できるかを確認してあげてください。責めずに、まずは安全を一緒に確認しましょう🙏');
+    AC_pushLine_(AC_render('alcoholAlert', d.today, { time: time, name: h.name, label: h.label, result: h.result }, AC_templateOverrides_()));
     state.setProperty(key, new Date().toISOString());
   });
 }
@@ -918,7 +929,12 @@ function AC_weatherFromJma(json, today) {
   else if (max !== null && max >= 30) kind = 'hot';
   else if ((min !== null && min <= 5) || (max !== null && max <= 12)) kind = 'cold';
   else if (/^1/.test(code)) kind = 'sunny';
-  return { kind: kind, text: text, max: max, min: min };
+  var winds = String((wa.winds || [])[idx] || '');
+  return { kind: kind, text: text, max: max, min: min,
+    snow: /^4/.test(code) || /雪/.test(text.split(' ')[0]),
+    wind: /強く|非常に強く/.test(winds) || /強風/.test(text),
+    freeze: min !== null && min <= 0,
+    swing: max !== null && min !== null && max - min >= 10 };
 }
 
 /** 純粋関数：日付から文面の言い回しを選ぶ（毎日同じ文にならないように） */
@@ -927,65 +943,200 @@ function AC_pick(list, today) {
   return list[n % list.length];
 }
 
-/** 純粋関数：通知の種類ごとの本人向け文面（氏名や他人の情報は含めない） */
-function AC_messageFor(kind, today, weather) {
-  if (kind === 'morning') return AC_morningMessage(today, weather);
-  if (kind === 'followBefore') {
-    return 'おはようございます☀️\n\n今日の出勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした。\n\n'
-      + 'もう済ませていたら、お手すきのときに入力だけしていただけるとうれしいです😊\n'
-      + '朝はバタバタしますよね。気にしすぎなくて大丈夫です！\n\n'
-      + 'これから運転する予定があれば、運転前のチェックだけお願いします🚗\n\n今日も一日、よろしくお願いします✨';
+// ---------------- LINE文面（REBIRTH管理本部の標準ルール） ----------------
+// 「丁寧で親しみやすく、相手への気遣いが自然に伝わる文章」。事務的すぎず、馴れ馴れしすぎず。
+// 文面は「固定テンプレート＋気遣いの一文（{care}）」で作る。AIは使わない（費用ゼロ）。
+// 管理本部が従業員マスタのファイルの「LINE文面」シートで文面を直せる（空欄なら下の既定文）。
+// 1つの欄に「||」で区切って複数書くと、日替わりで使い分ける。
+// 差し込み：{care} 気遣いの一文／{date} 日付／{hours} 時間／{n} 日数／{code} 社員番号／{name} 氏名
+var AC_TEMPLATES = {
+  morning: ['おはようございます！{icon}\n\n{care}\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いいたします！\n今日も一日、よろしくお願いします😊',
+    'おはようございます！{icon}\n\n{care}\n\n運転前のアルコールチェックと、フォームへの入力を本日もよろしくお願いいたします！\n今日も一日、よろしくお願いします😊'],
+  followBefore: ['おはようございます！\n\n{care}\n\n本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
+    + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
+    + 'まだ実施していない場合は、これから運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
+    + '引き続きご協力よろしくお願いいたします！'],
+  evening: ['お疲れ様です！\n本日もお仕事ありがとうございます😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします。\n\n{care}\n\nお帰りの際も、安全運転でお気をつけください！'],
+  followAfter: ['お疲れ様です！\n\n本日の退勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
+    + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
+    + 'まだ実施していない場合は、運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
+    + '本日もお仕事お疲れ様でした！'],
+  punch: ['お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお手数ですが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\nよろしくお願いいたします😊',
+    'お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお忙しいところ恐れ入りますが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\n引き続きよろしくお願いいたします😊'],
+  ot30: ['お疲れ様です！\nいつも業務へのご協力ありがとうございます。\n\n今月の残業時間が30時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
+    + 'お忙しい時期かと思いますが、勤務時間や体調にもお気をつけいただければと思います。\n\n引き続きよろしくお願いいたします。'],
+  ot45: ['お疲れ様です！\nいつも業務にご対応いただき、ありがとうございます。\n\n今月の残業時間が45時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
+    + '勤務時間が長くなっておりますので、今後の業務量や勤務時間について、上長とご相談をお願いいたします。\n\nお忙しいところ恐れ入りますが、よろしくお願いいたします。'],
+  ot45Admin: ['【残業45時間到達のお知らせ】\n{name}さん（社員番号 {code}）の今月の残業時間が45時間に達しました（現在 {hours}時間）。\n'
+    + '36協定の管理のため、勤務状況の確認と、上長による業務量の調整をお願いいたします。\n（ご本人にも、上長へ相談するようご案内しています）'],
+  thanks5: ['お疲れ様です！\n\nアルコールチェックについて、5勤務日連続でのご対応ありがとうございます！😊\n毎日忘れずに入力していただけて、とても助かっています。\n\n引き続きご協力よろしくお願いいたします！'],
+  thanks10: ['お疲れ様です！\n\nアルコールチェック、10勤務日連続でのご対応ありがとうございます！✨\n日々の業務でお忙しい中、継続してご対応いただき、本当にありがとうございます。\n\n引き続きよろしくお願いいたします！'],
+  thanksN: ['お疲れ様です！\n\nアルコールチェック、{n}勤務日連続でのご対応ありがとうございます！✨\n日々の業務でお忙しい中、毎日継続していただき、本当に助かっています。\n\n引き続きよろしくお願いいたします！'],
+  follow: ['友だち追加ありがとうございます！\nREBIRTH 管理本部です😊\n\nお知らせをお届けするため、社員番号（数字のみ）を送っていただけますでしょうか。'],
+  registered: ['社員番号 {code} で受け付けました。ご対応ありがとうございます😊\n管理本部で確認が済み次第、お知らせが届くようになります。'],
+  registeredSame: ['社員番号 {code} は登録済みです。ご対応ありがとうございます😊'],
+  registeredCheck: ['社員番号 {code} で受け付けました。ご対応ありがとうございます😊\n念のため管理本部で確認いたしますので、確認が済み次第、お知らせが届くようになります。'],
+  alcoholAlert: ['【アルコール検知のお知らせ】\nアルコールチェックにて、アルコールが検知されました。\n\n{time} {name}さん（{label}）\n測定結果：{result}\n\n'
+    + '該当従業員の運転を開始・継続させず、測定結果および状況の確認をお願いいたします。\n速やかなご対応をお願いいたします。'],
+};
+
+/** 気遣いの一文（優先順：安全に関わる天候 → 体調に影響する気温 → 感染症 → 通常の天気 → 感謝） */
+var AC_CARE = {
+  snow: ['路面が滑りやすくなる可能性がありますので、運転の際は十分お気をつけください。', '雪や路面の凍結が心配な予報です。運転の際は十分お気をつけください。'],
+  rain: ['今日は雨の予報です☔\n路面が滑りやすくなりますので、車両移動の際はお気をつけください。', '今日は雨が降りそうです☔\n視界や路面に注意して、移動の際はお気をつけください。'],
+  wind: ['風が強い予報ですので、車のドアの開閉などにもお気をつけください。'],
+  hot: ['今日は気温が高くなる予報です。こまめな水分補給をお願いいたします。', '今日は暑くなりそうです。こまめな水分補給と休憩をお願いいたします。'],
+  cold: ['今日は朝から冷え込んでいますね。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。', '今日は冷え込む予報です。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。'],
+  swing: ['朝晩と日中で気温差があるようです。体調管理にお気をつけください。'],
+  infection: ['{infection}が流行しているようですので、体調管理にもお気をつけください。'],
+  sunny: ['今日は天気が良さそうですね！', '今日は晴れの予報です。気持ちよく過ごせそうですね！'],
+  cloudy: ['今日はくもりの予報です。', '今日は雲の多い一日になりそうです。'],
+  thanks: ['いつもお仕事ありがとうございます。', 'いつも業務へのご協力ありがとうございます。'],
+  punchCold: ['寒い中、いつもお仕事ありがとうございます。'],
+  punchHot: ['暑い中、いつもお仕事ありがとうございます。'],
+  punchNormal: ['いつも業務へのご協力ありがとうございます。'],
+  eveningSafety: ['雨や路面の状況にもお気をつけください。'],
+};
+
+/**
+ * 純粋関数：その日の気遣いの一文を選ぶ。
+ * purpose：morning / followBefore / evening / punch（それ以外は気遣いなし）
+ * ctx：{ weather, infection（感染症名）, weatherUsed（その人に今日すでに天気の話をしたか）, infectionUsed }
+ * 戻り値：{ text, usedWeather, usedInfection }。天気が取れないときは天気に触れない（推測しない）。
+ */
+function AC_careLine(purpose, today, ctx, overrides) {
+  ctx = ctx || {};
+  var w = ctx.weather, pick = function (k, vars) { return AC_pickTpl_(k, today, overrides, AC_CARE, vars); };
+  var none = { text: '', usedWeather: false, usedInfection: false };
+  if (purpose === 'punch') {
+    if (w && (w.kind === 'cold' || w.freeze)) return { text: pick('punchCold'), usedWeather: false, usedInfection: false };
+    if (w && w.kind === 'hot') return { text: pick('punchHot'), usedWeather: false, usedInfection: false };
+    return { text: pick('punchNormal'), usedWeather: false, usedInfection: false };
   }
-  if (kind === 'evening') {
-    return 'お疲れさまです😊\n\n今日も一日、本当にありがとうございました！\n\n帰る前のアルコールチェックと、フォームへの入力をお願いします🚗\n\n'
-      + '帰り道も、どうか気をつけてくださいね✨';
+  if (purpose !== 'morning' && purpose !== 'followBefore' && purpose !== 'evening') return none;
+  var weatherOk = w && !ctx.weatherUsed;
+  if (purpose === 'evening') {   // 退勤前は、まだ天気の話をしていない人にだけ安全面の一言
+    if (weatherOk && (w.snow || w.freeze)) return { text: pick('snow'), usedWeather: true, usedInfection: false };
+    if (weatherOk && w.kind === 'rain') return { text: pick('eveningSafety'), usedWeather: true, usedInfection: false };
+    return none;
   }
-  if (kind === 'followAfter') {
-    return 'お疲れさまです🌙\n\n今日の退勤前のアルコールチェック、フォームへの入力がまだ確認できていないようでした。\n\n'
-      + 'もう済ませていたら、お手すきのときに入力だけお願いできると助かります😊\n'
-      + '一日がんばったあとだと、うっかりしちゃいますよね。大丈夫です！\n\n'
-      + '今日も遅くまでありがとうございました。ゆっくり休んでくださいね🍵';
+  if (weatherOk) {
+    if (w.snow || w.freeze) return { text: pick('snow'), usedWeather: true, usedInfection: false };
+    if (w.kind === 'rain') return { text: pick('rain'), usedWeather: true, usedInfection: false };
+    if (w.wind) return { text: pick('wind'), usedWeather: true, usedInfection: false };
+    if (w.kind === 'hot') return { text: pick('hot'), usedWeather: true, usedInfection: false };
+    if (w.kind === 'cold') return { text: pick('cold'), usedWeather: true, usedInfection: false };
+    if (w.swing) return { text: pick('swing'), usedWeather: true, usedInfection: false };
   }
-  return '';
+  if (ctx.infection && !ctx.infectionUsed) return { text: pick('infection', { infection: ctx.infection }), usedWeather: false, usedInfection: true };
+  if (purpose === 'morning') {
+    if (weatherOk && w.kind === 'sunny') return { text: pick('sunny'), usedWeather: true, usedInfection: false };
+    if (weatherOk && w.kind === 'cloudy') return { text: pick('cloudy') + '\n' + pick('thanks'), usedWeather: true, usedInfection: false };
+    return { text: pick('thanks'), usedWeather: false, usedInfection: false };
+  }
+  return none;
 }
 
-/** 純粋関数：朝の案内（天気に合わせた一言。天気が取れないときは天気に触れない） */
-function AC_morningMessage(today, weather) {
-  var ask = AC_pick(['本日も運転前のアルコールチェックと、フォームへの入力をお願いいたします！🚗',
-    '運転前のアルコールチェックと、フォームへの入力を本日もよろしくお願いいたします🚗'], today);
-  var close = AC_pick(['今日も一日、安全運転でよろしくお願いします✨', '今日も一日、よろしくお願いします😊',
-    '本日もよろしくお願いいたします✨'], today);
-  var kind = weather ? weather.kind : 'none';
-  var lines = {
-    sunny: ['☀️ おはようございます！', AC_pick(['今日は晴れて気持ちの良い一日になりそうですね😊',
-      '今日は晴れの予報です。気持ちよく一日を始められそうですね😊'], today)],
-    cloudy: ['🌤 おはようございます！', AC_pick(['今日はくもりの予報です。', '今日は雲の多い一日になりそうです。'], today)],
-    rain: ['☔ おはようございます！', '今日は雨の予報です。\n路面が滑りやすくなりますので、運転の際はお気をつけください😊'],
-    hot: ['☀️ おはようございます！', '今日は気温が高くなる予報です🥵\n屋外での作業もあると思いますので、こまめな水分補給をお願いします！'],
-    cold: ['❄️ おはようございます！', '今日は冷え込む予報です。\n屋外での作業もあると思いますので、暖かくしてお過ごしください😊'],
-    none: ['おはようございます！✨', ''],
-  }[kind];
-  var temp = weather && weather.max !== null && kind !== 'none'
-    ? '（さいたま 最高' + weather.max + '℃' + (weather.min !== null ? '／最低' + weather.min + '℃' : '') + '）' : '';
-  return [lines[0], lines[1] ? lines[1] + temp : '', ask, close].filter(Boolean).join('\n\n');
+/** 純粋関数：テンプレートを選んで差し込む（{care} が空なら、その行ごと詰める） */
+function AC_render(key, today, vars, overrides) {
+  var text = AC_pickTpl_(key, today, overrides, AC_TEMPLATES, vars);
+  return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-/** 純粋関数：連続記録の感謝（評価ではなく感謝を伝える） */
-function AC_thanksMessage(n) {
-  if (n === 5) {
-    return '🎉 アルコールチェック開始から、5勤務日連続で入力ありがとうございます！！\n\n'
-      + '出勤前・退勤前ともに忘れず対応していただけて、本当に助かっています😊\n\n毎日のことでお手数をおかけしますが、いつもありがとうございます✨';
+function AC_pickTpl_(key, today, overrides, base, vars) {
+  var list = (overrides && overrides[key] && overrides[key].length) ? overrides[key] : base[key] || [''];
+  var t = AC_pick(list, today);
+  vars = vars || {};
+  return String(t).replace(/\{(\w+)\}/g, function (m, k) { return vars[k] == null ? '' : String(vars[k]); });
+}
+
+/** 純粋関数：通知の種類ごとの本人向け文面（従来の呼び出し口） */
+function AC_messageFor(kind, today, weather, ctx, overrides) {
+  return AC_composeMessage(kind, today, AC_assign_(ctx || {}, { weather: weather }), overrides).text;
+}
+
+/** 純粋関数：文面と、天気・感染症の話をしたか */
+function AC_composeMessage(kind, today, ctx, overrides) {
+  var care = AC_careLine(kind, today, ctx, overrides);
+  var icon = '';
+  if (kind === 'morning' && care.usedWeather && ctx.weather) {
+    icon = { rain: '☔', hot: '☀️', cold: '❄️', sunny: '☀️', cloudy: '🌤' }[ctx.weather.kind] || '';
+    if (ctx.weather.snow) icon = '❄️';
   }
-  if (n === 10) {
-    return '✨ アルコールチェック、10勤務日連続でのご対応ありがとうございます！！\n\n'
-      + '毎日欠かさず入力していただけて、とても助かっています😊\n\nいつもご協力いただき、本当にありがとうございます！';
-  }
-  if (n === 50) {
-    return '✨ いつもありがとうございます！！\n\nアルコールチェックの入力が、50勤務日連続となりました🎉\n\n'
-      + '日々の業務でお忙しい中、継続してご対応いただき、本当にありがとうございます！\n\n引き続きよろしくお願いします😊';
-  }
-  return '🎉 いつもアルコールチェックへのご協力ありがとうございます！\n\n出勤前・退勤前ともに、' + n
-    + '勤務日連続で入力いただいています👏\n\n毎日の積み重ね、本当にありがとうございます😊';
+  var temp = kind === 'morning' && care.usedWeather && ctx.weather && ctx.weather.max !== null && ctx.weather.max !== undefined
+    ? '（さいたま 最高' + ctx.weather.max + '℃' + (ctx.weather.min !== null && ctx.weather.min !== undefined ? '／最低' + ctx.weather.min + '℃' : '') + '）' : '';
+  var careText = care.text;
+  if (temp) { var cl = careText.split('\n'); cl[0] = cl[0] + temp; careText = cl.join('\n'); }   // 気温は1行目の後ろに
+  var text = AC_render(kind, today, { care: careText, icon: icon }, overrides);
+  return { text: text, usedWeather: care.usedWeather, usedInfection: care.usedInfection };
+}
+
+/** 朝の案内（天気に合わせた一言。天気が取れないときは天気に触れない） */
+function AC_morningMessage(today, weather, overrides) { return AC_messageFor('morning', today, weather, {}, overrides); }
+
+/** 連続記録の感謝（評価ではなく感謝を伝える） */
+function AC_thanksMessage(n, today, overrides) {
+  var key = n === 5 ? 'thanks5' : n === 10 ? 'thanks10' : 'thanksN';
+  return AC_render(key, today || '', { n: n }, overrides);
+}
+
+function AC_punchMessage(date, weather, overrides) {
+  var w = '日月火水木金土'.charAt(new Date(date + 'T00:00:00+09:00').getDay());
+  var care = AC_careLine('punch', date, { weather: weather }, overrides).text;
+  return AC_render('punch', date, { care: care, date: Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + w + '）' }, overrides);
+}
+
+function AC_overtimeMessage(min, level, today, overrides) {
+  var h = (Math.floor(min / 6) / 10).toFixed(1);
+  return AC_render(level >= 45 ? 'ot45' : 'ot30', today || '', { hours: h }, overrides);
+}
+
+/** 「LINE文面」シートの上書き（空欄は既定文）。無ければ既定文でシートを作る */
+var AC_TPL_CACHE = null;
+function AC_templateOverrides_() {
+  if (AC_TPL_CACHE) return AC_TPL_CACHE;
+  var out = {};
+  try {
+    var ss = AC_masterSheet_().getParent();
+    var sh = ss.getSheetByName('LINE文面');
+    if (!sh) {
+      sh = ss.insertSheet('LINE文面');
+      var rows = [['キー', '種類', '文面（||で区切ると日替わり。{care}などは自動で差し込み）']];
+      Object.keys(AC_TEMPLATES).forEach(function (k) { rows.push([k, 'テンプレート', '']); });
+      Object.keys(AC_CARE).forEach(function (k) { rows.push([k, '気遣いの一文', '']); });
+      sh.getRange(1, 1, rows.length, 3).setValues(rows);
+      sh.getRange(1, 1, 1, 3).setFontWeight('bold');
+      sh.setFrozenRows(1);
+      sh.getRange(2, 4, rows.length - 1, 1).setValues(rows.slice(1).map(function (r) {
+        return [(AC_TEMPLATES[r[0]] || AC_CARE[r[0]] || []).join('||')];
+      }));
+      sh.getRange(1, 4).setValue('既定の文面（参考・変更しても反映されません）').setFontWeight('bold');
+    }
+    sh.getDataRange().getValues().slice(1).forEach(function (r) {
+      var v = String(r[2] || '').trim();
+      if (r[0] && v) out[String(r[0]).trim()] = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);
+    });
+  } catch (e) { Logger.log('LINE文面シートの読み込みに失敗（既定文を使用）'); }
+  AC_TPL_CACHE = out;
+  return out;
+}
+
+/** 感染症の流行（管理本部が公的機関の発表を確認して設定：INFECTION_NAME と INFECTION_UNTIL）。期限切れ・未設定なら無し */
+function AC_infection_(today) {
+  var p = PropertiesService.getScriptProperties();
+  var name = String(p.getProperty('INFECTION_NAME') || '').trim(), until = p.getProperty('INFECTION_UNTIL');
+  if (!name || !until || today > until) return '';
+  return name;
+}
+
+/** 今日の天気（1日1回だけ気象庁から取得して共通利用） */
+function AC_weatherToday_(today) {
+  var state = AC_state_(), key = 'att:' + today + ':weather';
+  var cached = state.getProperty(key);
+  if (cached) { try { return JSON.parse(cached); } catch (e) { /* 取り直す */ } }
+  var w = AC_fetchWeather_(today);
+  if (w) state.setProperty(key, JSON.stringify(w));
+  return w;
 }
 
 function AC_today_() {
@@ -1149,7 +1300,7 @@ function AC_handleEvent_(ev) {
   var src = ev && ev.source;
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (ev.type === 'follow') {
-    AC_reply_(ev.replyToken, '友だち追加ありがとうございます😊\nREBIRTH 管理本部です。\n\nお知らせをお届けするために、社員番号（数字だけ）を送っていただけますか？');
+    AC_reply_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
     return;
   }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
@@ -1184,12 +1335,14 @@ function AC_handleEvent_(ev) {
   } finally {
     lock.releaseLock();
   }
+  var ov = AC_templateOverrides_(), td = AC_today_();
   var replies = {
-    fill: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n管理者が確認したら、お知らせが届くようになります。もう少しだけお待ちくださいね。',
-    new: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n管理者が確認したら、お知らせが届くようになります。もう少しだけお待ちくださいね。',
-    same: '社員番号 ' + code + ' はもう登録できています😊 ありがとうございます！',
-    conflict: '社員番号 ' + code + ' で受け付けました。ありがとうございます😊\n念のため管理者が確認しますので、少しだけお待ちくださいね。',
+    fill: AC_render('registered', td, { code: code }, ov),
+    new: AC_render('registered', td, { code: code }, ov),
+    same: AC_render('registeredSame', td, { code: code }, ov),
+    conflict: AC_render('registeredCheck', td, { code: code }, ov),
   };
+
   // 管理者へ：確認のお願い（本人確認して「LINE確認済み」にチェック）
   if (result === 'fill' || result === 'new' || result === 'conflict') {
     try {
@@ -1601,5 +1754,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render };
 }

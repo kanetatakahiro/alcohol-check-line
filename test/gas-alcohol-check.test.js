@@ -10,7 +10,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_planNotifications, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_namesForCode,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
-  AC_filterRegistryByCodes, AC_buildTotRows, AC_shiftValue } = ctx.module.exports;
+  AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -327,21 +327,22 @@ test('GAS: 機器所持にチェックがある社員番号だけに絞る（架
   assert.deepEqual(Object.keys(AC_filterRegistryByCodes(reg, codes)), ['試験太郎']);
 });
 
-test('GAS: TOTの勤務予定をマスタのTOTコードで社員番号・氏名に結び、シフト表と並べる（架空データ）', () => {
+test('GAS: TOTのパターン名をシフト表の区分へ', () => {
+  assert.deepEqual(['10:00-19:00', '9:00-13:00', '公休', '希望休', '有給', '', 'keeper検定'].map(AC_totPatternToShift),
+    ['出勤', '出勤', '公休', '希望休', '有給', null, '要確認']);
+});
+
+test('GAS: TOTのCSVをマスタのTOTコードで結び、シフト表と比べる（架空データ）', () => {
   const m = (code, name, tot, status = '在籍') => { const r = mrow(code, name, { status }); r[11] = '正社員'; r[12] = tot; r[13] = ''; return r; };
   const master = [MASTER_HEADER, m('90001', '試験 太郎', '501'), m('90002', '試験 花子', '502'), m('90003', '試験 退職', '503', '退職')];
   const sv = shiftSheet([['試験 太郎', ['出勤', '公休', '出勤', '出勤', '出勤', '出勤']], ['試験 花子', ['有給', '出勤', '出勤', '出勤', '出勤', '出勤']]]);
-  const daysIn = [{ date: '2026-10-01', rows: [
-    { code: '501', date: '2026-10-01', schedule: { clockInSchedule: '2026-10-01T09:00:00+09:00' } },
-    { code: '502', date: '2026-10-01', schedule: { holidaysObtained: [{ name: '有給' }] } },
-    { code: '503', date: '2026-10-01', schedule: {} },
-  ] }];
-  const rows = [...AC_buildTotRows(daysIn, master, sv, toDate2)].map(r => [...r]);
-  assert.deepEqual(rows.map(r => r.slice(0, 6)), [
-    ['2026-10-01', '90001', '試験 太郎', '予定09:00', '出勤', '一致'],
-    ['2026-10-01', '90002', '試験 花子', '有給', '有給', '一致'],
-    ['2026-10-01', '', '（マスタに無いTOTコード 503）', '（不明）', '', 'シフト表に無い'],
-  ]);
-  assert.equal(AC_shiftValue(sv, '試験 太郎', '2026-10-02', toDate2), '公休');
-  assert.equal(AC_shiftValue(sv, '試験 次郎', '2026-10-02', toDate2), null);
+  const csv = [['従業員コード', '名前', 'パターン名', '日時（曜日なし）'],
+    ['501', 'x', '10:00-19:00', '2026/10/01'], ['501', 'x', '公休', '2026/10/02'], ['501', 'x', '公休', '2026/10/03'],
+    ['502', 'x', '', '2026/10/01'], ['502', 'x', 'keeper検定', '2026/10/02'], ['503', 'x', '公休', '2026/10/01'], ['501', 'x', '公休', '2026/12/01']];
+  const items = AC_parseTotCsv(csv);
+  assert.equal(items.length, 7);
+  const r = AC_buildTotCompare(items, master, sv, toDate2);
+  assert.deepEqual([...r.rows.map(x => x[6])], ['一致', '一致', '違い', '未設定', '要確認', 'マスタに無い', 'シフト表に無い']);
+  assert.deepEqual(JSON.parse(JSON.stringify(r.updates)), [{ row: 2, col: 5, date: '2026-10-03', value: '公休' }]);
+  assert.throws(() => AC_parseTotCsv([['a', 'b']]), /列/);
 });

@@ -1,12 +1,11 @@
 # 変更履歴
 
-## 2026-10-14 TOT（Touch On Time）連携の準備
-- TOTのAPIは許可IPアドレスが必須（空欄は全拒否）。Apps Scriptからは直接接続できないため、固定IPの無料サーバー（Oracle Cloud Always Free）経由にする
-- src/tot-sync.js：毎朝7:05にTOTの従業員・日別スケジュールを読み取り（GETのみ）、合言葉付きでApps Scriptへ渡す。ログは件数のみ
-- Apps Script：受け取った勤務予定を従業員マスタのファイルの「TOT取り込み」シートにシフト表と並べて表示（確認段階。管理シートへは書き込まない）
-- 朝の案内時に当日の取り込みが無ければ管理者へ通知（TOT_SYNC_EXPECTED=true で有効）
+## 2026-10-14 TOT（Touch On Time）のシフトをCSVで取り込む
+- TOTのAPIは許可IPアドレスが必須（空欄は全拒否）で、Apps Scriptからは接続できない。無料サーバー（Oracle Cloud）は登録できなかったため、CSV取り込みにした
+- 管理者がTOTの「日別データ[CSV]（給与計算用）」をドライブの「TOT取り込み」フォルダに置くと、1時間ごとに読み込む
+- パターン名の対応：時刻（10:00-19:00 等）→出勤、公休・希望休・有給→そのまま、空欄→反映しない、その他→要確認
+- まずは従業員マスタのファイルの「TOT取り込み」シートにシフト表との比較を表示。TOT_APPLY=true で、今日以降の食い違うシフト行のセルだけを書き換える
 - 送信記録（sent:/stat:）をユーザープロパティへ移した（設定画面の50件上限対策）
-- deploy/server-setup.sh：サーバーの初期設定（Node 22、cron、.env雛形）
 
 ## 2026-10-09 本人通知を開始（機器所持者のみ）
 - ユーザー承認のうえ NOTIFY_EMPLOYEES=true、REQUIRE_DEVICE=true。テストモード（TEST_CODES/TEST_UNTIL）は終了

@@ -93,7 +93,7 @@ function alcoholCheckAfterWork() { AC_dispatch_('followAfter'); }
 
 /** 定期実行の登録（このプロジェクトの通知用トリガーを消してから登録し直す） */
 function alcoholCheckSetupTriggers() {
-  var names = AC_SCHEDULE.map(function (s) { return s.fn; }).concat(['alcoholCheckAlerts']);
+  var names = AC_SCHEDULE.map(function (s) { return s.fn; }).concat(['alcoholCheckAlerts', 'alcoholCheckImportTot']);
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (names.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
@@ -103,6 +103,8 @@ function alcoholCheckSetupTriggers() {
   });
   // 飲酒検知の確認は10分ごと（回答から最大10分程度で管理者へ届く）
   ScriptApp.newTrigger('alcoholCheckAlerts').timeBased().everyMinutes(10).create();
+  // TOTのCSV（ドライブの「TOT取り込み」フォルダ）の確認は1時間ごと
+  ScriptApp.newTrigger('alcoholCheckImportTot').timeBased().everyHours(1).create();
 }
 
 /** 手動確認用：今日、本人へ送れる人数（登録・確認済み、機器所持の絞り込み後）をログに出す（氏名は出さない） */
@@ -138,98 +140,164 @@ function alcoholCheckEstimate() {
     Object.keys(counts).reduce(function (a, k) { return a + counts[k]; }, 0));
 }
 
-// ---------------- TOT（勤怠）の勤務予定の取り込み ----------------
-// 固定IPのサーバー（src/tot-sync.js）が毎朝、TOTの勤務予定をこのWebアプリへ送る。
-// まずは確認用：従業員マスタのファイルに「TOT取り込み」シートを作り、シフト表（2026-2028）と並べて表示する。
-// 管理シートへの書き込みはしない。合言葉（TOT_SYNC_SECRET）が一致しない受け渡しは無視する。
+// ---------------- TOT（勤怠）のシフトの取り込み（CSV） ----------------
+// TOTのAPIは許可IPが必須でApps Scriptからは使えないため、CSVで取り込む。
+// 管理者がTOTの「日別データ[CSV]（給与計算用）」をGoogleドライブのフォルダ「TOT取り込み」に置くと、
+// 1時間ごとに読み込み、従業員マスタのファイルの「TOT取り込み」シートにシフト表（2026-2028）との比較を出す。
+// TOT_APPLY が "true" のときだけ、今日以降で食い違うシフト行のセルをTOTの値に書き換える（シフト行以外は触らない）。
+// 対応：パターン名が「10:00-19:00」等の時刻 → 出勤、公休・希望休・有給 → そのまま、空欄 → 反映しない、その他 → 要確認。
 var AC_TOT_SHEET = 'TOT取り込み';
-var AC_TOT_HEADER = ['日付', '社員番号', '氏名', 'TOTの勤務予定（要約）', 'シフト表の値', '比較', 'TOTの元データ'];
+var AC_TOT_FOLDER = 'TOT取り込み';
+var AC_TOT_HEADER = ['日付', '社員番号', '氏名', 'TOTのパターン名', 'TOTからの区分', 'シフト表の値', '比較'];
 
-function AC_handleTotSync_(body) {
-  var secret = PropertiesService.getScriptProperties().getProperty('TOT_SYNC_SECRET');
-  if (!secret || body.secret !== secret || !Array.isArray(body.days)) return 'NG';
+/** 1時間ごと：フォルダの新しいCSVを読み込む（同じファイル・同じ更新日時は1回だけ） */
+function alcoholCheckImportTot() {
   var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
+  if (!lock.tryLock(10000)) return;
   try {
-    var master = AC_masterSheet_();
-    var sv = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE).getDataRange().getValues();
-    var rows = AC_buildTotRows(body.days, master.getDataRange().getValues(), sv, AC_toDateFn_());
-    var ss = master.getParent();
-    var sh = ss.getSheetByName(AC_TOT_SHEET) || ss.insertSheet(AC_TOT_SHEET);
-    sh.clearContents();
-    sh.getRange(1, 1, 1, AC_TOT_HEADER.length).setValues([AC_TOT_HEADER]).setFontWeight('bold');
-    sh.setFrozenRows(1);
-    if (rows.length) sh.getRange(2, 1, rows.length, AC_TOT_HEADER.length).setValues(rows);
-    var today = AC_today_();
-    AC_state_().setProperty('tot:lastSync', today);
-    Logger.log('TOT取り込み %s行', rows.length);
-    return 'OK ' + rows.length;
+    var state = AC_state_();
+    var folder = AC_totFolder_();
+    var files = folder.getFiles(), done = 0;
+    while (files.hasNext()) {
+      var f = files.next();
+      if (!/\.csv$/i.test(f.getName())) continue;
+      var key = 'totcsv:' + f.getId() + ':' + f.getLastUpdated().getTime();
+      if (state.getProperty(key)) continue;
+      var result = AC_importTotFile_(f);
+      state.setProperty(key, new Date().toISOString());
+      state.setProperty('tot:lastImport', AC_today_());
+      Logger.log('TOT取り込み：%s', JSON.stringify(result));
+      done++;
+    }
+    if (!done) Logger.log('新しいCSVはありません');
   } finally { lock.releaseLock(); }
 }
 
-/** 純粋関数：TOTの勤務予定を「日付・社員番号・氏名・要約・シフト表の値・比較・元データ」の行にする */
-function AC_buildTotRows(days, masterValues, sv, toDate) {
-  var byTot = {};
-  for (var i = 1; i < (masterValues || []).length; i++) {
-    var m = masterValues[i], tot = AC_cellCode_(m[AC_COL.totCode]);
-    if (tot && String(m[AC_COL.status]).trim() !== '退職') byTot[tot] = { code: AC_cellCode_(m[AC_COL.code]), name: String(m[AC_COL.name]).trim() };
-  }
-  var out = [];
-  (days || []).forEach(function (d) {
-    (d.rows || []).forEach(function (r) {
-      var who = byTot[String(r.code)] || { code: '', name: '（マスタに無いTOTコード ' + r.code + '）' };
-      var summary = AC_totSummary(r.schedule);
-      var shift = who.name ? AC_shiftValue(sv, who.name, r.date || d.date, toDate) : '';
-      var compare = shift === null ? 'シフト表に無い' : AC_totMatches(summary, shift) ? '一致' : '要確認';
-      out.push([r.date || d.date, who.code, who.name, summary, shift === null ? '' : shift, compare,
-        JSON.stringify(r.schedule || {}).slice(0, 500)]);
+/** フォルダ「TOT取り込み」（従業員マスタと同じ場所。無ければマイドライブに作る） */
+function AC_totFolder_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('TOT_FOLDER_ID');
+  if (id) return DriveApp.getFolderById(id);
+  var it = DriveApp.getFoldersByName(AC_TOT_FOLDER);
+  var folder = it.hasNext() ? it.next() : DriveApp.createFolder(AC_TOT_FOLDER);
+  props.setProperty('TOT_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function AC_importTotFile_(file) {
+  var blob = file.getBlob();
+  var text = blob.getDataAsString('Shift_JIS');
+  if (text.indexOf('従業員コード') === -1) text = blob.getDataAsString('UTF-8').replace(/^﻿/, '');
+  var items = AC_parseTotCsv(Utilities.parseCsv(text));
+  var master = AC_masterSheet_();
+  var schedule = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE);
+  var sv = schedule.getDataRange().getValues();
+  var cmp = AC_buildTotCompare(items, master.getDataRange().getValues(), sv, AC_toDateFn_());
+  var ss = master.getParent();
+  var sh = ss.getSheetByName(AC_TOT_SHEET) || ss.insertSheet(AC_TOT_SHEET);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, AC_TOT_HEADER.length).setValues([AC_TOT_HEADER]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  if (cmp.rows.length) sh.getRange(2, 1, cmp.rows.length, AC_TOT_HEADER.length).setValues(cmp.rows);
+  var applied = 0;
+  if (PropertiesService.getScriptProperties().getProperty('TOT_APPLY') === 'true') {
+    var today = AC_today_();
+    cmp.updates.filter(function (u) { return u.date >= today; }).forEach(function (u) {
+      schedule.getRange(u.row + 1, u.col + 1).setValue(u.value);   // シフト行の該当日セルだけ
+      applied++;
     });
-  });
+  }
+  return { file: file.getName(), counts: cmp.counts, applied: applied };
+}
+
+/** 純粋関数：TOTのパターン名をシフト表の区分へ。null は反映しない（未設定） */
+function AC_totPatternToShift(pattern) {
+  var p = String(pattern == null ? '' : pattern).trim();
+  if (!p) return null;
+  if (/^\d{1,2}:\d{2}\s*[-〜~]\s*\d{1,2}:\d{2}$/.test(p)) return '出勤';
+  if (p === '公休' || p === '希望休' || p === '有給') return p;
+  return '要確認';
+}
+
+/** 純粋関数：CSV（1行目が見出し）から {tot, date, pattern} の一覧。必要な列が無ければ例外 */
+function AC_parseTotCsv(rows) {
+  if (!rows || !rows.length) throw AC_error_('CSVが空です');
+  var h = rows[0].map(function (c) { return String(c).replace(/^﻿/, '').trim(); });
+  var ci = h.indexOf('従業員コード'), di = h.indexOf('日時（曜日なし）'), pi = h.indexOf('パターン名');
+  if (di === -1) di = h.indexOf('日時');
+  if (ci === -1 || di === -1 || pi === -1) throw AC_error_('CSVの列（従業員コード・日時・パターン名）が見つかりません');
+  var out = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var m = /(\d{4})\/(\d{1,2})\/(\d{1,2})/.exec(String(r[di] || ''));
+    var tot = String(r[ci] == null ? '' : r[ci]).trim();
+    if (!m || !tot) continue;
+    var date = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+    out.push({ tot: tot, date: date, pattern: String(r[pi] == null ? '' : r[pi]).trim() });
+  }
   return out;
 }
 
-/** 純粋関数：TOTの1件を「出勤／公休／有給…」に近い言葉へまとめる（項目名は実データ確認後に調整） */
-function AC_totSummary(s) {
-  s = s || {};
-  var names = [];
-  ['scheduleTypeName', 'workPlaceDivisionName', 'holidayTypeName', 'holidaysObtainedName'].forEach(function (k) {
-    if (s[k]) names.push(String(s[k]));
-  });
-  (s.holidaysObtained || s.holidays || []).forEach && (s.holidaysObtained || s.holidays || []).forEach(function (h) {
-    if (h && (h.name || h.typeName)) names.push(String(h.name || h.typeName));
-  });
-  if (s.clockInSchedule || s.startTime) names.push('予定' + String(s.clockInSchedule || s.startTime).slice(11, 16));
-  return names.join(' / ') || '（不明）';
-}
-
-function AC_totMatches(summary, shift) {
-  var s = String(shift || '').trim();
-  if (!s) return false;
-  if (s === '出勤') return /予定\d|出勤|通常/.test(summary) && !/休/.test(summary);
-  return summary.indexOf(s) !== -1;
-}
-
-/** 純粋関数：シフト表で、その人のシフト行・その日の値。人か日付が無ければ null */
-function AC_shiftValue(sv, name, date, toDate) {
-  if (!sv || sv.length < 3) return null;
-  var col = -1;
-  for (var c = 3; c < sv[1].length; c++) if (toDate(sv[1][c]) === date) { col = c; break; }
-  if (col === -1) return null;
-  var key = AC_normalizeName(name), current = '';
+/** シフト表の位置：日付→列、氏名→シフト行 */
+function AC_shiftIndex_(sv, toDate) {
+  var cols = {}, rows = {}, dup = {}, current = '';
+  for (var c = 3; c < (sv[1] || []).length; c++) { var d = toDate(sv[1][c]); if (d && cols[d] == null) cols[d] = c; }
   for (var r = 2; r < sv.length; r++) {
     if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
-    if (String(sv[r][2]).trim() === 'シフト' && AC_normalizeName(current) === key) return String(sv[r][col]).trim();
+    if (String(sv[r][2]).trim() !== 'シフト' || !current) continue;
+    var k = AC_normalizeName(current);
+    if (rows[k] != null) dup[k] = true;
+    rows[k] = r;
   }
-  return null;
+  Object.keys(dup).forEach(function (k) { delete rows[k]; });   // 同名は書き換え対象にしない
+  return { cols: cols, rows: rows };
 }
 
-/** 朝の案内のときに、今日のTOT取り込みが届いているかを確認し、届いていなければ管理者へ知らせる */
+/**
+ * 純粋関数：比較表と、書き換え候補（シフト行・日付列・新しい値）。
+ * 書き換えるのは、TOTの区分が出勤・公休・希望休・有給のいずれかで、シフト表の値と違うセルだけ。
+ */
+function AC_buildTotCompare(items, masterValues, sv, toDate) {
+  var byTot = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var m = masterValues[i], tot = AC_cellCode_(m[AC_COL.totCode]);
+    if (tot && String(m[AC_COL.status]).trim() !== '退職') byTot[tot] = { code: AC_cellCode_(m[AC_COL.code]), name: String(m[AC_COL.name]).trim(), alias: String(m[AC_COL.alias] || '').trim() };
+  }
+  var idx = AC_shiftIndex_(sv, toDate);
+  var rows = [], updates = [], counts = { 一致: 0, 違い: 0, 未設定: 0, 要確認: 0, シフト表に無い: 0, マスタに無い: 0 };
+  (items || []).forEach(function (it) {
+    var who = byTot[it.tot];
+    var shift = AC_totPatternToShift(it.pattern);
+    if (!who) { counts['マスタに無い']++; rows.push([it.date, '', '（TOTコード ' + it.tot + '）', it.pattern, shift || '', '', 'マスタに無い']); return; }
+    var r = idx.rows[AC_normalizeName(who.name)];
+    if (r == null && who.alias) r = idx.rows[AC_normalizeName(who.alias)];
+    var c = idx.cols[it.date];
+    var current = r != null && c != null ? String(sv[r][c] == null ? '' : sv[r][c]).trim() : null;
+    var result;
+    if (current === null) result = 'シフト表に無い';
+    else if (shift === null) result = '未設定';
+    else if (shift === '要確認') result = '要確認';
+    else if (shift === current) result = '一致';
+    else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift }); }
+    counts[result]++;
+    rows.push([it.date, who.code, who.name, it.pattern, shift || '', current === null ? '' : current, result]);
+  });
+  return { rows: rows, updates: updates, counts: counts };
+}
+
+/** 朝の案内のとき：TOT_IMPORT_REMIND_DAYS 日以上CSVが届いていなければ管理者へ知らせる（未設定なら何もしない） */
 function AC_checkTotSync_(props, today) {
-  if (props.getProperty('TOT_SYNC_EXPECTED') !== 'true') return;
-  var last = AC_state_().getProperty('tot:lastSync');
-  if (last === today) return;
-  AC_pushLine_('【TOT取り込み】' + today + ' の勤務予定が届いていません（最終 ' + (last || 'なし') + '）。\n'
-    + '無料サーバーが停止・回収されていないか確認してください。');
+  var days = Number(props.getProperty('TOT_IMPORT_REMIND_DAYS') || 0);
+  if (!days) return;
+  var last = AC_state_().getProperty('tot:lastImport');
+  var limit = Utilities.formatDate(new Date(Date.now() - days * 86400000), AC_TZ, 'yyyy-MM-dd');
+  if (last && last > limit) return;
+  var key = 'sent:' + today + ':totremind';
+  var state = AC_state_();
+  if (state.getProperty(key)) return;
+  AC_pushLine_('【TOT取り込み】最近' + days + '日、シフトのCSVが届いていません（最終 ' + (last || 'なし') + '）。\n'
+    + 'TOTの「日別データ[CSV]」をドライブの「TOT取り込み」フォルダに置いてください。');
+  state.setProperty(key, new Date().toISOString());
 }
 
 // ---------------- 内部処理 ----------------
@@ -798,7 +866,6 @@ var AC_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineNa
 function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
-    if (body.type === 'tot-sync') return ContentService.createTextOutput(AC_handleTotSync_(body));
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
@@ -1253,5 +1320,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_buildTotRows: AC_buildTotRows, AC_shiftValue: AC_shiftValue };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare };
 }

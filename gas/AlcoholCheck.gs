@@ -143,13 +143,14 @@ function alcoholCheckEstimate() {
 /** 1回分の通知を実行する。同じ日・同じ種類は1回だけ。データ不備のときは誰にも送らず管理者へ知らせる。 */
 function AC_dispatch_(kind) {
   var props = PropertiesService.getScriptProperties();
+  var state = AC_state_();
   var dryRun = props.getProperty('DRY_RUN') !== 'false';
   var notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';
   var notifyAdmin = props.getProperty('NOTIFY_ADMIN') !== 'false';
   var today = AC_today_();
   var runKey = 'sent:' + today + ':' + kind;
-  if (props.getProperty(runKey)) { Logger.log('実行済みのため中止'); return; }
-  AC_cleanupSentKeys_(props, today);
+  if (state.getProperty(runKey)) { Logger.log('実行済みのため中止'); return; }
+  AC_cleanupSentKeys_(state, today);
 
   var d;
   try {
@@ -159,14 +160,14 @@ function AC_dispatch_(kind) {
     if (!dryRun) {
       AC_pushLine_('【アルコールチェック】' + today + ' の確認ができませんでした。シートを確認してください。（'
         + (e && e.code ? e.code : '不明なエラー') + '）');
-      props.setProperty(runKey, new Date().toISOString());
+      state.setProperty(runKey, new Date().toISOString());
     }
     return;
   }
   var weather = kind === 'morning' ? AC_fetchWeather_(today) : null;
   var people = AC_recipientsFor(kind, d);
   var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
-  props.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
+  state.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
   Logger.log('%s %s：対象 %s人／感謝 %s人（全員登録済みなら %s通）', today, kind, people.length, thanks.length,
     people.length + thanks.length);
   AC_checkAlerts_(props, d, dryRun);
@@ -179,12 +180,12 @@ function AC_dispatch_(kind) {
     var key = AC_normalizeName(name);
     var test = tests[key], reg = registry[key];
     var dedupe = 'sent:' + today + ':' + tag + ':' + (test ? 'test:' + test.code : reg ? reg.code : key);
-    if (props.getProperty(dedupe)) return;
+    if (state.getProperty(dedupe)) return;
     try {
       if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
       else if (reg) AC_pushTo_(reg.userId, text);
       else { unregistered.push(name); return; }
-      props.setProperty(dedupe, new Date().toISOString());
+      state.setProperty(dedupe, new Date().toISOString());
       sent++;
     } catch (e) { failed.push(name); }
   };
@@ -195,9 +196,9 @@ function AC_dispatch_(kind) {
     var t = tests[k];
     if (people.some(function (n) { return AC_normalizeName(n) === k; })) return;
     var key = 'sent:' + today + ':' + kind + ':testinfo:' + t.code;
-    if (props.getProperty(key)) return;
+    if (state.getProperty(key)) return;
     AC_pushLine_('【テスト／' + t.name + 'さん】' + AC_kindLabel(kind) + '：' + AC_notTargetReason(kind, d, t.name));
-    props.setProperty(key, new Date().toISOString());
+    state.setProperty(key, new Date().toISOString());
   });
   if (notifyAdmin && (kind === 'followBefore' || kind === 'followAfter')) {
     var r = kind === 'followBefore' ? d.before : d.after;
@@ -206,7 +207,7 @@ function AC_dispatch_(kind) {
     if (adminMsg) AC_pushLine_(adminMsg);
   }
   Logger.log('送信 %s通／LINE未登録 %s人／失敗 %s人', sent, unregistered.length, failed.length);
-  props.setProperty(runKey, new Date().toISOString());
+  state.setProperty(runKey, new Date().toISOString());
 }
 
 /** 今日のシフト・回答を読み、出勤前・退勤前の照合結果と連続記録の計算に必要なデータをまとめる */
@@ -358,18 +359,19 @@ function alcoholCheckAlerts() {
 function AC_checkAlerts_(props, d, dryRun) {
   var normal = String(props.getProperty('NORMAL_RESULTS') || '').split(',')
     .map(function (s) { return s.trim(); }).filter(Boolean);
+  var state = AC_state_();
   var th = parseFloat(props.getProperty('ALERT_THRESHOLD') || '0.14');
   if (isNaN(th)) th = 0.14;
   var hits = AC_findAlerts(d, normal, th);
   hits.forEach(function (h) {
     var key = 'sent:' + d.today + ':alert:' + h.row;
-    if (props.getProperty(key)) return;
+    if (state.getProperty(key)) return;
     Logger.log('要確認の測定結果：%s行目', h.row);
     if (dryRun) return;
     var time = Utilities.formatDate(h.at, AC_TZ, 'HH:mm');
     AC_pushLine_('【至急・要確認】アルコールチェックの測定結果\n' + time + ' ' + h.name + '（' + h.label + '）\n測定結果：'
       + h.result + '\n本人の運転可否を確認してください。');
-    props.setProperty(key, new Date().toISOString());
+    state.setProperty(key, new Date().toISOString());
   });
 }
 
@@ -403,7 +405,25 @@ function AC_findAlerts(d, normal, threshold) {
   return out;
 }
 
-/** 8日より前の送信記録・40日より前の通数記録を消す（スクリプトプロパティの容量対策） */
+/**
+ * 送信記録（sent:）・通数記録（stat:）の保存先。設定（スクリプトプロパティ）とは分け、
+ * 所有者のユーザープロパティに置く（設定画面は50件までしか表示・追加できないため）。
+ * 以前スクリプトプロパティに保存した記録は、初回に移して消す。
+ */
+function AC_state_() {
+  var state = PropertiesService.getUserProperties();
+  var sp = PropertiesService.getScriptProperties();
+  var all = sp.getProperties(), moved = {};
+  Object.keys(all).forEach(function (k) { if (/^(sent|stat):/.test(k)) moved[k] = all[k]; });
+  var keys = Object.keys(moved);
+  if (keys.length) {
+    state.setProperties(moved);
+    keys.forEach(function (k) { sp.deleteProperty(k); });
+  }
+  return state;
+}
+
+/** 8日より前の送信記録・40日より前の通数記録を消す */
 function AC_cleanupSentKeys_(props, today) {
   var day = function (n) { return Utilities.formatDate(new Date(Date.now() - n * 86400000), AC_TZ, 'yyyy-MM-dd'); };
   var sentLimit = day(8), statLimit = day(40);
@@ -415,7 +435,7 @@ function AC_cleanupSentKeys_(props, today) {
 
 /** 手動確認用：直近の日ごとの見込み通数（全員がLINE登録済みだった場合） */
 function alcoholCheckUsage() {
-  var all = PropertiesService.getScriptProperties().getProperties();
+  var all = AC_state_().getProperties();
   var byDay = {};
   Object.keys(all).forEach(function (k) {
     var m = /^stat:(\d{4}-\d{2}-\d{2}):(\w+)$/.exec(k);

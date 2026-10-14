@@ -379,8 +379,10 @@ function AC_processTotRaw_(body) {
     var names = AC_namesByTot_(mv, R.employees);
     var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
     var send = function (tot, key, text) {
+      var build = function () { return typeof text === 'function' ? text(careCtx(tot)) : text; };   // 送るときだけ気遣いを決める
       if (test) {
         if (state.getProperty(key + ':test')) return;
+        text = build();
         state.setProperty(key + ':test', new Date().toISOString());
         testLines.push('■' + (names[AC_totKey(tot)] || 'TOTコード' + tot) + 'さん宛て' + (line[AC_totKey(tot)] ? '' : '（LINE未登録のため本番では届きません）')
           + '\n' + text);
@@ -390,19 +392,25 @@ function AC_processTotRaw_(body) {
       var to = line[AC_totKey(tot)];
       if (!to) { unreg++; return; }
       if (!notify) return;
-      try { AC_pushTo_(to.userId, text); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
+      try { AC_pushTo_(to.userId, build()); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
     };
     var overrides = AC_templateOverrides_(), infection = AC_infection_(today);
-    var careCtx = function (tot) {   // 天気以外の気遣い。感染症の注意は1人7日に1回
+    var careCtx = function (tot) {   // 天気以外の気遣い。1日の最初のLINEだけ／感染症の注意は1人7日に1回
+      var to = line[AC_totKey(tot)];
+      var ck = 'att:' + today + ':care:' + (to ? to.code : 'tot' + AC_totKey(tot));
+      var careUsed = !!state.getProperty(ck) || !!careGiven[ck];
+      careGiven[ck] = true;
+      if (notify && to) state.setProperty(ck, '1');   // 本番で送るときだけ記録（テストは本人に届かないため記録しない）
       var k = 'infLast:tot' + AC_totKey(tot), last = state.getProperty(k), used = !!last && last > AC_addDays_(today, -7);
-      if (infection && !used) state.setProperty(k, today);
-      return { infection: infection, infectionUsed: used };
+      if (infection && !used && !careUsed && notify) state.setProperty(k, today);
+      return { infection: infection, infectionUsed: used, careUsed: careUsed };
     };
-    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), AC_punchMessage(p.date, careCtx(p.tot), overrides, today)); });
+    var careGiven = {};
+    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }); });
     Object.keys(f.overtime).forEach(function (tot) {
       var min = f.overtime[tot];
       if (min >= 45 * 60) {
-        send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), AC_overtimeMessage(min, 45, today, overrides, careCtx(tot)));
+        send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 45, today, overrides, c); });
         // 36協定の管理のため、管理者にも必ず知らせる（本人への通知だけで終わらせない）
         var akey = 'att:' + month + ':ot45admin:' + AC_totKey(tot);
         if ((notify || test) && !state.getProperty(akey)) {
@@ -414,7 +422,7 @@ function AC_processTotRaw_(body) {
           } catch (e) { Logger.log('45時間の管理者通知に失敗'); }
         }
       }
-      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), AC_overtimeMessage(min, 30, today, overrides, careCtx(tot)));
+      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 30, today, overrides, c); });
     });
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
@@ -605,23 +613,28 @@ function AC_dispatch_(kind) {
     var who = test ? 'test:' + test.code : reg ? reg.code : key;
     var dedupe = 'sent:' + today + ':' + tag + ':' + who;
     if (state.getProperty(dedupe)) return;
-    if (typeof text === 'function') text = text().text;
+    var careKey = 'att:' + today + ':care:' + (test ? test.code : reg ? reg.code : key);
+    if (typeof text === 'function') text = text(!!state.getProperty(careKey)).text;
     try {
       if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
       else if (reg) AC_pushTo_(reg.userId, text);
       else { unregistered.push(name); return; }
       state.setProperty(dedupe, new Date().toISOString());
+      state.setProperty(careKey, '1');   // この人への今日の最初のLINEを送った
       sent++;
     } catch (e) { failed.push(name); }
   };
   people.forEach(function (name) {
-    deliver(name, function () { return AC_composeMessage(kind, today, { weather: weather }, overrides); }, kind);
+    deliver(name, function (careUsed) { return AC_composeMessage(kind, today, { weather: weather, careUsed: careUsed }, overrides); }, kind);
   });
   thanks.forEach(function (t) {
     var reg = registry[AC_normalizeName(t.name)], infKey = 'infLast:' + (reg ? reg.code : AC_normalizeName(t.name));
     var last = state.getProperty(infKey), used = !!last && last > AC_addDays_(today, -7);
-    if (infection && !used) state.setProperty(infKey, today);
-    deliver(t.name, AC_thanksMessage(t.streak, today, overrides, { infection: infection, infectionUsed: used }), 'thanks');
+    deliver(t.name, function (careUsed) {
+      var c = { infection: infection, infectionUsed: used, careUsed: careUsed };
+      if (infection && !used && !careUsed) state.setProperty(infKey, today);
+      return { text: AC_thanksMessage(t.streak, today, overrides, c) };
+    }, 'thanks');
   });
   // テスト対象が今日の対象外（休み・実施済み）でも、動作確認のため状況を管理者へ知らせる
   Object.keys(tests).forEach(function (k) {
@@ -1030,6 +1043,7 @@ function AC_careLine(purpose, today, ctx, overrides) {
   ctx = ctx || {};
   var w = ctx.weather, pick = function (k, vars) { return AC_pickTpl_(k, today, overrides, AC_CARE, vars); };
   var res = function (text, uw, ui) { return { text: text, usedWeather: !!uw, usedInfection: !!ui }; };
+  if (ctx.careUsed) return res(purpose === 'evening' ? pick('eveningDefault') : '');   // 気遣いは1日の最初のLINEだけ
   if (AC_ALCOHOL_KINDS[purpose]) {
     var pre = purpose === 'morning' ? '' : purpose === 'followBefore' ? 'before' : 'evening';
     var key = function (k) { return pre ? pre + k.charAt(0).toUpperCase() + k.slice(1) : k; };

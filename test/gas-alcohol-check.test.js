@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -467,4 +467,17 @@ test('GAS: 「LINE文面」シートの上書き（空欄は既定、||で日替
   assert.ok(['A', 'B'].includes(AC_render('followAfter', '2026-10-08', {}, ov)));
   assert.match(AC_messageFor('morning', '2026-10-08', null, {}, ov), /上書き/);
   assert.match(AC_messageFor('evening', '2026-10-08', null, {}, ov), /退勤前/);   // 上書きの無いキーは既定
+});
+
+test('GAS: 気遣いは1日の最初のLINEだけ（2通目以降は用件のみ）', () => {
+  const w = { kind: 'rain', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false };
+  const first = AC_composeMessage('morning', '2026-10-08', { weather: w }).text;
+  const second = AC_composeMessage('followBefore', '2026-10-08', { weather: w, careUsed: true }).text;
+  assert.match(first, /雨/);
+  assert.doesNotMatch(second, /雨|ありがとうございます。\n\n本日の/);
+  assert.match(second, /本日の出勤前アルコールチェックについて/);
+  assert.match(AC_composeMessage('evening', '2026-10-08', { weather: w, careUsed: true }).text, /お帰りの際も、安全運転で/);   // 締めの一言は残す
+  assert.doesNotMatch(AC_punchMessage('2026-10-08', { careUsed: true }), /季節の変わり目|いつも業務へのご協力/);
+  assert.doesNotMatch(AC_overtimeMessage(1900, 30, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ|季節の変わり目/);
+  assert.doesNotMatch(AC_thanksMessage(5, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ/);
 });

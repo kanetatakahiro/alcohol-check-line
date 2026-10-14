@@ -304,7 +304,7 @@ test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れ
   assert.equal(AC_weatherFromJma(jma('200', 'くもり', ['0', '0'], ['2', '9']), '2026-10-08').kind, 'cold');
   assert.equal(AC_weatherFromJma(null, '2026-10-08'), null);
   const w = AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08');
-  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔[\s\S]*路面が滑りやすく[\s\S]*最高20℃／最低15℃[\s\S]*アルコールチェック/);
+  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔[\s\S]*最高20℃／最低15℃）\n路面が滑りやすく[\s\S]*アルコールチェック/);
   const plain = AC_morningMessage('2026-10-08', null);
   assert.match(plain, /^おはようございます！\n/);
   assert.doesNotMatch(plain, /晴れ|雨|℃|冷え込/);                       // 天気が取れないときは天気に触れない（推測しない）

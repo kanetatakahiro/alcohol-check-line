@@ -287,7 +287,7 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
     else if (shift === null || (current === '' && AC_isRestDay_(shift))) result = '未設定';   // 未入力の日をTOTの既定の「公休」で埋めない
     else if (shift === '要確認') result = '要確認';
     else if (shift === current || (AC_isRestDay_(shift) && AC_isRestDay_(current))) result = '一致';   // 公休と希望休は同じ「休み」として扱う
-    else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift }); }
+    else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift, code: who.code }); }
     counts[result]++;
     if (result === 'シフト表に無い') return;   // シフト表（運転する人）に載っていない人は件数だけ数える
     rows.push([it.date, who.code, who.name, it.pattern, shift || '', current === null ? '' : current, result]);
@@ -368,6 +368,10 @@ function AC_processTotRaw_(body) {
       });
     }
     Logger.log('シフト比較 %s／書き換え %s件', JSON.stringify(cmp.counts), applied);
+  }
+  // 1b. 翌月のシフトを管理シートへ反映（毎月28日以降の朝に届く。月1回だけ）
+  if (Array.isArray(R.employees) && Array.isArray(R.nextSchedules) && props.getProperty('TOT_MONTHLY_APPLY') !== 'false') {
+    AC_applyNextMonthShift_(R, mv, ss, today);
   }
   // 2. 打刻漏れ・残業・当日の勤怠状況（お知らせは夜22:30の取り込みのときだけ送る）
   var night = body.mode === 'night';
@@ -459,6 +463,68 @@ function AC_namesByTot_(masterValues, employees) {
     if (t && String(masterValues[i][AC_COL.name]).trim()) out[t] = String(masterValues[i][AC_COL.name]).trim();
   }
   return out;
+}
+
+/** 純粋関数：翌月（YYYY-MM） */
+function AC_nextMonth(today) {
+  var y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+  return m === 12 ? (y + 1) + '-01' : y + '-' + (m < 9 ? '0' : '') + (m + 1);
+}
+
+/**
+ * 純粋関数：翌月分の書き換え候補のうち、実際に書き換えるもの。
+ * 対象の月の日付だけ・数式が入っているセルは書き換えない（数式を守る）。
+ */
+function AC_monthlyApplyPlan(updates, formulas, month) {
+  var apply = [], skipped = [];
+  (updates || []).forEach(function (u) {
+    if (String(u.date).slice(0, 7) !== month) return;
+    if (formulas && formulas[u.row] && formulas[u.row][u.col]) skipped.push(u); else apply.push(u);
+  });
+  return { apply: apply, skipped: skipped };
+}
+
+var AC_TOT_MONTH_SHEET = 'TOT翌月シフト反映';
+
+/** 翌月のシフトをTOTの値で管理シート（2026-2028）へ書き換える。結果は「TOT翌月シフト反映」シートと管理者のLINEへ */
+function AC_applyNextMonthShift_(R, mv, ss, today) {
+  var month = AC_nextMonth(today), state = AC_state_(), doneKey = 'totmonth:' + month;
+  if (state.getProperty(doneKey)) return;
+  var label = Number(month.slice(5, 7)) + '月';
+  var schedule = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE);
+  var range = schedule.getDataRange(), sv = range.getValues(), formulas = range.getFormulas();
+  var toDate = AC_toDateFn_();
+  var hasCols = Object.keys(AC_shiftIndex_(sv, toDate).cols).some(function (d) { return d.slice(0, 7) === month; });
+  if (!hasCols) {
+    AC_adminNotice_('totmonth', '【確認のお願い】' + label + 'のシフトをTOTから反映しようとしましたが、管理シート「' + AC_SHEET_SCHEDULE + '」に' + label + 'の日付の列が見つかりませんでした🙇‍♀️\n'
+      + '日付の列をご用意いただければ、翌朝もう一度反映します。');
+    return;
+  }
+  var cmp = AC_buildTotCompare(AC_totScheduleItems({ employees: R.employees, schedules: R.nextSchedules }), mv, sv, toDate);
+  var plan = AC_monthlyApplyPlan(cmp.updates, formulas, month);
+  plan.apply.forEach(function (u) { schedule.getRange(u.row + 1, u.col + 1).setValue(u.value); });
+  // 結果（元の値も残すので、必要なら手で戻せる）
+  var sh = ss.getSheetByName(AC_TOT_MONTH_SHEET) || ss.insertSheet(AC_TOT_MONTH_SHEET);
+  sh.clearContents();
+  var head = AC_TOT_HEADER.concat(['反映']);
+  var skippedKey = {};
+  plan.skipped.forEach(function (u) { skippedKey[u.date + ':' + u.code] = 1; });
+  var rows = cmp.rows.filter(function (r) { return String(r[0]).slice(0, 7) === month; }).map(function (r) {
+    if (r[6] !== '違い') return r.concat(['']);
+    return r.concat([skippedKey[r[0] + ':' + r[1]] ? '数式のセルのため書き換えなし' : 'TOTの値に書き換え（元の値：' + (r[5] || '空欄') + '）']);
+  });
+  sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  if (rows.length) sh.getRange(2, 1, rows.length, head.length).setValues(rows);
+  state.setProperty(doneKey, new Date().toISOString());
+  var c = cmp.counts;
+  AC_pushLine_('【' + label + 'のシフト反映】TOTの' + label + 'のシフトを管理シートに反映しました！いつもシフト作成ありがとうございます😊\n'
+    + '・書き換え：' + plan.apply.length + '件\n・一致（変更なし）：' + c['一致'] + '件\n'
+    + (c['未設定'] ? '・未設定（TOTに予定がなく空欄のまま）：' + c['未設定'] + '件\n' : '')
+    + (c['要確認'] ? '・要確認（区分を判断できず書き換えなし）：' + c['要確認'] + '件\n' : '')
+    + (plan.skipped.length ? '・数式のセルのため書き換えなし：' + plan.skipped.length + '件\n' : '')
+    + (c['マスタに無い'] ? '・従業員マスタに無い人：' + c['マスタに無い'] + '件\n' : '')
+    + '詳しくは従業員マスタの「' + AC_TOT_MONTH_SHEET + '」シートをご覧ください（元の値も残しています）。');
 }
 
 /** 純粋関数：TOTの勤務予定を {tot, date, pattern} に（pattern は「10:00-19:00」か休暇名。有休→有給） */
@@ -1878,5 +1944,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

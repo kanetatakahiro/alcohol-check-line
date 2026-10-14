@@ -21,18 +21,32 @@ export function addDays(date, n) {
  * 取得する範囲。
  *  朝（morning）：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（シフト反映・勤怠チェック表）
  *  夜（night、20時以降）：上に加えて、今日の予定と打刻（当日の勤怠状況のお知らせ用）
+ *  毎月28日以降の朝：翌月1日〜末日のシフトも取る（翌月分のシフトを管理シートへ反映するため）
  */
+export function nextMonthRange(today) {
+  const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+  const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1;
+  const start = `${ny}-${String(nm).padStart(2, '0')}-01`;
+  const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  return { start, end: `${start.slice(0, 8)}${String(last).padStart(2, '0')}` };
+}
+
 export function plan(today, mode = 'morning') {
   const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
   const prev = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, '0')}-01`;
   const yesterday = addDays(today, -1);
   const night = mode === 'night';
-  return [
+  const items = [
     { name: 'employees', path: `/employees?date=${today}&includeResigner=false` },
     { name: 'schedules', path: `/daily-schedules?start=${today}&end=${addDays(today, 30)}` },
     { name: 'workings', path: `/daily-workings?start=${prev}&end=${yesterday}` },
     { name: 'timerecord', path: `/daily-workings/timerecord?start=${addDays(today, -7)}&end=${night ? today : yesterday}` },
   ];
+  if (!night && Number(today.slice(8, 10)) >= 28) {
+    const r = nextMonthRange(today);
+    items.push({ name: 'nextSchedules', path: `/daily-schedules?start=${r.start}&end=${r.end}` });
+  }
+  return items;
 }
 
 /** 日本時間の時（0〜23） */

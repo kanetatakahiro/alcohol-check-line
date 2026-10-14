@@ -36,3 +36,11 @@ test('TOT中継: 夜（20時以降）は今日の打刻まで取る', () => {
   assert.ok(plan('2026-10-14', 'night').find(x => x.name === 'timerecord').path.endsWith('end=2026-10-14'));
   assert.ok(plan('2026-10-14').find(x => x.name === 'timerecord').path.endsWith('end=2026-10-13'));
 });
+
+test('TOT中継: 28日以降の朝だけ翌月1日〜末日のシフトも取る', () => {
+  assert.equal(plan('2026-10-27').find(x => x.name === 'nextSchedules'), undefined);
+  assert.equal(plan('2026-10-28', 'night').find(x => x.name === 'nextSchedules'), undefined);
+  assert.ok(plan('2026-10-28').find(x => x.name === 'nextSchedules').path.endsWith('start=2026-11-01&end=2026-11-30'));
+  assert.ok(plan('2026-12-31').find(x => x.name === 'nextSchedules').path.endsWith('start=2027-01-01&end=2027-01-31'));
+  assert.ok(plan('2027-01-28').find(x => x.name === 'nextSchedules').path.endsWith('start=2027-02-01&end=2027-02-28'));
+});

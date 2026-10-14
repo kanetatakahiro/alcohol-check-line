@@ -400,7 +400,7 @@ test('GAS: 打刻漏れ等（エラー勤務・7日以内）と今月の残業�
   const f = AC_attendanceFindings(totR, '2026-10-09');
   assert.deepEqual(JSON.parse(JSON.stringify(f.punchErrors)), [{ tot: '0501', date: '2026-10-08' }]);   // 10/1は8日前なので対象外
   assert.equal(f.overtime['0501'], 1900);   // 9月分は含めない
-  assert.match(AC_punchMessage('2026-10-08', null), /10\/8（木）の打刻が確認できませんでした/);
+  assert.match(AC_punchMessage('2026-10-08', {}), /10\/8（木）の打刻が確認できませんでした/);
   assert.match(AC_overtimeMessage(1900, 30, '2026-10-08'), /30時間に達しましたので[\s\S]*現在 31\.6時間/);
   assert.match(AC_overtimeMessage(2800, 45, '2026-10-08'), /45時間/);
 });
@@ -430,20 +430,31 @@ test('GAS: シフト表が空欄の日は、TOTの「公休」では埋めない
   assert.equal(r.updates[0].value, '出勤');
 });
 
-test('GAS: 気遣いの一文は優先順に1つ・天気の話は1人1日1回・残業や検知には入れない', () => {
+test('GAS: アルコールチェックの通知は天気を優先、それ以外は天気以外の気遣い', () => {
   const w = (o) => Object.assign({ kind: 'cloudy', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false }, o);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'rain', wind: true }) }).text, /雨の予報|雨が降りそう/);   // 安全（雨）が強風より先
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'cold', snow: true }) }).text, /路面|雪/);                // 雪が寒さより先
+  // アルコールチェック：天気（安全 → 気温 → ふだん）
+  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'rain', wind: true }) }).text, /雨の予報|雨が降りそう/);
+  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'cold', snow: true }) }).text, /路面|雪/);
   assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'hot', max: 34 }) }).text, /水分補給/);
   assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ swing: true }) }).text, /気温差/);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({}), infection: 'インフルエンザ' }).text, /インフルエンザが流行しているようですので/);
-  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({}), infection: 'インフルエンザ', infectionUsed: true }).usedInfection, false);
-  const again = AC_careLine('followBefore', '2026-10-08', { weather: w({ kind: 'rain' }), weatherUsed: true });
-  assert.equal(again.text, '');                                                                   // 朝に天気の話をした人には繰り返さない
-  assert.equal(AC_careLine('ot30', '2026-10-08', { weather: w({ kind: 'cold' }) }).text, '');
-  assert.match(AC_punchMessage('2026-10-08', w({ kind: 'cold' })), /寒い中、いつもお仕事ありがとうございます/);
-  assert.match(AC_punchMessage('2026-10-08', null), /いつも業務へのご協力ありがとうございます[\s\S]*10\/8（木）の打刻が確認できませんでした/);
+  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }), infection: 'インフルエンザ' }).text, /天気|晴れ/);   // 天気が感染症より優先
+  assert.match(AC_careLine('followBefore', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨で路面/);
+  assert.match(AC_careLine('evening', '2026-10-08', { weather: w({ kind: 'cold' }) }).text, /暖かくしてお帰り/);
+  assert.match(AC_careLine('followAfter', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /帰り道/);
+  assert.equal(AC_careLine('evening', '2026-10-08', { weather: null }).text, '');                 // 天気が取れない日は触れない
+  // それ以外：天気には触れない
+  for (const k of ['punch', 'ot30', 'ot45', 'thanks']) {
+    assert.doesNotMatch(AC_careLine(k, '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨|寒|暑|天気|晴|雪|風/);
+  }
+  assert.match(AC_careLine('punch', '2026-10-08', { infection: 'インフルエンザ' }).text, /インフルエンザが流行しているようですので/);
+  assert.equal(AC_careLine('punch', '2026-10-08', { infection: 'インフルエンザ', infectionUsed: true }).usedInfection, false);
+  assert.match(AC_careLine('punch', '2026-10-08', {}).text, /季節の変わり目/);                  // 10月は季節の変わり目
+  assert.match(AC_careLine('punch', '2026-07-08', {}).text, /ありがとうございます/);
+  assert.match(AC_careLine('ot30', '2026-12-08', {}).text, /年末/);
+  assert.equal(AC_careLine('ot45', '2026-12-08', {}).text, '');                                // 45時間は用件をはっきり
+  assert.match(AC_punchMessage('2026-10-08', {}), /10\/8（木）の打刻が確認できませんでした/);
   assert.match(AC_overtimeMessage(2800, 45, '2026-10-08'), /上長とご相談をお願いいたします/);
+  assert.match(AC_thanksMessage(5, '2026-10-08', null, { infection: 'インフルエンザ' }), /インフルエンザ/);
   assert.match(AC_render('ot45Admin', '2026-10-08', { name: '試験 太郎', code: '90001', hours: '46.6' }), /36協定[\s\S]*業務量の調整/);
   const alert = AC_render('alcoholAlert', '2026-10-08', { time: '08:00', name: '試験 太郎', label: '出勤前', result: '0.20' });
   assert.match(alert, /^【アルコール検知のお知らせ】[\s\S]*運転を開始・継続させず/);

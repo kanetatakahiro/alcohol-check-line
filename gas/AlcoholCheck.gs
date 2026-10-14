@@ -229,7 +229,7 @@ function AC_totPatternToShift(pattern) {
 function AC_parseTotCsv(rows) {
   if (!rows || !rows.length) throw AC_error_('CSVが空です');
   var h = rows[0].map(function (c) { return String(c).replace(/^﻿/, '').trim(); });
-  var ci = h.indexOf('従業員コード'), di = h.indexOf('日時（曜日なし）'), pi = h.indexOf('パターン名');
+  var ci = h.indexOf('従業員コード'), di = h.indexOf('日時（曜日なし）'), pi = h.indexOf('パターン名'), ni = h.indexOf('名前');
   if (di === -1) di = h.indexOf('日時');
   if (ci === -1 || di === -1 || pi === -1) throw AC_error_('CSVの列（従業員コード・日時・パターン名）が見つかりません');
   var out = [];
@@ -239,7 +239,8 @@ function AC_parseTotCsv(rows) {
     var tot = String(r[ci] == null ? '' : r[ci]).trim();
     if (!m || !tot) continue;
     var date = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
-    out.push({ tot: tot, date: date, pattern: String(r[pi] == null ? '' : r[pi]).trim() });
+    out.push({ tot: tot, date: date, pattern: String(r[pi] == null ? '' : r[pi]).trim(),
+      name: ni === -1 ? '' : String(r[ni] == null ? '' : r[ni]).trim() });
   }
   return out;
 }
@@ -274,7 +275,7 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
   (items || []).forEach(function (it) {
     var who = byTot[AC_totKey(it.tot)];
     var shift = AC_totPatternToShift(it.pattern);
-    if (!who) { counts['マスタに無い']++; rows.push([it.date, '', '（TOTコード ' + it.tot + '）', it.pattern, shift || '', '', 'マスタに無い']); return; }
+    if (!who) { counts['マスタに無い']++; rows.push([it.date, '', (it.name || '（氏名なし）') + '（TOTコード ' + it.tot + '）', it.pattern, shift || '', '', 'マスタに無い']); return; }
     var r = idx.rows[AC_normalizeName(who.name)];
     if (r == null && who.alias) r = idx.rows[AC_normalizeName(who.alias)];
     var c = idx.cols[it.date];

@@ -441,7 +441,8 @@ test('GAS: アルコールチェックの通知は天気を優先、それ以外
   assert.match(AC_careLine('followBefore', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨で路面/);
   assert.match(AC_careLine('evening', '2026-10-08', { weather: w({ kind: 'cold' }) }).text, /暖かくしてお帰り/);
   assert.match(AC_careLine('followAfter', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /帰り道/);
-  assert.equal(AC_careLine('evening', '2026-10-08', { weather: null }).text, '');                 // 天気が取れない日は触れない
+  assert.match(AC_careLine('evening', '2026-10-08', { weather: null }).text, /安全運転/);          // 天気が取れない日は天気に触れない
+  assert.equal(AC_careLine('followAfter', '2026-10-08', { weather: null }).text, '');
   // それ以外：天気には触れない
   for (const k of ['punch', 'ot30', 'ot45', 'thanks']) {
     assert.doesNotMatch(AC_careLine(k, '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨|寒|暑|天気|晴|雪|風/);

@@ -954,11 +954,11 @@ var AC_TEMPLATES = {
     + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
     + 'まだ実施していない場合は、これから運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
     + '引き続きご協力よろしくお願いいたします！'],
-  evening: ['お疲れ様です！\n本日もお仕事ありがとうございます😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします。\n\n{care}\n\nお帰りの際も、安全運転でお気をつけください！'],
+  evening: ['お疲れ様です！\n本日もお仕事ありがとうございます😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いいたします。\n\n{care}'],
   followAfter: ['お疲れ様です！\n\n本日の退勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした。\n\n'
     + 'すでに実施済みの場合は、お手数ですが入力をお願いいたします。\n'
     + 'まだ実施していない場合は、運転する前に必ず実施をお願いいたします🚗 次回以降も、運転前の実施をよろしくお願いいたします。\n\n'
-    + '本日もお仕事お疲れ様でした！'],
+    + '{care}\n本日もお仕事お疲れ様でした！'],
   punch: ['お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお手数ですが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\nよろしくお願いいたします😊',
     'お疲れ様です！\n{care}\n\n勤怠を確認したところ、{date}の打刻が確認できませんでした。\nお忙しいところ恐れ入りますが、TOTでご確認のうえ、必要な修正をお願いいたします。\n\n引き続きよろしくお願いいたします😊'],
   ot30: ['お疲れ様です！\nいつも業務へのご協力ありがとうございます。\n\n今月の残業時間が30時間に達しましたので、ご連絡いたしました（現在 {hours}時間）。\n'
@@ -1007,6 +1007,7 @@ var AC_CARE = {
   eveningHot: ['暑い中、本日も一日ありがとうございました。水分補給もお忘れなく。'],
   eveningCold: ['夜は冷え込みますので、暖かくしてお帰りください。'],
   eveningSwing: ['朝晩は冷えますので、体調にお気をつけください。'],
+  eveningDefault: ['お帰りの際も、安全運転でお気をつけください！'],
   // 天気以外（打刻漏れ・残業・継続記録など）
   infection: ['{infection}が流行しているようですので、体調管理にもお気をつけください。'],
   season12: ['年末に向けてお忙しい中、いつもありがとうございます。'],
@@ -1042,6 +1043,7 @@ function AC_careLine(purpose, today, ctx, overrides) {
       if (purpose === 'morning' && w.kind === 'sunny') return res(pick('sunny'), true);
       if (purpose === 'morning' && w.kind === 'cloudy') return res(pick('cloudy') + '\n' + pick('thanks'), true);
     }
+    if (purpose === 'evening') return res(pick('eveningDefault'));
     return res(purpose === 'morning' ? pick('thanks') : '');
   }
   // 天気以外の気遣い
@@ -1134,6 +1136,12 @@ function AC_templateOverrides_() {
       }));
       sh.getRange(1, 4).setValue('既定の文面（参考・変更しても反映されません）').setFontWeight('bold');
     }
+    var have = {};
+    sh.getDataRange().getValues().slice(1).forEach(function (r) { have[String(r[0]).trim()] = true; });
+    var add = [];   // 後から増えたキーを追記（文面は空欄＝既定）
+    Object.keys(AC_TEMPLATES).forEach(function (k) { if (!have[k]) add.push([k, 'テンプレート', '', AC_TEMPLATES[k].join('||')]); });
+    Object.keys(AC_CARE).forEach(function (k) { if (!have[k]) add.push([k, '気遣いの一文', '', AC_CARE[k].join('||')]); });
+    if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 4).setValues(add);
     sh.getDataRange().getValues().slice(1).forEach(function (r) {
       var v = String(r[2] || '').trim();
       if (r[0] && v) out[String(r[0]).trim()] = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);

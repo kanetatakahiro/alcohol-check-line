@@ -216,6 +216,8 @@ function AC_totKey(v) {
   return /^\d+$/.test(t) ? String(t.replace(/^0+(?=\d)/, '')) : t;
 }
 
+function AC_isRestDay_(v) { return v === '公休' || v === '希望休'; }
+
 /** 純粋関数：TOTのパターン名をシフト表の区分へ。null は反映しない（未設定） */
 function AC_totPatternToShift(pattern) {
   var p = String(pattern == null ? '' : pattern).trim();
@@ -284,7 +286,7 @@ function AC_buildTotCompare(items, masterValues, sv, toDate) {
     if (current === null) result = 'シフト表に無い';
     else if (shift === null) result = '未設定';
     else if (shift === '要確認') result = '要確認';
-    else if (shift === current) result = '一致';
+    else if (shift === current || (AC_isRestDay_(shift) && AC_isRestDay_(current))) result = '一致';   // 公休と希望休は同じ「休み」として扱う
     else { result = '違い'; updates.push({ row: r, col: c, date: it.date, value: shift }); }
     counts[result]++;
     if (result === 'シフト表に無い') return;   // シフト表（運転する人）に載っていない人は件数だけ数える
@@ -329,9 +331,187 @@ function AC_totShape(results) {
   return out;
 }
 
-/** 受け取ったデータの処理（実データの形を確認してから中身を作る） */
+/**
+ * 受け取ったデータの処理：
+ *  1. 勤務予定をシフト表（2026-2028）と比べる（TOT_APPLY=true なら今日以降の食い違うシフト欄を書き換え）
+ *  2. 打刻漏れ等（TOTのエラー勤務）と今月の残業を本人へLINE（ATTENDANCE_NOTIFY=true のときだけ）
+ *  3. 従業員マスタのファイルに「勤怠チェック」シート（前月・今月の集計）を作る
+ */
 function AC_processTotRaw_(body) {
-  return;
+  var props = PropertiesService.getScriptProperties();
+  var today = body.today || AC_today_();
+  var R = body.results || {};
+  var master = AC_masterSheet_();
+  var mv = master.getDataRange().getValues();
+  var ss = master.getParent();
+  // 1. シフト
+  if (Array.isArray(R.employees) && Array.isArray(R.schedules)) {
+    var schedule = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE);
+    var sv = schedule.getDataRange().getValues();
+    var cmp = AC_buildTotCompare(AC_totScheduleItems(R), mv, sv, AC_toDateFn_());
+    var sh = ss.getSheetByName(AC_TOT_SHEET) || ss.insertSheet(AC_TOT_SHEET);
+    sh.clearContents();
+    sh.getRange(1, 1, 1, AC_TOT_HEADER.length).setValues([AC_TOT_HEADER]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    if (cmp.rows.length) sh.getRange(2, 1, cmp.rows.length, AC_TOT_HEADER.length).setValues(cmp.rows);
+    var applied = 0;
+    if (props.getProperty('TOT_APPLY') === 'true') {
+      cmp.updates.filter(function (u) { return u.date >= today; }).forEach(function (u) {
+        schedule.getRange(u.row + 1, u.col + 1).setValue(u.value);
+        applied++;
+      });
+    }
+    Logger.log('シフト比較 %s／書き換え %s件', JSON.stringify(cmp.counts), applied);
+  }
+  // 2. 打刻漏れ・残業
+  if (Array.isArray(R.employees) && Array.isArray(R.workings)) {
+    var f = AC_attendanceFindings(R, today);
+    var line = AC_lineByTotCode(mv, today);
+    var notify = props.getProperty('ATTENDANCE_NOTIFY') === 'true' && props.getProperty('DRY_RUN') === 'false';
+    var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7);
+    var send = function (tot, key, text) {
+      if (state.getProperty(key)) return;
+      var to = line[AC_totKey(tot)];
+      if (!to) { unreg++; return; }
+      if (!notify) return;
+      try { AC_pushTo_(to.userId, text); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
+    };
+    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), AC_punchMessage(p.date)); });
+    Object.keys(f.overtime).forEach(function (tot) {
+      var min = f.overtime[tot];
+      if (min >= 45 * 60) send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), AC_overtimeMessage(min, 45));
+      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), AC_overtimeMessage(min, 30));
+    });
+    Logger.log('勤怠：エラー勤務 %s件／残業30h超 %s人／45h超 %s人／送信 %s通／LINE未登録 %s件（通知%s）',
+      f.punchErrors.length, Object.keys(f.overtime).filter(function (k) { return f.overtime[k] >= 1800 && f.overtime[k] < 2700; }).length,
+      Object.keys(f.overtime).filter(function (k) { return f.overtime[k] >= 2700; }).length, sent, unreg, notify ? 'オン' : 'オフ');
+    // 3. 勤怠チェック表
+    var rows = AC_attendanceReport(R, mv, today);
+    var rs = ss.getSheetByName('勤怠チェック') || ss.insertSheet('勤怠チェック');
+    rs.clearContents();
+    rs.getRange(1, 1, 1, AC_ATT_HEADER.length).setValues([AC_ATT_HEADER]).setFontWeight('bold');
+    rs.setFrozenRows(1);
+    if (rows.length) rs.getRange(2, 1, rows.length, AC_ATT_HEADER.length).setValues(rows);
+  }
+}
+
+/** 純粋関数：TOTの勤務予定を {tot, date, pattern} に（pattern は「10:00-19:00」か休暇名。有休→有給） */
+function AC_totScheduleItems(R) {
+  var codeByKey = AC_totCodeByKey_(R.employees);
+  var out = [];
+  AC_totFlat_(R.schedules).forEach(function (s) {
+    var tot = codeByKey[s.employeeKey];
+    if (!tot || !s.date) return;
+    var pattern = '';
+    if (s.clockInSchedule && s.clockOutSchedule) {
+      pattern = AC_hm_(s.clockInSchedule) + '-' + AC_hm_(s.clockOutSchedule);
+    } else if (s.holidaysObtained && s.holidaysObtained.fulltimeHoliday && s.holidaysObtained.fulltimeHoliday.name) {
+      pattern = s.holidaysObtained.fulltimeHoliday.name === '有休' ? '有給' : String(s.holidaysObtained.fulltimeHoliday.name);
+    }
+    out.push({ tot: tot, date: s.date, pattern: pattern });
+  });
+  return out;
+}
+
+function AC_hm_(iso) { var m = /T(\d{2}):(\d{2})/.exec(String(iso || '')); return m ? String(Number(m[1])) + ':' + m[2] : ''; }
+function AC_totFlat_(days) {
+  var out = [];
+  (days || []).forEach(function (d) { (d.dailySchedules || d.dailyWorkings || []).forEach(function (x) { out.push(x); }); });
+  return out;
+}
+function AC_totCodeByKey_(employees) {
+  var m = {};
+  (employees || []).forEach(function (e) { if (e && e.key) m[e.key] = String(e.code || ''); });
+  return m;
+}
+
+/**
+ * 純粋関数：打刻漏れ等（TOTのエラー勤務。昨日から7日前まで）と、今月の残業（分）。
+ * 残業 = TOTの「残業」＋「深夜残業」（日別の合計）。
+ */
+function AC_attendanceFindings(R, today) {
+  var codeByKey = AC_totCodeByKey_(R.employees);
+  var from = AC_addDays_(today, -7), month = today.slice(0, 7);
+  var punchErrors = [], overtime = {};
+  AC_totFlat_(R.workings).forEach(function (w) {
+    var tot = codeByKey[w.employeeKey];
+    if (!tot || !w.date) return;
+    if (w.isError === true && w.date >= from && w.date < today) punchErrors.push({ tot: tot, date: w.date });
+    if (w.date.slice(0, 7) === month) overtime[tot] = (overtime[tot] || 0) + (Number(w.overtime) || 0) + (Number(w.lateNightOvertime) || 0);
+  });
+  return { punchErrors: punchErrors, overtime: overtime };
+}
+
+function AC_addDays_(date, n) {
+  var t = new Date(date + 'T00:00:00Z');
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+}
+
+/** 純粋関数：従業員マスタから「TOTコード → {code, userId}」（LINE確認済み・退職でない人。アルコール対象かは問わない） */
+function AC_lineByTotCode(masterValues, today) {
+  var out = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var r = masterValues[i];
+    if (r[AC_COL.lineOk] !== true || !AC_isUserId(r[AC_COL.userId])) continue;
+    if (String(r[AC_COL.status]).trim() === '退職' || (today && AC_isRetired(r[AC_COL.retiredOn], today))) continue;
+    var tot = AC_totKey(r[AC_COL.totCode]);
+    if (tot) out[tot] = { code: AC_cellCode_(r[AC_COL.code]), userId: r[AC_COL.userId] };
+  }
+  return out;
+}
+
+function AC_punchMessage(date) {
+  var w = '日月火水木金土'.charAt(new Date(date + 'T00:00:00+09:00').getDay());
+  return 'お疲れさまです。\n' + Number(date.slice(5, 7)) + '/' + Number(date.slice(8, 10)) + '（' + w + '）の勤怠に、確認が必要な点がありました（打刻漏れなど）。\n'
+    + 'お手数ですが、TOTで内容をご確認のうえ、必要に応じて修正の申請をお願いします🙏';
+}
+
+function AC_overtimeMessage(min, level) {
+  var h = (Math.floor(min / 6) / 10).toFixed(1);
+  if (level >= 45) {
+    return 'お疲れさまです。\n今月の残業時間が45時間を超えました（現在 ' + h + '時間）。\n'
+      + '法律で定められた原則の上限に達しています。上長と業務の調整をお願いします。いつもありがとうございます。';
+  }
+  return 'お疲れさまです。\n今月の残業時間が30時間を超えました（現在 ' + h + '時間）。\n'
+    + '無理のないよう、体調に気をつけてくださいね。業務の調整が必要なときは遠慮なく相談してください。';
+}
+
+var AC_ATT_HEADER = ['月', '社員番号', '氏名', 'TOTコード', '出勤日数', '残業（時間）', '遅刻（回）', '早退（回）', '有休（日）', '欠勤（日）', 'エラー勤務（日）', '未締め（日）', 'LINE登録'];
+
+/** 純粋関数：前月と今月（昨日まで）の勤怠チェック表。エラー勤務・欠勤・残業が多い順 */
+function AC_attendanceReport(R, masterValues, today) {
+  var codeByKey = AC_totCodeByKey_(R.employees);
+  var who = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var t = AC_totKey(masterValues[i][AC_COL.totCode]);
+    if (t) who[t] = { code: AC_cellCode_(masterValues[i][AC_COL.code]), name: String(masterValues[i][AC_COL.name]).trim(), line: masterValues[i][AC_COL.lineOk] === true };
+  }
+  var nameByTot = {};
+  (R.employees || []).forEach(function (e) { nameByTot[AC_totKey(e.code)] = String(e.lastName || '') + ' ' + String(e.firstName || ''); });
+  var agg = {};
+  AC_totFlat_(R.workings).forEach(function (w) {
+    var tot = codeByKey[w.employeeKey];
+    if (!tot || !w.date || w.date >= today) return;
+    var k = w.date.slice(0, 7) + '|' + AC_totKey(tot);
+    var a = agg[k] = agg[k] || { work: 0, ot: 0, late: 0, early: 0, paid: 0, absent: 0, err: 0, open: 0 };
+    var hol = (w.holidaysObtained && w.holidaysObtained.fulltimeHoliday && w.holidaysObtained.fulltimeHoliday.name) || '';
+    if (Number(w.totalWork) > 0) a.work++;
+    a.ot += (Number(w.overtime) || 0) + (Number(w.lateNightOvertime) || 0);
+    if (Number(w.late) > 0) a.late++;
+    if (Number(w.earlyLeave) > 0) a.early++;
+    if (hol === '有休') a.paid++;
+    if (hol === '欠勤') a.absent++;
+    if (w.isError === true) a.err++;
+    if (w.isClosing === false) a.open++;
+  });
+  var rows = Object.keys(agg).map(function (k) {
+    var p = k.split('|'), a = agg[k], m = who[p[1]] || {};
+    return [p[0], m.code || '', m.name || (nameByTot[p[1]] || '').trim() + '（マスタに無い）', p[1], a.work, Math.round(a.ot / 6) / 10,
+      a.late, a.early, a.paid, a.absent, a.err, a.open, m.line ? '済' : ''];
+  });
+  rows.sort(function (x, y) { return (x[0] < y[0] ? 1 : x[0] > y[0] ? -1 : 0) || (y[10] - x[10]) || (y[9] - x[9]) || (y[5] - x[5]); });
+  return rows;
 }
 
 /** 朝の案内のとき：TOT_IMPORT_REMIND_DAYS 日以上CSVが届いていなければ管理者へ知らせる（未設定なら何もしない） */
@@ -640,7 +820,7 @@ function AC_cleanupSentKeys_(props, today) {
   var day = function (n) { return Utilities.formatDate(new Date(Date.now() - n * 86400000), AC_TZ, 'yyyy-MM-dd'); };
   var sentLimit = day(8), statLimit = day(40);
   Object.keys(props.getProperties()).forEach(function (k) {
-    var m = /^(sent|stat):(\d{4}-\d{2}-\d{2}):/.exec(k);
+    var m = /^(sent|stat|att):(\d{4}-\d{2}(?:-\d{2})?):/.exec(k);
     if (m && m[2] < (m[1] === 'sent' ? sentLimit : statLimit)) props.deleteProperty(k);
   });
 }
@@ -1370,5 +1550,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage };
 }

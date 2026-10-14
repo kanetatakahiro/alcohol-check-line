@@ -10,7 +10,8 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_planNotifications, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_namesForCode,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
-  AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare } = ctx.module.exports;
+  AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -346,4 +347,57 @@ test('GAS: TOTのCSVをマスタのTOTコードで結び、シフト表と比べ
   assert.equal(r.counts['シフト表に無い'], 1);
   assert.deepEqual(JSON.parse(JSON.stringify(r.updates)), [{ row: 2, col: 5, date: '2026-10-03', value: '公休' }]);
   assert.throws(() => AC_parseTotCsv([['a', 'b']]), /列/);
+});
+
+// TOT APIの形（架空データ）
+const totR = {
+  employees: [{ key: 'k1', code: '0501', lastName: '試験', firstName: '太郎' }, { key: 'k2', code: '0502', lastName: '試験', firstName: '花子' }],
+  schedules: [{ date: '2026-10-01', dailySchedules: [
+    { date: '2026-10-01', employeeKey: 'k1', scheduleTypeName: '通常勤務', clockInSchedule: '2026-10-01T10:00+09:00', clockOutSchedule: '2026-10-01T19:00+09:00', holidaysObtained: {} },
+    { date: '2026-10-01', employeeKey: 'k2', scheduleTypeName: '全日休暇', holidaysObtained: { fulltimeHoliday: { code: '1', name: '有休' } } }] },
+    { date: '2026-10-02', dailySchedules: [
+    { date: '2026-10-02', employeeKey: 'k1', scheduleTypeName: '全日休暇', holidaysObtained: { fulltimeHoliday: { code: '9', name: '公休' } } }] }],
+  workings: [
+    { date: '2026-09-30', dailyWorkings: [{ date: '2026-09-30', employeeKey: 'k1', isError: false, isClosing: true, overtime: 600, lateNightOvertime: 0, totalWork: 480, late: 0, earlyLeave: 0, holidaysObtained: { fulltimeHoliday: {} } }] },
+    { date: '2026-10-08', dailyWorkings: [
+      { date: '2026-10-08', employeeKey: 'k1', isError: true, isClosing: false, overtime: 1500, lateNightOvertime: 400, totalWork: 500, late: 5, earlyLeave: 0, holidaysObtained: { fulltimeHoliday: {} } },
+      { date: '2026-10-08', employeeKey: 'k2', isError: false, isClosing: false, overtime: 0, totalWork: 0, holidaysObtained: { fulltimeHoliday: { name: '欠勤' } } }] },
+    { date: '2026-10-01', dailyWorkings: [{ date: '2026-10-01', employeeKey: 'k1', isError: true, isClosing: true, overtime: 0, totalWork: 300, holidaysObtained: {} }] }],
+};
+
+test('GAS: TOTの勤務予定（API）を時刻・休暇名にし、公休と希望休は同じ休みとして扱う（架空データ）', () => {
+  const items = AC_totScheduleItems(totR);
+  assert.deepEqual(JSON.parse(JSON.stringify(items)), [
+    { tot: '0501', date: '2026-10-01', pattern: '10:00-19:00' }, { tot: '0502', date: '2026-10-01', pattern: '有給' }, { tot: '0501', date: '2026-10-02', pattern: '公休' }]);
+  const m = (code, name, tot) => { const r = mrow(code, name); r[11] = ''; r[12] = tot; r[13] = ''; return r; };
+  const master = [MASTER_HEADER, m('90001', '試験 太郎', '501'), m('90002', '試験 花子', '502')];
+  const sv = shiftSheet([['試験 太郎', ['出勤', '希望休', '出勤', '出勤', '出勤', '出勤']], ['試験 花子', ['出勤', '出勤', '出勤', '出勤', '出勤', '出勤']]]);
+  const r = AC_buildTotCompare(items, master, sv, toDate2);
+  assert.equal(r.counts['一致'], 2);
+  assert.equal(r.counts['違い'], 1);
+  assert.equal(r.updates[0].value, '有給');
+});
+
+test('GAS: 打刻漏れ等（エラー勤務・7日以内）と今月の残業を拾う（架空データ）', () => {
+  const f = AC_attendanceFindings(totR, '2026-10-09');
+  assert.deepEqual(JSON.parse(JSON.stringify(f.punchErrors)), [{ tot: '0501', date: '2026-10-08' }]);   // 10/1は8日前なので対象外
+  assert.equal(f.overtime['0501'], 1900);   // 9月分は含めない
+  assert.match(AC_punchMessage('2026-10-08'), /10\/8（木）の勤怠/);
+  assert.match(AC_overtimeMessage(1900, 30), /30時間を超えました（現在 31\.6時間）/);
+  assert.match(AC_overtimeMessage(2800, 45), /45時間/);
+});
+
+test('GAS: 勤怠の本人通知先はLINE確認済み・在籍の人だけ、TOTコードで引く（架空データ）', () => {
+  const m = (code, name, tot, opt) => { const r = mrow(code, name, opt); r[11] = ''; r[12] = tot; r[13] = ''; return r; };
+  const master = [MASTER_HEADER, m('90001', '試験 太郎', '501', { userId: uid(1), alcohol: false }), m('90002', '試験 花子', '502', { userId: uid(2), ok: false }),
+    m('90003', '試験 三郎', '503', { userId: uid(3), status: '退職' })];
+  assert.deepEqual(Object.keys(AC_lineByTotCode(master, '2026-10-09')), ['501']);
+});
+
+test('GAS: 勤怠チェック表（前月・今月、昨日まで）（架空データ）', () => {
+  const m = (code, name, tot) => { const r = mrow(code, name); r[11] = ''; r[12] = tot; r[13] = ''; return r; };
+  const rows = [...AC_attendanceReport(totR, [MASTER_HEADER, m('90001', '試験 太郎', '501')], '2026-10-09')].map(r => [...r]);
+  assert.deepEqual(rows[0], ['2026-10', '90001', '試験 太郎', '501', 2, 31.7, 1, 0, 0, 0, 2, 1, '済']);
+  assert.ok(rows.some(r => r[0] === '2026-10' && /マスタに無い/.test(r[2]) && r[9] === 1));
+  assert.ok(rows.some(r => r[0] === '2026-09' && r[5] === 10));
 });

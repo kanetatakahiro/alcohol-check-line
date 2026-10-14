@@ -210,6 +210,12 @@ function AC_importTotFile_(file) {
   return { file: file.getName(), counts: cmp.counts, applied: applied };
 }
 
+/** 純粋関数：TOTの従業員コードの比較用キー（「0083」と「83」を同じに扱う） */
+function AC_totKey(v) {
+  var t = String(v == null ? '' : v).replace(/^'/, '').trim();
+  return /^\d+$/.test(t) ? String(t.replace(/^0+(?=\d)/, '')) : t;
+}
+
 /** 純粋関数：TOTのパターン名をシフト表の区分へ。null は反映しない（未設定） */
 function AC_totPatternToShift(pattern) {
   var p = String(pattern == null ? '' : pattern).trim();
@@ -260,13 +266,13 @@ function AC_shiftIndex_(sv, toDate) {
 function AC_buildTotCompare(items, masterValues, sv, toDate) {
   var byTot = {};
   for (var i = 1; i < (masterValues || []).length; i++) {
-    var m = masterValues[i], tot = AC_cellCode_(m[AC_COL.totCode]);
+    var m = masterValues[i], tot = AC_totKey(m[AC_COL.totCode]);
     if (tot && String(m[AC_COL.status]).trim() !== '退職') byTot[tot] = { code: AC_cellCode_(m[AC_COL.code]), name: String(m[AC_COL.name]).trim(), alias: String(m[AC_COL.alias] || '').trim() };
   }
   var idx = AC_shiftIndex_(sv, toDate);
   var rows = [], updates = [], counts = { 一致: 0, 違い: 0, 未設定: 0, 要確認: 0, シフト表に無い: 0, マスタに無い: 0 };
   (items || []).forEach(function (it) {
-    var who = byTot[it.tot];
+    var who = byTot[AC_totKey(it.tot)];
     var shift = AC_totPatternToShift(it.pattern);
     if (!who) { counts['マスタに無い']++; rows.push([it.date, '', '（TOTコード ' + it.tot + '）', it.pattern, shift || '', '', 'マスタに無い']); return; }
     var r = idx.rows[AC_normalizeName(who.name)];

@@ -367,9 +367,19 @@ function AC_processTotRaw_(body) {
   if (Array.isArray(R.employees) && Array.isArray(R.workings)) {
     var f = AC_attendanceFindings(R, today);
     var line = AC_lineByTotCode(mv, today);
-    var notify = props.getProperty('ATTENDANCE_NOTIFY') === 'true' && props.getProperty('DRY_RUN') === 'false';
-    var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7);
+    var live = props.getProperty('DRY_RUN') === 'false';
+    var notify = props.getProperty('ATTENDANCE_NOTIFY') === 'true' && live;
+    var test = !notify && props.getProperty('ATTENDANCE_TEST') === 'true' && live;   // テスト：本人ではなく管理者へまとめて1通
+    var names = AC_namesByTot_(mv, R.employees);
+    var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
     var send = function (tot, key, text) {
+      if (test) {
+        if (state.getProperty(key + ':test')) return;
+        state.setProperty(key + ':test', new Date().toISOString());
+        testLines.push('■' + (names[AC_totKey(tot)] || 'TOTコード' + tot) + 'さん宛て' + (line[AC_totKey(tot)] ? '' : '（LINE未登録のため本番では届きません）')
+          + '\n' + text.replace(/^お疲れさまです。\n/, ''));
+        return;
+      }
       if (state.getProperty(key)) return;
       var to = line[AC_totKey(tot)];
       if (!to) { unreg++; return; }
@@ -382,9 +392,15 @@ function AC_processTotRaw_(body) {
       if (min >= 45 * 60) send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), AC_overtimeMessage(min, 45));
       else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), AC_overtimeMessage(min, 30));
     });
+    if (test && testLines.length) {
+      var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
+      var body2 = testLines.join('\n\n');
+      AC_pushLine_((head + body2).slice(0, 4900));
+      sent = 1;
+    }
     Logger.log('勤怠：エラー勤務 %s件／残業30h超 %s人／45h超 %s人／送信 %s通／LINE未登録 %s件（通知%s）',
       f.punchErrors.length, Object.keys(f.overtime).filter(function (k) { return f.overtime[k] >= 1800 && f.overtime[k] < 2700; }).length,
-      Object.keys(f.overtime).filter(function (k) { return f.overtime[k] >= 2700; }).length, sent, unreg, notify ? 'オン' : 'オフ');
+      Object.keys(f.overtime).filter(function (k) { return f.overtime[k] >= 2700; }).length, sent, unreg, notify ? 'オン' : test ? 'テスト（管理者へ）' : 'オフ');
     // 3. 勤怠チェック表
     var rows = AC_attendanceReport(R, mv, today);
     var rs = ss.getSheetByName('勤怠チェック') || ss.insertSheet('勤怠チェック');
@@ -393,6 +409,17 @@ function AC_processTotRaw_(body) {
     rs.setFrozenRows(1);
     if (rows.length) rs.getRange(2, 1, rows.length, AC_ATT_HEADER.length).setValues(rows);
   }
+}
+
+/** 純粋関数：TOTコード → 氏名（マスタ優先、無ければTOTの氏名） */
+function AC_namesByTot_(masterValues, employees) {
+  var out = {};
+  (employees || []).forEach(function (e) { out[AC_totKey(e.code)] = (String(e.lastName || '') + ' ' + String(e.firstName || '')).trim(); });
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var t = AC_totKey(masterValues[i][AC_COL.totCode]);
+    if (t && String(masterValues[i][AC_COL.name]).trim()) out[t] = String(masterValues[i][AC_COL.name]).trim();
+  }
+  return out;
 }
 
 /** 純粋関数：TOTの勤務予定を {tot, date, pattern} に（pattern は「10:00-19:00」か休暇名。有休→有給） */

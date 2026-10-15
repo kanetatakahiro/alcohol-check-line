@@ -372,8 +372,8 @@ function AC_processTotRaw_(body) {
     }
     Logger.log('シフト比較 %s／書き換え %s件', JSON.stringify(cmp.counts), applied);
   }
-  // 1b. 翌月のシフトを管理シートへ反映（毎月28日以降の朝に届く。月1回だけ）
-  if (Array.isArray(R.employees) && Array.isArray(R.nextSchedules) && props.getProperty('TOT_MONTHLY_APPLY') !== 'false') {
+  // 1b. 翌月のシフトを管理シートへ反映（翌月分は28日以降の朝に届く。28日以降の修正も拾うため、反映は月末の朝に1回だけ）
+  if (Array.isArray(R.employees) && Array.isArray(R.nextSchedules) && AC_isMonthEnd(today) && props.getProperty('TOT_MONTHLY_APPLY') !== 'false') {
     AC_applyNextMonthShift_(R, mv, ss, today);
   }
   // 2. 打刻漏れ・残業・当日の勤怠状況（お知らせは夜22:30の取り込みのときだけ送る）
@@ -744,9 +744,9 @@ function alcoholCheckOnAttendanceForm(e) {
     try { g = AC_pushFormToGroups_(plan.code, plan.groupText.slice(0, 4900)); } catch (eg) { Logger.log('グループ送信の失敗'); }
     var adminText = (plan.text + '\n' + (g.sent ? '（' + g.dept + 'のグループLINEにもお知らせしました）'
       : '（' + (g.dept || '所属未設定') + 'のグループLINEが未登録のため、グループには送っていません）')).slice(0, 4900);
-    // 本運用後は勤怠管理グループへ（未登録・送信失敗なら管理者の個別LINEへ）。テスト期間は管理者の個別LINEへ
+    // 管理者向けの内容は勤怠管理グループへ（未登録・送信失敗なら管理者の個別LINEへ）
     var adminSent = 0;
-    if (!isTest) {
+    {
       try {
         (AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || []).forEach(function (gid) {
           try { AC_pushTo_(gid, adminText); adminSent++; } catch (e1) { Logger.log('勤怠管理グループへの送信に失敗'); }
@@ -764,7 +764,7 @@ function alcoholCheckOnAttendanceForm(e) {
 // 公式LINEを部門のグループに招待し、グループで「部門登録 ○○」と送ると、そのグループを部門（従業員マスタの所属）に結びつける。
 // 勤怠連絡フォームの送信があると、対象者の所属のグループへすぐに知らせる。
 var AC_GROUP_SHEET = 'LINEグループ';
-// 勤怠管理専用グループ（管理者向けの内容をすべて受け取る）。「部門登録 勤怠管理」で登録する。本運用の開始日から使う
+// 勤怠管理専用グループ（フォームの管理者向けの内容を受け取る）。「部門登録 勤怠管理」で登録する
 var AC_ADMIN_GROUP = '勤怠管理';
 var AC_GROUP_HEADER = ['グループID', '部門（所属）', '登録日時', '状態'];
 
@@ -842,7 +842,7 @@ function AC_handleGroupEvent_(ev) {
     if (row > 0) sh.getRange(row, 1, 1, 4).setValues([vals]); else sh.appendRow(vals);
   } finally { lock.releaseLock(); }
   AC_reply_(ev.replyToken, 'このグループを「' + ok.join('、') + '」のグループとして登録しました！ありがとうございます😊\n'
-    + (ok.indexOf(AC_ADMIN_GROUP) !== -1 ? '本運用の開始後は、勤怠連絡フォームのすべての報告（管理者向けの内容）をこちらへお知らせします。'
+    + (ok.indexOf(AC_ADMIN_GROUP) !== -1 ? 'これから、勤怠連絡フォームのすべての報告（管理者向けの内容）をこちらへお知らせします。'
       : 'これから、勤怠連絡フォームで' + ok.join('・') + 'の方の連絡があったときに、こちらへお知らせします。')
     + (ng.length ? '\n（「' + ng.join('、') + '」は見つからなかったため登録していません）' : ''));
   AC_pushLine_('【グループLINE】グループを「' + ok.join('、') + '」として登録しました。');
@@ -999,6 +999,11 @@ function AC_paidLeaveCheck(period, used, today) {
 }
 
 /** 純粋関数：翌月（YYYY-MM） */
+/** 純粋関数：月末（翌日が翌月1日）か */
+function AC_isMonthEnd(today) {
+  var d = new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 1, Number(today.slice(8, 10)) + 1));
+  return d.getUTCDate() === 1;
+}
 function AC_nextMonth(today) {
   var y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
   return m === 12 ? (y + 1) + '-01' : y + '-' + (m < 9 ? '0' : '') + (m + 1);
@@ -1030,7 +1035,7 @@ function AC_applyNextMonthShift_(R, mv, ss, today) {
   var hasCols = Object.keys(AC_shiftIndex_(sv, toDate).cols).some(function (d) { return d.slice(0, 7) === month; });
   if (!hasCols) {
     AC_adminNotice_('totmonth', '【確認のお願い】' + label + 'のシフトをTOTから反映しようとしましたが、管理シート「' + AC_SHEET_SCHEDULE + '」に' + label + 'の日付の列が見つかりませんでした🙇‍♀️\n'
-      + '日付の列をご用意いただければ、翌朝もう一度反映します。');
+      + '日付の列をご用意いただいたうえでご連絡ください（月末を過ぎると自動では反映されません）。');
     return;
   }
   var cmp = AC_buildTotCompare(AC_totScheduleItems({ employees: R.employees, schedules: R.nextSchedules }), mv, sv, toDate);
@@ -2474,7 +2479,7 @@ function AC_reply_(replyToken, text) {
 
 // Node.jsのテストから純粋関数だけを読み込むため
 if (typeof module !== 'undefined') {
-  module.exports = { AC_reconcile: AC_reconcile, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
+  module.exports = { AC_reconcile: AC_reconcile, AC_isMonthEnd: AC_isMonthEnd, AC_buildMessage: AC_buildMessage, AC_normalizeName: AC_normalizeName,
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,

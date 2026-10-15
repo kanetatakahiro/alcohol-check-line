@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan, AC_parseDeptRegistration, AC_deptNames, AC_groupsByDept } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_isMonthEnd, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan, AC_parseDeptRegistration, AC_deptNames, AC_groupsByDept } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -516,6 +516,9 @@ test('GAS: LINE送信数のお知らせは80・95・100％の段階で、上限�
 test('GAS: 翌月シフトの反映は翌月の日付だけ・数式のセルは書き換えない', () => {
   assert.equal(AC_nextMonth('2026-10-28'), '2026-11');
   assert.equal(AC_nextMonth('2026-12-28'), '2027-01');
+  // 反映は月末（翌日が翌月1日）だけ
+  for (const d of ['2026-10-31', '2026-11-30', '2027-02-28', '2028-02-29', '2026-12-31']) assert.equal(AC_isMonthEnd(d), true, d);
+  for (const d of ['2026-10-28', '2026-10-30', '2028-02-28', '2026-11-01']) assert.equal(AC_isMonthEnd(d), false, d);
   const updates = [
     { row: 2, col: 3, date: '2026-11-01', value: '10:00-19:00' },
     { row: 2, col: 4, date: '2026-11-02', value: '公休' },

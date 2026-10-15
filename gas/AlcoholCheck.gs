@@ -599,10 +599,13 @@ function AC_addPause_(name, from, until, memo) {
 //  ・遅刻／早退／その他 → 記録と管理者への連絡のみ
 //  ・いずれも管理者のLINEへ内容を知らせる。回答は従業員マスタの回答シートにも残る
 var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', 'その他'];
-var AC_FORM_Q = { by: '入力者（あなたのお名前）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
+var AC_FORM_Q = { by: '入力者（あなたのお名前）', approver: '承認者（ご本人が入力するとき）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
   changeTo: '変更後の休みの日（休みの変更のときだけ）', reason: '理由・連絡事項' };
 var AC_FORM_HELP = { from: '休みの変更のときは、もともと休みだった日を入れてください',
-  changeTo: '休みの変更のときだけ入力してください。新しく休む日です（例：20日の休みを22日に変更 → 上の日付に20日、ここに22日）' };
+  changeTo: '休みの変更のときだけ入力してください。新しく休む日です（例：20日の休みを22日に変更 → 上の日付に20日、ここに22日）',
+  approver: 'ご本人が入力するときは、確認・承認してくれた上司のお名前を入れてください（上司の方が入力するときは空欄でOKです）' };
+/** 純粋関数：氏名の比較用（空白・「さん」を除く） */
+function AC_nameKey_(s) { return String(s || '').replace(/[\s　]/g, '').replace(/さん$/, ''); }
 
 /** 純粋関数：対象者の選択肢「氏名（社員番号）」（在籍者のみ、社員番号順） */
 function AC_formChoices(masterValues) {
@@ -630,6 +633,7 @@ function AC_formPlan(ans) {
   else if (change && changeTo) { pause = { scope: '全部' }; }
   else if (/打刻の修正/.test(kind)) pause = { scope: '勤怠のみ' };
   var name = String(ans.who || '').replace(/（[^（）]+）\s*$/, '');
+  var isSelf = !!ans.by && AC_nameKey_(ans.by) === AC_nameKey_(name);   // ご本人が入力した
   var period = from === until ? from : from + '〜' + until;
   if (change) {
     period = from + '（もともとの休み）→ ' + (changeTo || '（変更後の日が未記入）');
@@ -638,8 +642,10 @@ function AC_formPlan(ans) {
   // 報告の文面（グループと管理者で共通）。業務連絡なので感謝の言葉は付けない
   var report = '【勤怠変更の報告】\n・氏名：' + name + 'さん\n・区分：' + kind + '\n・日付：' + period
     + '\n・理由：' + (ans.reason || '') + '\n・報告者：' + (ans.by ? ans.by + 'さん' : '（未記入）')
+    + (ans.approver ? '\n・承認者：' + ans.approver + 'さん' : (isSelf ? '\n・承認者：（未記入）' : ''))
     + '\n\n上記の勤怠変更について報告がありました。\n内容をご確認いただきますようお願いいたします。';
   var notes = [];
+  if (isSelf && !ans.approver) notes.push('ご本人からの入力で、承認者が書かれていません。上司の方への確認をお願いします。');
   if (change && !changeTo) notes.push('変更後の休みの日が書かれていなかったため、お知らせは止めていません。ご本人への確認をお願いします。');
   if (pause) {
     notes.push(pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
@@ -649,7 +655,7 @@ function AC_formPlan(ans) {
   if (change) notes.push('管理シートのシフトとTOTの変更もお願いします。');
   var text = report + '\n\n' + notes.join('\n');
   var groupText = report;
-  return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text, groupText: groupText };
+  return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, self: isSelf, text: text, groupText: groupText };
 }
 
 /** 手動実行：勤怠連絡フォームを作る（設問がまだ無いときだけ追加）。回答先と送信時のトリガーも設定する */
@@ -676,6 +682,11 @@ function alcoholCheckSetupAttendanceForm() {
     var added = form.addDateItem().setTitle(AC_FORM_Q.changeTo).setHelpText(AC_FORM_HELP.changeTo).setRequired(false);
     var at = titles.indexOf(AC_FORM_Q.until);
     if (at !== -1) form.moveItem(added.getIndex(), at + 1);
+  }
+  if (titles.indexOf(AC_FORM_Q.approver) === -1) {
+    var ap = form.addTextItem().setTitle(AC_FORM_Q.approver).setHelpText(AC_FORM_HELP.approver).setRequired(false);
+    var bi = form.getItems().map(function (it) { return it.getTitle(); }).indexOf(AC_FORM_Q.by);
+    if (bi !== -1) form.moveItem(ap.getIndex(), bi + 1);
   }
   items.forEach(function (it) { if (it.getTitle() === AC_FORM_Q.from) it.setHelpText(AC_FORM_HELP.from); });
   AC_refreshFormChoices_(form);

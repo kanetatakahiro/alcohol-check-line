@@ -627,4 +627,12 @@ test('GAS: 部門のグループLINE（登録コマンド・部門名・送り�
   assert.equal(plan.groupText, '【勤怠変更の報告】\n・氏名：試験 花子さん\n・区分：欠勤\n・日付：2026-10-16\n・理由：体調不良\n・報告者：上司さん'
     + '\n\n上記の勤怠変更について報告がありました。\n内容をご確認いただきますようお願いいたします。');
   assert.doesNotMatch(plan.groupText + plan.text, /ありがとう/);   // 業務連絡には感謝の言葉を付けない
+  // 承認者：上司が入力したときは行を出さない。ご本人の入力なら承認者を載せ、未記入なら管理者に確認を促す
+  assert.doesNotMatch(plan.groupText, /承認者/);
+  const own = AC_formPlan({ by: '試験花子', approver: '上司 一郎', who: '試験 花子（90002）', kind: '有給休暇', from: '2026-10-16', reason: '私用' });
+  assert.equal(own.self, true);
+  assert.match(own.groupText, /・報告者：試験花子さん\n・承認者：上司 一郎さん\n\n上記/);
+  const noAp = AC_formPlan({ by: '試験 花子', who: '試験 花子（90002）', kind: 'その他', from: '2026-10-16', reason: 'x' });
+  assert.match(noAp.groupText, /・承認者：（未記入）/);
+  assert.match(noAp.text, /承認者が書かれていません/);
 });

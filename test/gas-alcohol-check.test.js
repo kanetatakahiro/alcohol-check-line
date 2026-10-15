@@ -635,4 +635,8 @@ test('GAS: 部門のグループLINE（登録コマンド・部門名・送り�
   const noAp = AC_formPlan({ by: '試験 花子', who: '試験 花子（90002）', kind: 'その他', from: '2026-10-16', reason: 'x' });
   assert.match(noAp.groupText, /・承認者：（未記入）/);
   assert.match(noAp.text, /承認者が書かれていません/);
+  // テスト期間：先頭に【テスト】、お知らせは止めない
+  const tp = AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '欠勤', from: '2026-10-16', reason: 'x' }, { test: true });
+  assert.match(tp.groupText, /^【テスト】\n【勤怠変更の報告】/);
+  assert.equal(tp.pause, null); assert.match(tp.text, /テスト期間のため、お知らせは止めていません/);
 });

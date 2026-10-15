@@ -625,7 +625,8 @@ function AC_codeFromChoice(label) { var m = /（([^（）]+)）\s*$/.exec(String
  * 純粋関数：フォームの回答から、やること（お知らせ停止の行・管理者への文面）。
  * 終了日が空なら1日だけ。終了日が開始日より前なら入れ替える。
  */
-function AC_formPlan(ans) {
+function AC_formPlan(ans, opts) {
+  var test = !!(opts && opts.test);   // テスト期間：文面の先頭に【テスト】、お知らせは止めない
   var code = AC_codeFromChoice(ans.who), from = ans.from, until = ans.until || ans.from;
   if (until < from) { var t = from; from = until; until = t; }
   var kind = ans.kind || 'その他', pause = null, change = /休みの変更/.test(kind), changeTo = ans.changeTo || '';
@@ -647,12 +648,14 @@ function AC_formPlan(ans) {
   var notes = [];
   if (isSelf && !ans.approver) notes.push('ご本人からの入力で、承認者が書かれていません。上司の方への確認をお願いします。');
   if (change && !changeTo) notes.push('変更後の休みの日が書かれていなかったため、お知らせは止めていません。ご本人への確認をお願いします。');
-  if (pause) {
+  if (test && pause) { notes.push('テスト期間のため、お知らせは止めていません。'); pause = null; }
+  else if (pause) {
     notes.push(pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
       : 'この期間の打刻漏れのお知らせを止めました。');
     notes.push('TOTへの登録（欠勤・有休・打刻修正など）もお願いします。');
-  } else if (!change) notes.push('記録のみです（お知らせは止めていません）。');
+  } else if (!change && !test) notes.push('記録のみです（お知らせは止めていません）。');
   if (change) notes.push('管理シートのシフトとTOTの変更もお願いします。');
+  if (test) report = '【テスト】\n' + report;
   var text = report + '\n\n' + notes.join('\n');
   var groupText = report;
   return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, self: isSelf, text: text, groupText: groupText };
@@ -721,7 +724,9 @@ function alcoholCheckOnAttendanceForm(e) {
       var t = r.getItem().getTitle(), v = r.getResponse();
       Object.keys(AC_FORM_Q).forEach(function (k) { if (AC_FORM_Q[k] === t) ans[k] = String(v || '').trim(); });
     });
-    var plan = AC_formPlan(ans);
+    // 本運用の開始日（スクリプトプロパティ FORM_LIVE_FROM、既定 2026-10-20）より前はテスト扱い
+    var liveFrom = PropertiesService.getScriptProperties().getProperty('FORM_LIVE_FROM') || '2026-10-20';
+    var plan = AC_formPlan(ans, { test: AC_today_() < liveFrom });
     if (!plan.code) { AC_pushLine_('【勤怠連絡フォーム】対象者を読み取れませんでした🙇‍♀️ フォームの回答をご確認ください。'); return; }
     if (plan.pause) {
       AC_pauseRows_();

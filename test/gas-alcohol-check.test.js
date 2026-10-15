@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan, AC_parseDeptRegistration, AC_deptNames, AC_groupsByDept } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -611,4 +611,17 @@ test('GAS: 勤怠連絡フォーム（選択肢・期間・区分ごとの止め
   const idx = AC_pauseIndex([['h'], ['90002', '', '2026-10-18', '2026-10-20', '', '勤怠のみ']], toDate);
   assert.equal(AC_isPaused(idx, '90002', '2026-10-19'), true);
   assert.equal(AC_isPaused(idx, '90002', '2026-10-19', 'alcohol'), false);
+});
+
+test('GAS: 部門のグループLINE（登録コマンド・部門名・送り先）', () => {
+  assert.deepEqual([...AC_parseDeptRegistration('部門登録 第一営業部')], ['第一営業部']);
+  assert.deepEqual([...AC_parseDeptRegistration('部門登録：A店、B店')], ['A店', 'B店']);
+  assert.equal(AC_parseDeptRegistration('おはようございます'), null);
+  assert.equal(AC_parseDeptRegistration('部門登録'), null);
+  const r = (code, dept, status = '在籍') => { const x = mrow(code, '試験 ' + code, { status }); x[4] = dept; return x; };
+  assert.deepEqual([...AC_deptNames([MASTER_HEADER, r('1', 'A店'), r('2', 'B店'), r('3', 'A店'), r('4', 'C店', '退職')])], ['A店', 'B店']);
+  const g = JSON.parse(JSON.stringify(AC_groupsByDept([['h'], ['Cg1', 'A店、B店', '', '有効'], ['Cg2', 'A店', '', '退出'], ['Cg3', 'B店', '', '有効']])));
+  assert.deepEqual(g, { 'A店': ['Cg1'], 'B店': ['Cg1', 'Cg3'] });
+  const plan = AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '欠勤', from: '2026-10-16', reason: '体調不良' });
+  assert.match(plan.groupText, /試験 花子さん[\s\S]*欠勤[\s\S]*体調不良[\s\S]*上司さん/);
 });

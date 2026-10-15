@@ -641,7 +641,9 @@ function AC_formPlan(ans) {
     + (pause ? (pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
       : 'この期間の打刻漏れのお知らせを止めました。') + '\nTOTへの登録（欠勤・有休・打刻修正など）もお願いします。'
       : (change ? '' : '記録のみです（お知らせは止めていません）。')) + (change ? '\n管理シートのシフトとTOTの変更もお願いします。' : '') + '\nいつもありがとうございます！';
-  return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text };
+  var groupText = '【勤怠の連絡】' + name + 'さん\n・区分：' + kind + '\n・日付：' + period + '\n・理由：' + (ans.reason || '')
+    + '\n・入力：' + (ans.by || '（未記入）') + 'さん\n\nご確認をお願いいたします。いつもありがとうございます！';
+  return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text, groupText: groupText };
 }
 
 /** 手動実行：勤怠連絡フォームを作る（設問がまだ無いときだけ追加）。回答先と送信時のトリガーも設定する */
@@ -709,11 +711,109 @@ function alcoholCheckOnAttendanceForm(e) {
       AC_masterSheet_().getParent().getSheetByName(AC_PAUSE_SHEET)
         .appendRow(["'" + plan.code, plan.name, plan.from, plan.until, 'フォーム：' + plan.kind + '（入力：' + (ans.by || '') + '）', plan.pause.scope]);
     }
-    AC_pushLine_(plan.text.slice(0, 4900));
+    var g = { dept: '', sent: 0 };
+    try { g = AC_pushFormToGroups_(plan.code, plan.groupText.slice(0, 4900)); } catch (eg) { Logger.log('グループ送信の失敗'); }
+    AC_pushLine_((plan.text + '\n' + (g.sent ? '（' + g.dept + 'のグループLINEにもお知らせしました）'
+      : '（' + (g.dept || '所属未設定') + 'のグループLINEが未登録のため、グループには送っていません）')).slice(0, 4900));
   } catch (err) {
     Logger.log('フォーム処理の失敗：%s', err && err.message);
     AC_adminNotice_('form', '【エラー】勤怠連絡フォームの処理中に問題がありました🙇‍♀️ フォームの回答をご確認ください。');
   }
+}
+
+// ---------------- 部門のグループLINE ----------------
+// 公式LINEを部門のグループに招待し、グループで「部門登録 ○○」と送ると、そのグループを部門（従業員マスタの所属）に結びつける。
+// 勤怠連絡フォームの送信があると、対象者の所属のグループへすぐに知らせる。
+var AC_GROUP_SHEET = 'LINEグループ';
+var AC_GROUP_HEADER = ['グループID', '部門（所属）', '登録日時', '状態'];
+
+/** 純粋関数：「部門登録 ○○」なら部門名の一覧（「、」「,」で複数可）。それ以外は null */
+function AC_parseDeptRegistration(text) {
+  var m = /^\s*部門登録[\s　:：]*(.+?)\s*$/.exec(String(text || ''));
+  if (!m) return null;
+  var list = m[1].split(/[、,，\s　]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+  return list.length ? list : null;
+}
+/** 純粋関数：従業員マスタにある所属名（在籍者のみ、重複なし） */
+function AC_deptNames(masterValues) {
+  var seen = {}, out = [];
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var d = String(masterValues[i][AC_COL.dept] || '').trim();
+    if (d && String(masterValues[i][AC_COL.status]).trim() !== '退職' && !seen[d]) { seen[d] = 1; out.push(d); }
+  }
+  return out;
+}
+/** 純粋関数：シートの行から、部門 → グループIDの一覧（状態が「有効」のものだけ） */
+function AC_groupsByDept(rows) {
+  var out = {};
+  (rows || []).forEach(function (r, i) {
+    if (i === 0 || String(r[3] || '').trim() !== '有効') return;
+    var id = String(r[0] || '').trim();
+    String(r[1] || '').split(/[、,，]+/).forEach(function (d) {
+      d = d.trim();
+      if (d && id) { out[d] = out[d] || []; if (out[d].indexOf(id) === -1) out[d].push(id); }
+    });
+  });
+  return out;
+}
+function AC_groupSheet_() {
+  var ss = AC_masterSheet_().getParent(), sh = ss.getSheetByName(AC_GROUP_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(AC_GROUP_SHEET);
+    sh.getRange(1, 1, 1, AC_GROUP_HEADER.length).setValues([AC_GROUP_HEADER]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function AC_handleGroupEvent_(ev) {
+  var gid = ev.source.groupId || ev.source.roomId;
+  if (!gid) return;
+  if (ev.type === 'join') {
+    AC_reply_(ev.replyToken, 'グループに招待していただき、ありがとうございます！REBIRTH 管理本部です😊\n'
+      + '勤怠の連絡をこのグループにお知らせするため、「部門登録 ○○」と送ってください（○○は部門名です）。');
+    AC_pushLine_('【グループLINE】公式LINEが新しいグループに招待されました。グループで「部門登録 ○○」が送られると登録されます。');
+    return;
+  }
+  if (ev.type === 'leave') {
+    var sh0 = AC_groupSheet_(), v0 = sh0.getDataRange().getValues();
+    for (var j = 1; j < v0.length; j++) if (String(v0[j][0]) === gid) sh0.getRange(j + 1, 4).setValue('退出');
+    AC_pushLine_('【グループLINE】公式LINEがグループから退出しました（「LINEグループ」シートを「退出」にしました）。');
+    return;
+  }
+  if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
+  var depts = AC_parseDeptRegistration(ev.message.text);
+  if (!depts) return;   // グループの普段の会話には反応しない
+  var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues());
+  var ok = depts.filter(function (d) { return known.indexOf(d) !== -1; });
+  var ng = depts.filter(function (d) { return known.indexOf(d) === -1; });
+  if (!ok.length) {
+    AC_reply_(ev.replyToken, '「' + ng.join('、') + '」という部門が見つかりませんでした🙇‍♀️\n登録できる部門：' + known.join('、')
+      + '\nもう一度「部門登録 ○○」と送ってください。');
+    return;
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = AC_groupSheet_(), v = sh.getDataRange().getValues(), row = -1;
+    for (var i = 1; i < v.length; i++) if (String(v[i][0]) === gid) row = i + 1;
+    var vals = [gid, ok.join('、'), new Date(), '有効'];
+    if (row > 0) sh.getRange(row, 1, 1, 4).setValues([vals]); else sh.appendRow(vals);
+  } finally { lock.releaseLock(); }
+  AC_reply_(ev.replyToken, 'このグループを「' + ok.join('、') + '」のグループとして登録しました！ありがとうございます😊\n'
+    + 'これから、勤怠連絡フォームで' + ok.join('・') + 'の方の連絡があったときに、こちらへお知らせします。'
+    + (ng.length ? '\n（「' + ng.join('、') + '」は見つからなかったため登録していません）' : ''));
+  AC_pushLine_('【グループLINE】グループを「' + ok.join('、') + '」として登録しました。');
+}
+
+/** 勤怠連絡を対象者の部門のグループへ送る。送った数を返す */
+function AC_pushFormToGroups_(code, text) {
+  var mv = AC_masterSheet_().getDataRange().getValues(), dept = '';
+  for (var i = 1; i < mv.length; i++) if (AC_cellCode_(mv[i][AC_COL.code]) === code) dept = String(mv[i][AC_COL.dept] || '').trim();
+  if (!dept) return { dept: '', sent: 0 };
+  var groups = AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[dept] || [], sent = 0;
+  groups.forEach(function (g) { try { AC_pushTo_(g, text); sent++; } catch (e) { Logger.log('グループへの送信に失敗'); } });
+  return { dept: dept, sent: sent };
 }
 
 /** 純粋関数：TOTコード → 氏名（マスタ優先、無ければTOTの氏名） */
@@ -1881,6 +1981,7 @@ function doPost(e) {
 
 function AC_handleEvent_(ev) {
   var src = ev && ev.source;
+  if (src && (src.type === 'group' || src.type === 'room')) { AC_handleGroupEvent_(ev); return; }
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (ev.type === 'follow') {
     AC_reply_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
@@ -2337,5 +2438,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

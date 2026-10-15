@@ -600,6 +600,12 @@ test('GAS: 勤怠連絡フォーム（選択肢・期間・区分ごとの止め
   const b = AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '打刻の修正', from: '2026-10-20', until: '2026-10-18', reason: '' });
   assert.equal(b.from, '2026-10-18'); assert.equal(b.until, '2026-10-20'); assert.equal(b.pause.scope, '勤怠のみ');
   assert.equal(AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '遅刻', from: '2026-10-16' }).pause, null);
+  // 休みの変更：新しく休む日だけ止める。変更後の日が無ければ止めない
+  const c = AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '休みの変更（シフト交換など）', from: '2026-10-20', changeTo: '2026-10-22', reason: '' });
+  assert.equal(c.from, '2026-10-22'); assert.equal(c.until, '2026-10-22'); assert.equal(c.pause.scope, '全部');
+  assert.match(c.text, /2026-10-20（もともとの休み）→ 2026-10-22/);
+  const d = AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '休みの変更（シフト交換など）', from: '2026-10-20', reason: '' });
+  assert.equal(d.pause, null); assert.match(d.text, /書かれていなかった/);
   // 「勤怠のみ」はアルコールチェックを止めない
   const toDate = v => String(v || '').slice(0, 10) || null;
   const idx = AC_pauseIndex([['h'], ['90002', '', '2026-10-18', '2026-10-20', '', '勤怠のみ']], toDate);

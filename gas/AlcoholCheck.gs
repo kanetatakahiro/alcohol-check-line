@@ -599,7 +599,10 @@ function AC_addPause_(name, from, until, memo) {
 //  ・遅刻／早退／その他 → 記録と管理者への連絡のみ
 //  ・いずれも管理者のLINEへ内容を知らせる。回答は従業員マスタの回答シートにも残る
 var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', 'その他'];
-var AC_FORM_Q = { by: '入力者（あなたのお名前）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）', reason: '理由・連絡事項' };
+var AC_FORM_Q = { by: '入力者（あなたのお名前）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
+  changeTo: '変更後の休みの日（休みの変更のときだけ）', reason: '理由・連絡事項' };
+var AC_FORM_HELP = { from: '休みの変更のときは、もともと休みだった日を入れてください',
+  changeTo: '休みの変更のときだけ入力してください。新しく休む日です（例：20日の休みを22日に変更 → 上の日付に20日、ここに22日）' };
 
 /** 純粋関数：対象者の選択肢「氏名（社員番号）」（在籍者のみ、社員番号順） */
 function AC_formChoices(masterValues) {
@@ -622,16 +625,22 @@ function AC_codeFromChoice(label) { var m = /（([^（）]+)）\s*$/.exec(String
 function AC_formPlan(ans) {
   var code = AC_codeFromChoice(ans.who), from = ans.from, until = ans.until || ans.from;
   if (until < from) { var t = from; from = until; until = t; }
-  var kind = ans.kind || 'その他', pause = null;
-  if (/欠勤|有給|休みの変更/.test(kind)) pause = { scope: '全部' };
+  var kind = ans.kind || 'その他', pause = null, change = /休みの変更/.test(kind), changeTo = ans.changeTo || '';
+  if (/欠勤|有給/.test(kind)) pause = { scope: '全部' };
+  else if (change && changeTo) { pause = { scope: '全部' }; }
   else if (/打刻の修正/.test(kind)) pause = { scope: '勤怠のみ' };
   var name = String(ans.who || '').replace(/（[^（）]+）\s*$/, '');
   var period = from === until ? from : from + '〜' + until;
+  if (change) {
+    period = from + '（もともとの休み）→ ' + (changeTo || '（変更後の日が未記入）');
+    if (changeTo) { from = changeTo; until = changeTo; }   // 新しく休む日だけお知らせを止める
+  }
   var text = '【勤怠連絡フォーム】' + (ans.by || '（入力者未記入）') + 'さんから連絡がありました。\n'
     + '・対象：' + name + 'さん\n・区分：' + kind + '\n・日付：' + period + '\n・理由：' + (ans.reason || '') + '\n\n'
-    + (pause ? (pause.scope === '全部' ? 'この期間、' + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
+    + (change && !changeTo ? '変更後の休みの日が書かれていなかったため、お知らせは止めていません。ご本人に確認をお願いします🙇‍♀️\n' : '')
+    + (pause ? (pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
       : 'この期間の打刻漏れのお知らせを止めました。') + '\nTOTへの登録（欠勤・有休・打刻修正など）もお願いします。'
-      : '記録のみです（お知らせは止めていません）。') + '\nいつもありがとうございます！';
+      : (change ? '' : '記録のみです（お知らせは止めていません）。')) + (change ? '\n管理シートのシフトとTOTの変更もお願いします。' : '') + '\nいつもありがとうございます！';
   return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text };
 }
 
@@ -648,12 +657,25 @@ function alcoholCheckSetupAttendanceForm() {
     form.addTextItem().setTitle(AC_FORM_Q.by).setRequired(true);
     form.addListItem().setTitle(AC_FORM_Q.who).setHelpText('連絡する人（お休みする人など）を選んでください').setChoiceValues(['（読み込み中）']).setRequired(true);
     form.addMultipleChoiceItem().setTitle(AC_FORM_Q.kind).setChoiceValues(AC_FORM_KINDS).setRequired(true);
-    form.addDateItem().setTitle(AC_FORM_Q.from).setRequired(true);
+    form.addDateItem().setTitle(AC_FORM_Q.from).setHelpText(AC_FORM_HELP.from).setRequired(true);
     form.addDateItem().setTitle(AC_FORM_Q.until).setHelpText('1日だけのときは空欄でOKです。終わりがまだわからないときは見込みの日付を入れてください').setRequired(false);
     form.addParagraphTextItem().setTitle(AC_FORM_Q.reason).setHelpText('例：体調不良のため、家庭の事情のため、など（病名などくわしい内容は書かなくて大丈夫です）').setRequired(true);
   }
+  // 後から追加した設問（無ければ「終了日」の次に入れる）
+  var items = form.getItems();
+  var titles = items.map(function (it) { return it.getTitle(); });
+  if (titles.indexOf(AC_FORM_Q.changeTo) === -1) {
+    var added = form.addDateItem().setTitle(AC_FORM_Q.changeTo).setHelpText(AC_FORM_HELP.changeTo).setRequired(false);
+    var at = titles.indexOf(AC_FORM_Q.until);
+    if (at !== -1) form.moveItem(added.getIndex(), at + 1);
+  }
+  items.forEach(function (it) { if (it.getTitle() === AC_FORM_Q.from) it.setHelpText(AC_FORM_HELP.from); });
   AC_refreshFormChoices_(form);
-  try { form.setDestination(FormApp.DestinationType.SPREADSHEET, props.getProperty('EMPLOYEE_MASTER_ID')); } catch (e) { Logger.log('回答先の設定に失敗：%s', e.message); }
+  try {
+    var dest = props.getProperty('EMPLOYEE_MASTER_ID'), cur = null;
+    try { cur = form.getDestinationId(); } catch (e2) { cur = null; }
+    if (cur !== dest) form.setDestination(FormApp.DestinationType.SPREADSHEET, dest);   // 2回目以降は回答シートを増やさない
+  } catch (e) { Logger.log('回答先の設定に失敗：%s', e.message); }
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'alcoholCheckOnAttendanceForm') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('alcoholCheckOnAttendanceForm').forForm(form).onFormSubmit().create();
   Logger.log('フォームを準備しました：%s', form.getPublishedUrl());

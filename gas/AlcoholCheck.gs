@@ -674,7 +674,7 @@ function alcoholCheckSetupAttendanceForm() {
   items.forEach(function (it) { if (it.getTitle() === AC_FORM_Q.from) it.setHelpText(AC_FORM_HELP.from); });
   AC_refreshFormChoices_(form);
   try {
-    var dest = props.getProperty('EMPLOYEE_MASTER_ID'), cur = null;
+    var dest = props.getProperty('ATTENDANCE_RESPONSE_ID') || props.getProperty('EMPLOYEE_MASTER_ID'), cur = null;   // 回答の置き場所（専用のスプレッドシートがあればそちら）
     try { cur = form.getDestinationId(); } catch (e2) { cur = null; }
     if (cur !== dest) form.setDestination(FormApp.DestinationType.SPREADSHEET, dest);   // 2回目以降は回答シートを増やさない
   } catch (e) { Logger.log('回答先の設定に失敗：%s', e.message); }

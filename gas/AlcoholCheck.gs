@@ -726,7 +726,8 @@ function alcoholCheckOnAttendanceForm(e) {
     });
     // 本運用の開始日（スクリプトプロパティ FORM_LIVE_FROM、既定 2026-10-20）より前はテスト扱い
     var liveFrom = PropertiesService.getScriptProperties().getProperty('FORM_LIVE_FROM') || '2026-10-20';
-    var plan = AC_formPlan(ans, { test: AC_today_() < liveFrom });
+    var isTest = AC_today_() < liveFrom;
+    var plan = AC_formPlan(ans, { test: isTest });
     if (!plan.code) { AC_pushLine_('【勤怠連絡フォーム】対象者を読み取れませんでした🙇‍♀️ フォームの回答をご確認ください。'); return; }
     if (plan.pause) {
       AC_pauseRows_();
@@ -735,8 +736,18 @@ function alcoholCheckOnAttendanceForm(e) {
     }
     var g = { dept: '', sent: 0 };
     try { g = AC_pushFormToGroups_(plan.code, plan.groupText.slice(0, 4900)); } catch (eg) { Logger.log('グループ送信の失敗'); }
-    AC_pushLine_((plan.text + '\n' + (g.sent ? '（' + g.dept + 'のグループLINEにもお知らせしました）'
-      : '（' + (g.dept || '所属未設定') + 'のグループLINEが未登録のため、グループには送っていません）')).slice(0, 4900));
+    var adminText = (plan.text + '\n' + (g.sent ? '（' + g.dept + 'のグループLINEにもお知らせしました）'
+      : '（' + (g.dept || '所属未設定') + 'のグループLINEが未登録のため、グループには送っていません）')).slice(0, 4900);
+    // 本運用後は勤怠管理グループへ（未登録・送信失敗なら管理者の個別LINEへ）。テスト期間は管理者の個別LINEへ
+    var adminSent = 0;
+    if (!isTest) {
+      try {
+        (AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || []).forEach(function (gid) {
+          try { AC_pushTo_(gid, adminText); adminSent++; } catch (e1) { Logger.log('勤怠管理グループへの送信に失敗'); }
+        });
+      } catch (e2) { Logger.log('勤怠管理グループの読み込みに失敗'); }
+    }
+    if (!adminSent) AC_pushLine_(adminText);
   } catch (err) {
     Logger.log('フォーム処理の失敗：%s', err && err.message);
     AC_adminNotice_('form', '【エラー】勤怠連絡フォームの処理中に問題がありました🙇‍♀️ フォームの回答をご確認ください。');
@@ -747,6 +758,8 @@ function alcoholCheckOnAttendanceForm(e) {
 // 公式LINEを部門のグループに招待し、グループで「部門登録 ○○」と送ると、そのグループを部門（従業員マスタの所属）に結びつける。
 // 勤怠連絡フォームの送信があると、対象者の所属のグループへすぐに知らせる。
 var AC_GROUP_SHEET = 'LINEグループ';
+// 勤怠管理専用グループ（管理者向けの内容をすべて受け取る）。「部門登録 勤怠管理」で登録する。本運用の開始日から使う
+var AC_ADMIN_GROUP = '勤怠管理';
 var AC_GROUP_HEADER = ['グループID', '部門（所属）', '登録日時', '状態'];
 
 /** 純粋関数：「部門登録 ○○」なら部門名の一覧（「、」「,」で複数可）。それ以外は null */
@@ -806,7 +819,7 @@ function AC_handleGroupEvent_(ev) {
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
   var depts = AC_parseDeptRegistration(ev.message.text);
   if (!depts) return;   // グループの普段の会話には反応しない
-  var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues());
+  var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues()).concat([AC_ADMIN_GROUP]);
   var ok = depts.filter(function (d) { return known.indexOf(d) !== -1; });
   var ng = depts.filter(function (d) { return known.indexOf(d) === -1; });
   if (!ok.length) {
@@ -823,7 +836,8 @@ function AC_handleGroupEvent_(ev) {
     if (row > 0) sh.getRange(row, 1, 1, 4).setValues([vals]); else sh.appendRow(vals);
   } finally { lock.releaseLock(); }
   AC_reply_(ev.replyToken, 'このグループを「' + ok.join('、') + '」のグループとして登録しました！ありがとうございます😊\n'
-    + 'これから、勤怠連絡フォームで' + ok.join('・') + 'の方の連絡があったときに、こちらへお知らせします。'
+    + (ok.indexOf(AC_ADMIN_GROUP) !== -1 ? '本運用の開始後は、勤怠連絡フォームのすべての報告（管理者向けの内容）をこちらへお知らせします。'
+      : 'これから、勤怠連絡フォームで' + ok.join('・') + 'の方の連絡があったときに、こちらへお知らせします。')
     + (ng.length ? '\n（「' + ng.join('、') + '」は見つからなかったため登録していません）' : ''));
   AC_pushLine_('【グループLINE】グループを「' + ok.join('、') + '」として登録しました。');
 }

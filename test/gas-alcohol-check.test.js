@@ -500,9 +500,9 @@ test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の�
   const out = AC_todayStatusMessage('noClockOut', '2026-10-14', {}, {});
   assert.match(out, /現在も勤務中の場合は、退勤の打刻を忘れずに/);
   assert.match(out, /遅くまでお疲れ様です！本当にありがとうございます！/);
-  assert.match(out, /勤怠連絡フォーム[\s\S]*viewform/);   // TOTの修正は管理本部だけなので、フォームで連絡してもらう
-  assert.doesNotMatch(out, /TOTから/);
-  assert.match(AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {}), /勤怠連絡フォームでのご連絡をお願いいたします[\s\S]*ありがとうございます/);
+  assert.match(out, /TOTから退勤時刻の修正の申請/);   // 打刻は本人がTOTで申請できる
+  const inMsg = AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {});
+  assert.match(inMsg, /TOTから打刻の修正の申請[\s\S]*勤怠連絡フォームでのご連絡[\s\S]*viewform[\s\S]*ありがとうございます/);   // 休みへの変更はフォーム
 });
 
 test('GAS: LINE送信数のお知らせは80・95・100％の段階で、上限なしなら知らせない', () => {
@@ -639,5 +639,9 @@ test('GAS: 部門のグループLINE（登録コマンド・部門名・送り�
   // テスト期間：先頭に【テスト】、お知らせは止めない
   const tp = AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '欠勤', from: '2026-10-16', reason: 'x' }, { test: true });
   assert.match(tp.groupText, /^【テスト】\n【勤怠変更の報告】/);
+  // 翌月以降の日付：本人から管理本部へ直接連絡する運用なので、管理者向けに一言
+  const nx = AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '休みの変更（シフト交換など）', from: '2026-11-03', changeTo: '2026-11-05', reason: 'x' }, { today: '2026-10-15' });
+  assert.match(nx.text, /翌月以降の日付です/); assert.doesNotMatch(nx.groupText, /翌月以降/);
+  assert.doesNotMatch(AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '遅刻', from: '2026-10-31', reason: 'x' }, { today: '2026-10-15' }).text, /翌月以降/);
   assert.equal(tp.pause, null); assert.match(tp.text, /テスト期間のため、お知らせは止めていません/);
 });

@@ -500,8 +500,9 @@ test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の�
   const out = AC_todayStatusMessage('noClockOut', '2026-10-14', {}, {});
   assert.match(out, /現在も勤務中の場合は、退勤の打刻を忘れずに/);
   assert.match(out, /遅くまでお疲れ様です！本当にありがとうございます！/);
-  assert.match(out, /申請/);
-  assert.match(AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {}), /申請をお願いいたします[\s\S]*ありがとうございます/);
+  assert.match(out, /勤怠連絡フォーム[\s\S]*viewform/);   // TOTの修正は管理本部だけなので、フォームで連絡してもらう
+  assert.doesNotMatch(out, /TOTから/);
+  assert.match(AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {}), /勤怠連絡フォームでのご連絡をお願いいたします[\s\S]*ありがとうございます/);
 });
 
 test('GAS: LINE送信数のお知らせは80・95・100％の段階で、上限なしなら知らせない', () => {

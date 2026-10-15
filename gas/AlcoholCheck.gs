@@ -526,7 +526,7 @@ function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
 // 従業員マスタの「お知らせ停止」シート：社員番号・氏名（参考）・開始日・終了日・メモ。
 // 期間中は、その人へのアルコールチェックと勤怠のお知らせを送らない（期間中の日付の打刻漏れも送らない）。
 var AC_PAUSE_SHEET = 'お知らせ停止';
-var AC_PAUSE_HEADER = ['社員番号', '氏名（参考）', '開始日', '終了日', 'メモ'];
+var AC_PAUSE_HEADER = ['社員番号', '氏名（参考）', '開始日', '終了日', 'メモ', '止めるお知らせ（全部／勤怠のみ）'];
 
 /** 純粋関数：シートの行から { 社員番号: [{from, until}] }。終了日が空なら開始日以降ずっと */
 function AC_pauseIndex(rows, toDate) {
@@ -535,12 +535,15 @@ function AC_pauseIndex(rows, toDate) {
     if (i === 0) return;
     var code = AC_cellCode_(r[0]), from = toDate(r[2]), until = String(r[3] || '').trim() ? toDate(r[3]) : '9999-12-31';
     if (!code || !from || !until) return;
-    (out[code] = out[code] || []).push({ from: from, until: until });
+    (out[code] = out[code] || []).push({ from: from, until: until, attendanceOnly: /勤怠のみ/.test(String(r[5] || '')) });
   });
   return out;
 }
-function AC_isPaused(index, code, date) {
-  return (index[AC_cellCode_(code)] || []).some(function (p) { return date >= p.from && date <= p.until; });
+/** scope が 'alcohol' のときは「勤怠のみ」の行を数えない（打刻の修正などはアルコールチェックを止めない） */
+function AC_isPaused(index, code, date, scope) {
+  return (index[AC_cellCode_(code)] || []).some(function (p) {
+    return date >= p.from && date <= p.until && !(scope === 'alcohol' && p.attendanceOnly);
+  });
 }
 function AC_pauseRows_() {
   var ss = AC_masterSheet_().getParent(), sh = ss.getSheetByName(AC_PAUSE_SHEET);
@@ -549,6 +552,7 @@ function AC_pauseRows_() {
     sh.getRange(1, 1, 1, AC_PAUSE_HEADER.length).setValues([AC_PAUSE_HEADER]).setFontWeight('bold');
     sh.setFrozenRows(1);
   }
+  if (sh.getRange(1, 6).getValue() === '') sh.getRange(1, 6).setValue(AC_PAUSE_HEADER[5]).setFontWeight('bold');
   return sh.getDataRange().getValues();
 }
 function AC_pauseIndex_() { try { return AC_pauseIndex(AC_pauseRows_(), AC_toDateFn_()); } catch (e) { Logger.log('お知らせ停止シートを読めませんでした'); return {}; } }
@@ -558,7 +562,7 @@ function AC_pausedNames(masterValues, index, date) {
   var out = {};
   for (var i = 1; i < (masterValues || []).length; i++) {
     var m = masterValues[i];
-    if (!AC_isPaused(index, m[AC_COL.code], date)) continue;
+    if (!AC_isPaused(index, m[AC_COL.code], date, 'alcohol')) continue;
     if (String(m[AC_COL.name]).trim()) out[AC_normalizeName(m[AC_COL.name])] = true;
     if (String(m[AC_COL.alias] || '').trim()) out[AC_normalizeName(m[AC_COL.alias])] = true;
   }
@@ -586,6 +590,108 @@ function AC_addPause_(name, from, until, memo) {
   sh.appendRow(["'" + hit[0], String(mv.filter(function (r) { return AC_cellCode_(r[AC_COL.code]) === hit[0]; })[0][AC_COL.name]), from, until || '', memo || '']);
   Logger.log('お知らせ停止に追加しました（%s〜%s）', from, until || '終了日なし');
   return true;
+}
+
+// ---------------- 勤怠連絡フォーム ----------------
+// 欠勤・休み・遅刻などを、本人や上司がフォームで連絡する。送信されると：
+//  ・欠勤／有給休暇／休みの変更 → 「お知らせ停止」に追加（アルコールチェックも勤怠も止める）
+//  ・打刻の修正 → 「お知らせ停止」に「勤怠のみ」で追加（その日の打刻漏れのお知らせを止める）
+//  ・遅刻／早退／その他 → 記録と管理者への連絡のみ
+//  ・いずれも管理者のLINEへ内容を知らせる。回答は従業員マスタの回答シートにも残る
+var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', 'その他'];
+var AC_FORM_Q = { by: '入力者（あなたのお名前）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）', reason: '理由・連絡事項' };
+
+/** 純粋関数：対象者の選択肢「氏名（社員番号）」（在籍者のみ、社員番号順） */
+function AC_formChoices(masterValues) {
+  var out = [];
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var m = masterValues[i], code = AC_cellCode_(m[AC_COL.code]), name = String(m[AC_COL.name] || '').trim();
+    if (!code || !name || String(m[AC_COL.status]).trim() === '退職') continue;
+    out.push({ code: code, label: name + '（' + code + '）' });
+  }
+  out.sort(function (a, b) { return (Number(a.code) || 0) - (Number(b.code) || 0) || (a.code < b.code ? -1 : 1); });
+  return out.map(function (x) { return x.label; });
+}
+/** 純粋関数：選択肢から社員番号を取り出す */
+function AC_codeFromChoice(label) { var m = /（([^（）]+)）\s*$/.exec(String(label || '')); return m ? m[1].trim() : ''; }
+
+/**
+ * 純粋関数：フォームの回答から、やること（お知らせ停止の行・管理者への文面）。
+ * 終了日が空なら1日だけ。終了日が開始日より前なら入れ替える。
+ */
+function AC_formPlan(ans) {
+  var code = AC_codeFromChoice(ans.who), from = ans.from, until = ans.until || ans.from;
+  if (until < from) { var t = from; from = until; until = t; }
+  var kind = ans.kind || 'その他', pause = null;
+  if (/欠勤|有給|休みの変更/.test(kind)) pause = { scope: '全部' };
+  else if (/打刻の修正/.test(kind)) pause = { scope: '勤怠のみ' };
+  var name = String(ans.who || '').replace(/（[^（）]+）\s*$/, '');
+  var period = from === until ? from : from + '〜' + until;
+  var text = '【勤怠連絡フォーム】' + (ans.by || '（入力者未記入）') + 'さんから連絡がありました。\n'
+    + '・対象：' + name + 'さん\n・区分：' + kind + '\n・日付：' + period + '\n・理由：' + (ans.reason || '') + '\n\n'
+    + (pause ? (pause.scope === '全部' ? 'この期間、' + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
+      : 'この期間の打刻漏れのお知らせを止めました。') + '\nTOTへの登録（欠勤・有休・打刻修正など）もお願いします。'
+      : '記録のみです（お知らせは止めていません）。') + '\nいつもありがとうございます！';
+  return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text };
+}
+
+/** 手動実行：勤怠連絡フォームを作る（設問がまだ無いときだけ追加）。回答先と送信時のトリガーも設定する */
+function alcoholCheckSetupAttendanceForm() {
+  var props = PropertiesService.getScriptProperties(), id = props.getProperty('ATTENDANCE_FORM_ID');
+  if (!id) throw new Error('スクリプトプロパティ ATTENDANCE_FORM_ID を設定してください');
+  var form = FormApp.openById(id);
+  form.setTitle('勤怠の連絡（欠勤・休み・遅刻・打刻の修正など）');
+  form.setDescription('欠勤や休みの変更、打刻の修正などはこちらから連絡してください。本人でも上司の方でも入力できます。\n'
+    + '何日か続くときは「終了日」に最終日を入れてください（1日だけのときは空欄でOKです）。\n'
+    + '期間が延びたり短くなったりしたときは、もう一度送ってください。\nいつもご協力ありがとうございます！');
+  if (form.getItems().length === 0) {
+    form.addTextItem().setTitle(AC_FORM_Q.by).setRequired(true);
+    form.addListItem().setTitle(AC_FORM_Q.who).setHelpText('連絡する人（お休みする人など）を選んでください').setChoiceValues(['（読み込み中）']).setRequired(true);
+    form.addMultipleChoiceItem().setTitle(AC_FORM_Q.kind).setChoiceValues(AC_FORM_KINDS).setRequired(true);
+    form.addDateItem().setTitle(AC_FORM_Q.from).setRequired(true);
+    form.addDateItem().setTitle(AC_FORM_Q.until).setHelpText('1日だけのときは空欄でOKです。終わりがまだわからないときは見込みの日付を入れてください').setRequired(false);
+    form.addParagraphTextItem().setTitle(AC_FORM_Q.reason).setHelpText('例：体調不良のため、家庭の事情のため、など（病名などくわしい内容は書かなくて大丈夫です）').setRequired(true);
+  }
+  AC_refreshFormChoices_(form);
+  try { form.setDestination(FormApp.DestinationType.SPREADSHEET, props.getProperty('EMPLOYEE_MASTER_ID')); } catch (e) { Logger.log('回答先の設定に失敗：%s', e.message); }
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'alcoholCheckOnAttendanceForm') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('alcoholCheckOnAttendanceForm').forForm(form).onFormSubmit().create();
+  Logger.log('フォームを準備しました：%s', form.getPublishedUrl());
+}
+
+/** 対象者の選択肢を従業員マスタから更新する（入社・退職の反映。毎朝の案内のときにも実行） */
+function AC_refreshFormChoices_(form) {
+  if (!form) {
+    var id = PropertiesService.getScriptProperties().getProperty('ATTENDANCE_FORM_ID');
+    if (!id) return;
+    form = FormApp.openById(id);
+  }
+  var item = form.getItems(FormApp.ItemType.LIST).filter(function (it) { return it.getTitle() === AC_FORM_Q.who; })[0];
+  if (!item) return;
+  var choices = AC_formChoices(AC_masterSheet_().getDataRange().getValues());
+  if (choices.length) item.asListItem().setChoiceValues(choices);
+}
+
+/** フォーム送信時（インストール型トリガー） */
+function alcoholCheckOnAttendanceForm(e) {
+  try {
+    var ans = {}, tz = AC_TZ;
+    e.response.getItemResponses().forEach(function (r) {
+      var t = r.getItem().getTitle(), v = r.getResponse();
+      Object.keys(AC_FORM_Q).forEach(function (k) { if (AC_FORM_Q[k] === t) ans[k] = String(v || '').trim(); });
+    });
+    var plan = AC_formPlan(ans);
+    if (!plan.code) { AC_pushLine_('【勤怠連絡フォーム】対象者を読み取れませんでした🙇‍♀️ フォームの回答をご確認ください。'); return; }
+    if (plan.pause) {
+      AC_pauseRows_();
+      AC_masterSheet_().getParent().getSheetByName(AC_PAUSE_SHEET)
+        .appendRow(["'" + plan.code, plan.name, plan.from, plan.until, 'フォーム：' + plan.kind + '（入力：' + (ans.by || '') + '）', plan.pause.scope]);
+    }
+    AC_pushLine_(plan.text.slice(0, 4900));
+  } catch (err) {
+    Logger.log('フォーム処理の失敗：%s', err && err.message);
+    AC_adminNotice_('form', '【エラー】勤怠連絡フォームの処理中に問題がありました🙇‍♀️ フォームの回答をご確認ください。');
+  }
 }
 
 /** 純粋関数：TOTコード → 氏名（マスタ優先、無ければTOTの氏名） */
@@ -999,6 +1105,7 @@ function AC_dispatch_(kind) {
   var overrides = AC_templateOverrides_();
   if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
   if (kind === 'morning' && !dryRun) { try { AC_checkLineQuota_(today); } catch (e) { Logger.log('LINE送信数の確認に失敗'); } }
+  if (kind === 'morning') { try { AC_refreshFormChoices_(); } catch (e) { Logger.log('フォームの選択肢の更新に失敗'); } }
   var paused = AC_pausedNames(AC_masterSheet_().getDataRange().getValues(), AC_pauseIndex_(), today);   // お休み中の人には送らない
   var people = AC_recipientsFor(kind, d).filter(function (n) { return !paused[AC_normalizeName(n)]; });
   var thanks = (kind === 'followAfter' ? AC_thanksTargets(d) : []).filter(function (t) { return !paused[AC_normalizeName(t.name)]; });
@@ -2208,5 +2315,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

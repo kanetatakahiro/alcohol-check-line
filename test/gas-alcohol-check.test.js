@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -588,4 +588,21 @@ test('GAS: お知らせ停止（期間中はその人に送らない）', () => 
   assert.equal(AC_isPaused(idx, '90003', '2026-10-15'), false);
   const master = [MASTER_HEADER, mrow('90001', '試験 太郎'), mrow('90002', '試験 花子')];
   assert.deepEqual(Object.keys(AC_pausedNames(master, idx, '2026-10-25')), [ctx.module.exports.AC_normalizeName('試験 花子')]);
+});
+
+test('GAS: 勤怠連絡フォーム（選択肢・期間・区分ごとの止め方）', () => {
+  const master = [MASTER_HEADER, mrow('90010', '試験 次郎'), mrow('90002', '試験 花子'), mrow('90003', '試験 退職', { status: '退職' })];
+  assert.deepEqual([...AC_formChoices(master)], ['試験 花子（90002）', '試験 次郎（90010）']);
+  assert.equal(AC_codeFromChoice('試験 花子（90002）'), '90002');
+  const a = AC_formPlan({ by: '上司 一郎', who: '試験 花子（90002）', kind: '欠勤', from: '2026-10-16', until: '', reason: '体調不良' });
+  assert.equal(a.code, '90002'); assert.equal(a.until, '2026-10-16'); assert.equal(a.pause.scope, '全部');
+  assert.match(a.text, /試験 花子さん[\s\S]*2026-10-16[\s\S]*止めました/);
+  const b = AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '打刻の修正', from: '2026-10-20', until: '2026-10-18', reason: '' });
+  assert.equal(b.from, '2026-10-18'); assert.equal(b.until, '2026-10-20'); assert.equal(b.pause.scope, '勤怠のみ');
+  assert.equal(AC_formPlan({ by: 'x', who: '試験 花子（90002）', kind: '遅刻', from: '2026-10-16' }).pause, null);
+  // 「勤怠のみ」はアルコールチェックを止めない
+  const toDate = v => String(v || '').slice(0, 10) || null;
+  const idx = AC_pauseIndex([['h'], ['90002', '', '2026-10-18', '2026-10-20', '', '勤怠のみ']], toDate);
+  assert.equal(AC_isPaused(idx, '90002', '2026-10-19'), true);
+  assert.equal(AC_isPaused(idx, '90002', '2026-10-19', 'alcohol'), false);
 });

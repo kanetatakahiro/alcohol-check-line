@@ -601,7 +601,7 @@ function AC_addPause_(name, from, until, memo) {
 // TOTを修正できるのは本人（打刻の申請）と管理本部だけ。上司は閲覧のみ。休み・欠勤など当月の変更はこのフォームで連絡してもらう
 var AC_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSfMc6SWJkjnJfqPfobUJt1NDvzQTuSjir97IMW_YTOctLJvFw/viewform';
 var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', 'その他'];
-var AC_FORM_Q = { by: '入力者（あなたのお名前）', approver: '承認者（ご本人が入力するとき）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
+var AC_FORM_Q = { by: '入力者（あなたのお名前）', approver: '承認者（ご本人が入力するときのみ）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
   changeTo: '変更後の休みの日（休みの変更のときだけ）', reason: '理由・連絡事項' };
 var AC_FORM_HELP = { from: '休みの変更のときは、もともと休みだった日を入れてください',
   changeTo: '休みの変更のときだけ入力してください。新しく休む日です（例：20日の休みを22日に変更 → 上の日付に20日、ここに22日）',
@@ -692,7 +692,7 @@ function alcoholCheckSetupAttendanceForm() {
     var at = titles.indexOf(AC_FORM_Q.until);
     if (at !== -1) form.moveItem(added.getIndex(), at + 1);
   }
-  if (titles.indexOf(AC_FORM_Q.approver) === -1) {
+  if (!titles.some(function (t) { return /^承認者/.test(t); })) {   // フォーム側で文言を変えても重複して作らない
     var ap = form.addTextItem().setTitle(AC_FORM_Q.approver).setHelpText(AC_FORM_HELP.approver).setRequired(false);
     var bi = form.getItems().map(function (it) { return it.getTitle(); }).indexOf(AC_FORM_Q.by);
     if (bi !== -1) form.moveItem(ap.getIndex(), bi + 1);
@@ -729,6 +729,7 @@ function alcoholCheckOnAttendanceForm(e) {
     e.response.getItemResponses().forEach(function (r) {
       var t = r.getItem().getTitle(), v = r.getResponse();
       Object.keys(AC_FORM_Q).forEach(function (k) { if (AC_FORM_Q[k] === t) ans[k] = String(v || '').trim(); });
+      if (/^承認者/.test(t) && String(v || '').trim()) ans.approver = String(v).trim();   // 文言が少し変わっても読む
     });
     // 本運用の開始日（スクリプトプロパティ FORM_LIVE_FROM、既定 2026-10-20）より前はテスト扱い
     var liveFrom = PropertiesService.getScriptProperties().getProperty('FORM_LIVE_FROM') || '2026-10-20';

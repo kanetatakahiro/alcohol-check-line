@@ -11,7 +11,7 @@ const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
   AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
-  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus } = ctx.module.exports;
+  AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames } = ctx.module.exports;
 
 // 従業員マスタの1行（架空データ）：社員番号, 氏名, 別表記, 在籍, 所属, LINE ID, 表示名, 登録日時, LINE確認済み, アルコール対象, 備考
 const mrow = (code, name, { alias = '', status = '在籍', userId = '', ok = true, alcohol = true } = {}) =>
@@ -576,4 +576,16 @@ test('GAS: 月別勤怠・承認待ちの申請・有給の取得状況を組み
   assert.equal(st.length, 1);   // k2 はまだ付与前
   assert.equal(st[0].period.start, '2026-10-01');
   assert.equal(st[0].used, 1.5);   // 期間開始前の9/20は数えない
+});
+
+test('GAS: お知らせ停止（期間中はその人に送らない）', () => {
+  const toDate = v => String(v || '').slice(0, 10) || null;
+  const idx = AC_pauseIndex([['社員番号'], ['90001', '試験 太郎', '2026-10-14', '2026-10-21', ''], ['90002', '試験 花子', '2026-10-01', '', ''], ['', '', '2026-10-01', '', '']], toDate);
+  assert.equal(AC_isPaused(idx, '90001', '2026-10-15'), true);
+  assert.equal(AC_isPaused(idx, '90001', '2026-10-22'), false);
+  assert.equal(AC_isPaused(idx, '90001', '2026-10-13'), false);
+  assert.equal(AC_isPaused(idx, '90002', '2027-01-01'), true);   // 終了日なし
+  assert.equal(AC_isPaused(idx, '90003', '2026-10-15'), false);
+  const master = [MASTER_HEADER, mrow('90001', '試験 太郎'), mrow('90002', '試験 花子')];
+  assert.deepEqual(Object.keys(AC_pausedNames(master, idx, '2026-10-25')), [ctx.module.exports.AC_normalizeName('試験 花子')]);
 });

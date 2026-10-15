@@ -386,8 +386,11 @@ function AC_processTotRaw_(body) {
     var test = !notify && props.getProperty('ATTENDANCE_TEST') === 'true' && live;   // テスト：本人ではなく管理者へまとめて1通
     var names = AC_namesByTot_(mv, R.employees);
     var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
-    var send = function (tot, key, text) {
+    var pauseIdx = AC_pauseIndex_(), codeOfTot = AC_codeByTot(mv);
+    var send = function (tot, key, text, date) {
       if (!night) return;
+      var c0 = codeOfTot[AC_totKey(tot)];
+      if (c0 && (AC_isPaused(pauseIdx, c0, today) || (date && AC_isPaused(pauseIdx, c0, date)))) return;   // お知らせ停止中・停止期間中の日
       var build = function () { return typeof text === 'function' ? text(careCtx(tot)) : text; };   // 送るときだけ気遣いを決める
       if (test) {
         if (state.getProperty(key + ':test')) return;
@@ -420,7 +423,7 @@ function AC_processTotRaw_(body) {
         send(t.tot, 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), function (c) { return AC_todayStatusMessage(t.kind, today, c, overrides); });
       });
     }
-    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }); });
+    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }, p.date); });
     Object.keys(f.overtime).forEach(function (tot) {
       var min = f.overtime[tot];
       if (min >= 45 * 60) {
@@ -517,6 +520,72 @@ function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
     if (alert.length) AC_adminNotice_('paidleave', ('【有給の年5日】期限までに5日の取得が必要な方がいます。取得日の調整をお願いします🙇‍♀️\n\n'
       + alert.join('\n') + '\n\n詳しくは従業員マスタの「有給5日」シートをご覧ください。いつもありがとうございます！').slice(0, 4900));
   }
+}
+
+// ---------------- お知らせ停止（お休み中の人） ----------------
+// 従業員マスタの「お知らせ停止」シート：社員番号・氏名（参考）・開始日・終了日・メモ。
+// 期間中は、その人へのアルコールチェックと勤怠のお知らせを送らない（期間中の日付の打刻漏れも送らない）。
+var AC_PAUSE_SHEET = 'お知らせ停止';
+var AC_PAUSE_HEADER = ['社員番号', '氏名（参考）', '開始日', '終了日', 'メモ'];
+
+/** 純粋関数：シートの行から { 社員番号: [{from, until}] }。終了日が空なら開始日以降ずっと */
+function AC_pauseIndex(rows, toDate) {
+  var out = {};
+  (rows || []).forEach(function (r, i) {
+    if (i === 0) return;
+    var code = AC_cellCode_(r[0]), from = toDate(r[2]), until = String(r[3] || '').trim() ? toDate(r[3]) : '9999-12-31';
+    if (!code || !from || !until) return;
+    (out[code] = out[code] || []).push({ from: from, until: until });
+  });
+  return out;
+}
+function AC_isPaused(index, code, date) {
+  return (index[AC_cellCode_(code)] || []).some(function (p) { return date >= p.from && date <= p.until; });
+}
+function AC_pauseRows_() {
+  var ss = AC_masterSheet_().getParent(), sh = ss.getSheetByName(AC_PAUSE_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(AC_PAUSE_SHEET);
+    sh.getRange(1, 1, 1, AC_PAUSE_HEADER.length).setValues([AC_PAUSE_HEADER]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh.getDataRange().getValues();
+}
+function AC_pauseIndex_() { try { return AC_pauseIndex(AC_pauseRows_(), AC_toDateFn_()); } catch (e) { Logger.log('お知らせ停止シートを読めませんでした'); return {}; } }
+
+/** 純粋関数：お知らせ停止中の人の、名前（正規化）→ true（アルコールチェックの宛先から外すため） */
+function AC_pausedNames(masterValues, index, date) {
+  var out = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var m = masterValues[i];
+    if (!AC_isPaused(index, m[AC_COL.code], date)) continue;
+    if (String(m[AC_COL.name]).trim()) out[AC_normalizeName(m[AC_COL.name])] = true;
+    if (String(m[AC_COL.alias] || '').trim()) out[AC_normalizeName(m[AC_COL.alias])] = true;
+  }
+  return out;
+}
+/** 純粋関数：TOTコード → 社員番号 */
+function AC_codeByTot(masterValues) {
+  var out = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var t = AC_totKey(masterValues[i][AC_COL.totCode]);
+    if (t) out[t] = AC_cellCode_(masterValues[i][AC_COL.code]);
+  }
+  return out;
+}
+
+/** 手動実行用：氏名（完全一致）で従業員マスタから社員番号を探し、「お知らせ停止」に1行追加する */
+function AC_addPause_(name, from, until, memo) {
+  var mv = AC_masterSheet_().getDataRange().getValues(), key = AC_normalizeName(name), hit = [];
+  for (var i = 1; i < mv.length; i++) {
+    if (AC_normalizeName(mv[i][AC_COL.name]) === key && String(mv[i][AC_COL.status]).trim() !== '退職') hit.push(AC_cellCode_(mv[i][AC_COL.code]));
+  }
+  if (hit.length !== 1) { Logger.log('該当 %s 件のため追加しませんでした（1件のときだけ追加）', hit.length); return false; }
+  AC_pauseRows_();
+  var sh = AC_masterSheet_().getParent().getSheetByName(AC_PAUSE_SHEET);
+  sh.appendRow(["'" + hit[0], String(mv.filter(function (r) { return AC_cellCode_(r[AC_COL.code]) === hit[0]; })[0][AC_COL.name]), from, until || '', memo || '']);
+  Logger.log('お知らせ停止に追加しました（%s〜%s）', from, until || '終了日なし');
+  return true;
 }
 
 /** 純粋関数：TOTコード → 氏名（マスタ優先、無ければTOTの氏名） */
@@ -930,8 +999,9 @@ function AC_dispatch_(kind) {
   var overrides = AC_templateOverrides_();
   if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
   if (kind === 'morning' && !dryRun) { try { AC_checkLineQuota_(today); } catch (e) { Logger.log('LINE送信数の確認に失敗'); } }
-  var people = AC_recipientsFor(kind, d);
-  var thanks = kind === 'followAfter' ? AC_thanksTargets(d) : [];
+  var paused = AC_pausedNames(AC_masterSheet_().getDataRange().getValues(), AC_pauseIndex_(), today);   // お休み中の人には送らない
+  var people = AC_recipientsFor(kind, d).filter(function (n) { return !paused[AC_normalizeName(n)]; });
+  var thanks = (kind === 'followAfter' ? AC_thanksTargets(d) : []).filter(function (t) { return !paused[AC_normalizeName(t.name)]; });
   state.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
   Logger.log('%s %s：対象 %s人／感謝 %s人（全員登録済みなら %s通）', today, kind, people.length, thanks.length,
     people.length + thanks.length);
@@ -2138,5 +2208,5 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
 }

@@ -635,14 +635,20 @@ function AC_formPlan(ans) {
     period = from + '（もともとの休み）→ ' + (changeTo || '（変更後の日が未記入）');
     if (changeTo) { from = changeTo; until = changeTo; }   // 新しく休む日だけお知らせを止める
   }
-  var text = '【勤怠連絡フォーム】' + (ans.by || '（入力者未記入）') + 'さんから連絡がありました。\n'
-    + '・対象：' + name + 'さん\n・区分：' + kind + '\n・日付：' + period + '\n・理由：' + (ans.reason || '') + '\n\n'
-    + (change && !changeTo ? '変更後の休みの日が書かれていなかったため、お知らせは止めていません。ご本人に確認をお願いします🙇‍♀️\n' : '')
-    + (pause ? (pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
-      : 'この期間の打刻漏れのお知らせを止めました。') + '\nTOTへの登録（欠勤・有休・打刻修正など）もお願いします。'
-      : (change ? '' : '記録のみです（お知らせは止めていません）。')) + (change ? '\n管理シートのシフトとTOTの変更もお願いします。' : '') + '\nいつもありがとうございます！';
-  var groupText = '【勤怠の連絡】' + name + 'さん\n・区分：' + kind + '\n・日付：' + period + '\n・理由：' + (ans.reason || '')
-    + '\n・入力：' + (ans.by || '（未記入）') + 'さん\n\nご確認をお願いいたします。いつもありがとうございます！';
+  // 報告の文面（グループと管理者で共通）。業務連絡なので感謝の言葉は付けない
+  var report = '【勤怠変更の報告】\n・氏名：' + name + 'さん\n・区分：' + kind + '\n・日付：' + period
+    + '\n・理由：' + (ans.reason || '') + '\n・報告者：' + (ans.by ? ans.by + 'さん' : '（未記入）')
+    + '\n\n上記の勤怠変更について報告がありました。\n内容をご確認いただきますようお願いいたします。';
+  var notes = [];
+  if (change && !changeTo) notes.push('変更後の休みの日が書かれていなかったため、お知らせは止めていません。ご本人への確認をお願いします。');
+  if (pause) {
+    notes.push(pause.scope === '全部' ? (change ? changeTo + 'は' : 'この期間、') + name + 'さんへのアルコールチェックと勤怠のお知らせを止めました。'
+      : 'この期間の打刻漏れのお知らせを止めました。');
+    notes.push('TOTへの登録（欠勤・有休・打刻修正など）もお願いします。');
+  } else if (!change) notes.push('記録のみです（お知らせは止めていません）。');
+  if (change) notes.push('管理シートのシフトとTOTの変更もお願いします。');
+  var text = report + '\n\n' + notes.join('\n');
+  var groupText = report;
   return { code: code, name: name, from: from, until: until, kind: kind, pause: pause, text: text, groupText: groupText };
 }
 

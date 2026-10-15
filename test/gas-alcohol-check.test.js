@@ -624,4 +624,7 @@ test('GAS: 部門のグループLINE（登録コマンド・部門名・送り�
   assert.deepEqual(g, { 'A店': ['Cg1'], 'B店': ['Cg1', 'Cg3'] });
   const plan = AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '欠勤', from: '2026-10-16', reason: '体調不良' });
   assert.match(plan.groupText, /試験 花子さん[\s\S]*欠勤[\s\S]*体調不良[\s\S]*上司さん/);
+  assert.equal(plan.groupText, '【勤怠変更の報告】\n・氏名：試験 花子さん\n・区分：欠勤\n・日付：2026-10-16\n・理由：体調不良\n・報告者：上司さん'
+    + '\n\n上記の勤怠変更について報告がありました。\n内容をご確認いただきますようお願いいたします。');
+  assert.doesNotMatch(plan.groupText + plan.text, /ありがとう/);   // 業務連絡には感謝の言葉を付けない
 });

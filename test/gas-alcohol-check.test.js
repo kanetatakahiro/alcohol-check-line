@@ -69,24 +69,24 @@ test('GAS: 未実施者を本人通知と未登録に分け、管理者一覧に
   assert.match(AC_buildMessage('2026-10-08', '出勤前', { targets: ['a'], missing: ['試験 太郎'] }, plan, ['試験 太郎']), /本人通知に失敗/);
 });
 
-test('GAS: 本人向け文面（管理本部の標準ルール：丁寧で親しみやすく、責めない、他人の情報を含めない）', () => {
+test('GAS: 本人向け文面（2026-10-16 改訂：親しみやすく温かく、過度な感謝はしない）', () => {
+  const FORM = /▼ アルコールチェック入力フォーム\nhttps:\/\/docs\.google\.com\/forms\/d\/e\/1FAIpQLSemLVglUlSIc44wxMzmd8e9g09KRDXGUruMbZ54kuWrT6ZAhA\/viewform\?usp=dialog/;
   const fb = AC_messageFor('followBefore', '2026-10-08', null);
-  assert.match(fb, /本日の出勤前アルコールチェックについて、フォームへの入力が確認できておりませんでした/);
-  assert.match(fb, /すでに実施済みの場合は、お手数ですが入力をお願いいたします/);
-  assert.match(fb, /まだ実施していない場合は、これから運転する前に必ず実施/);   // 実施済み／未実施を分けて案内
-  assert.match(AC_messageFor('followAfter', '2026-10-08', null), /本日もお仕事お疲れ様でした/);
-  assert.match(AC_messageFor('evening', '2026-10-08', null), /本日も一日、本当にありがとうございました[\s\S]*退勤前のアルコールチェック/);
-  const avoid = /バタバタしますよね|つい忘れちゃいますよね|気にしすぎなくて大丈夫|体を大事にしてくださいね|一緒に頑張りましょう|もう少しだけお待ちくださいね|至急入力|未実施です/;
+  assert.equal(fb, 'おはようございます！😊\n\n本日の出勤前アルコールチェックについて、まだ入力が確認できていません。\n\nすでに実施済みの場合は、フォームへの入力をお願いします！\n\n未実施の場合は、運転前に必ずチェックをお願いします🚗\n\n▼ アルコールチェック入力フォーム\nhttps://docs.google.com/forms/d/e/1FAIpQLSemLVglUlSIc44wxMzmd8e9g09KRDXGUruMbZ54kuWrT6ZAhA/viewform?usp=dialog\n\nよろしくお願いします！');
+  assert.match(AC_messageFor('followAfter', '2026-10-08', null), /運転終了後のアルコールチェックを実施してください🚗[\s\S]*本日も一日お疲れ様でした！$/);
+  assert.match(AC_messageFor('evening', '2026-10-08', null), /^お疲れ様です！😊\n\n退勤前のアルコールチェック[\s\S]*お帰りの際はお気をつけください🚗$/);
   for (const k of ['morning', 'followBefore', 'evening', 'followAfter']) {
     const m = AC_messageFor(k, '2026-10-08', null);
-    assert.doesNotMatch(m, avoid);
-    assert.doesNotMatch(m, /試験|\n{3,}|\{/);   // 差し込み漏れ・空行の連続がない
+    assert.match(m, FORM);                                    // 4つともフォームのURLを載せる
+    assert.doesNotMatch(m, /試験|\n{3,}|\{|本当にありがとう|頼りにして/);   // 差し込み漏れ・空行の連続・過度な感謝がない
   }
   for (const m of [AC_punchMessage('2026-10-08', null), AC_overtimeMessage(1900, 30, '2026-10-08'), AC_overtimeMessage(2800, 45, '2026-10-08'),
-    AC_thanksMessage(5, '2026-10-08'), AC_render('follow', '2026-10-08', {}), AC_render('registered', '2026-10-08', { code: '90001' })]) {
-    assert.doesNotMatch(m, avoid);
-    assert.doesNotMatch(m, /\{/);
+    AC_thanksMessage(5, '2026-10-08'), AC_render('follow', '2026-10-08', {}), AC_render('registered', '2026-10-08', { code: '90001' }),
+    AC_render('registeredSame', '2026-10-08', { code: '90001' }), AC_render('registeredCheck', '2026-10-08', { code: '90001' })]) {
+    assert.doesNotMatch(m, /\{|\n{3,}|本当にありがとう|頼りにして/);
   }
+  assert.equal(AC_render('registered', '2026-10-08', { code: '90001' }), '社員番号：90001\n\n登録を受け付けました！😊\n\n管理本部で確認後、各種お知らせが届くようになります。');
+  assert.match(AC_render('follow', '2026-10-08', {}), /^友だち追加ありがとうございます！😊\n\nREBIRTH管理本部です。/);
 });
 
 const d = s => new Date(`${s}T00:00:00+09:00`);
@@ -284,11 +284,12 @@ test('GAS: 感謝の節目と文面（評価ではなく感謝）', () => {
   assert.deepEqual([1, 4, 6, 15, 25, 55].map(AC_isMilestone), Array(6).fill(false));
   for (const n of [5, 10, 20, 30, 50, 60]) {
     const m = AC_thanksMessage(n, '2026-10-08');
-    assert.match(m, /ありがとう/);
+    assert.match(m, /ありがとうございます/);
     assert.doesNotMatch(m, /優秀|合格|よくできました|頑張っていきましょう/);
   }
-  assert.match(AC_thanksMessage(5, '2026-10-08'), /5勤務日連続でのご対応ありがとうございます/);
-  assert.match(AC_thanksMessage(30, '2026-10-08'), /30勤務日連続/);
+  assert.equal(AC_thanksMessage(5, '2026-10-08'), 'お疲れ様です！😊\n\nアルコールチェックの入力が、5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n引き続きよろしくお願いします！');
+  assert.match(AC_thanksMessage(10, '2026-10-08'), /10勤務日連続となりました！✨\n\n継続してのご対応/);
+  assert.match(AC_thanksMessage(30, '2026-10-08'), /30勤務日連続となりました！✨\n\nいつもご協力/);
 });
 
 test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れる', () => {
@@ -304,12 +305,9 @@ test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れ
   assert.equal(AC_weatherFromJma(jma('200', 'くもり', ['0', '0'], ['2', '9']), '2026-10-08').kind, 'cold');
   assert.equal(AC_weatherFromJma(null, '2026-10-08'), null);
   const w = AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08');
-  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔[\s\S]*最高20℃／最低15℃）\n路面が滑りやすく[\s\S]*アルコールチェック/);
+  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔\n\n今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！（さいたま 最高20℃／最低15℃）\n\n本日も運転前のアルコールチェック[\s\S]*viewform\?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗$/);
   const plain = AC_morningMessage('2026-10-08', null);
-  assert.match(plain, /^おはようございます！\n/);
-  assert.doesNotMatch(plain, /晴れ|雨|℃|冷え込/);                       // 天気が取れないときは天気に触れない（推測しない）
-  assert.match(plain, /ありがとうございます/);                          // 代わりに日頃の感謝
-  assert.notEqual(AC_morningMessage('2026-10-08', null), AC_morningMessage('2026-10-09', null)); // 日によって言い回しが変わる
+  assert.equal(plain, 'おはようございます！\n\n体調に気をつけて、今日も一日頑張りましょう！\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いします！\n\n▼ アルコールチェック入力フォーム\nhttps://docs.google.com/forms/d/e/1FAIpQLSemLVglUlSIc44wxMzmd8e9g09KRDXGUruMbZ54kuWrT6ZAhA/viewform?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗');   // 天気が取れないときは天気に触れない
   const snowy = AC_weatherFromJma(jma('400', '雪', ['50', '80'], ['-1', '3']), '2026-10-08');
   assert.equal(snowy.snow, true);
   assert.equal(snowy.freeze, true);
@@ -400,8 +398,8 @@ test('GAS: 打刻漏れ等（エラー勤務・7日以内）と今月の残業�
   const f = AC_attendanceFindings(totR, '2026-10-09');
   assert.deepEqual(JSON.parse(JSON.stringify(f.punchErrors)), [{ tot: '0501', date: '2026-10-08' }]);   // 10/1は8日前なので対象外
   assert.equal(f.overtime['0501'], 1900);   // 9月分は含めない
-  assert.match(AC_punchMessage('2026-10-08', {}), /10\/8（木）の打刻が確認できませんでした/);
-  assert.match(AC_overtimeMessage(1900, 30, '2026-10-08'), /30時間に達しましたので[\s\S]*現在 31\.6時間/);
+  assert.match(AC_punchMessage('2026-10-08', {}), /10\/8（木）の勤怠について、打刻が確認できていません/);
+  assert.match(AC_overtimeMessage(1900, 30, '2026-10-08'), /30時間に達しましたので、お知らせします📢\n\n現在の残業時間：31\.6時間/);
   assert.match(AC_overtimeMessage(2800, 45, '2026-10-08'), /45時間/);
 });
 
@@ -430,32 +428,23 @@ test('GAS: シフト表が空欄の日は、TOTの「公休」では埋めない
   assert.equal(r.updates[0].value, '出勤');
 });
 
-test('GAS: アルコールチェックの通知は天気を優先、それ以外は天気以外の気遣い', () => {
+test('GAS: 天候・気温の気遣いは朝の案内だけ（それ以外の通知には入れない）', () => {
   const w = (o) => Object.assign({ kind: 'cloudy', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false }, o);
-  // アルコールチェック：天気（安全 → 気温 → ふだん）
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'rain', wind: true }) }).text, /雨の予報|雨が降りそう/);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'cold', snow: true }) }).text, /路面|雪/);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'hot', max: 34 }) }).text, /水分補給/);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ swing: true }) }).text, /気温差/);
-  assert.match(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }), infection: 'インフルエンザ' }).text, /天気|晴れ/);   // 天気が感染症より優先
-  assert.match(AC_careLine('followBefore', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨で路面/);
-  assert.match(AC_careLine('evening', '2026-10-08', { weather: w({ kind: 'cold' }) }).text, /暖かくしてお帰り/);
-  assert.match(AC_careLine('followAfter', '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /帰り道/);
-  assert.match(AC_careLine('evening', '2026-10-08', { weather: null }).text, /安全運転/);          // 天気が取れない日は天気に触れない
-  assert.equal(AC_careLine('followAfter', '2026-10-08', { weather: null }).text, '');
-  // それ以外：天気には触れない
-  for (const k of ['punch', 'ot30', 'ot45', 'thanks']) {
-    assert.doesNotMatch(AC_careLine(k, '2026-10-08', { weather: w({ kind: 'rain' }) }).text, /雨|寒|暑|天気|晴|雪|風/);
+  const care = o => AC_careLine('morning', '2026-10-08', { weather: o }).text;
+  assert.match(care(w({ kind: 'rain', wind: true })), /^今日は雨の予報です☔/);         // 雨が強風より先
+  assert.match(care(w({ kind: 'cold', snow: true })), /^雪や路面の凍結/);              // 雪・凍結が最優先
+  assert.match(care(w({ kind: 'hot', max: 36 })), /^今日はかなり暑くなりそうです☀️/);  // 猛暑（35℃以上）
+  assert.match(care(w({ kind: 'hot', max: 32 })), /^今日は気温が高くなる予報です/);
+  assert.match(care(w({ kind: 'cold' })), /^今日は冷え込む予報です/);
+  assert.match(care(w({ swing: true })), /^朝晩と日中の気温差/);
+  assert.match(care(w({ wind: true })), /^今日は風が強い予報です/);
+  assert.equal(care(w({ kind: 'sunny' })), '体調に気をつけて、今日も一日頑張りましょう！');
+  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }) }).usedWeather, false);
+  assert.equal(care(null), '体調に気をつけて、今日も一日頑張りましょう！');                // 天気が取れない日
+  for (const k of ['followBefore', 'evening', 'followAfter', 'punch', 'todayNoClockOut', 'todayNoClockIn', 'ot30', 'ot45', 'thanks']) {
+    assert.equal(AC_careLine(k, '2026-12-08', { weather: w({ kind: 'rain' }), infection: 'インフルエンザ' }).text, '', k);
   }
-  assert.match(AC_careLine('punch', '2026-10-08', { infection: 'インフルエンザ' }).text, /インフルエンザが流行しているようですので/);
-  assert.equal(AC_careLine('punch', '2026-10-08', { infection: 'インフルエンザ', infectionUsed: true }).usedInfection, false);
-  assert.match(AC_careLine('punch', '2026-10-08', {}).text, /季節の変わり目/);                  // 10月は季節の変わり目
-  assert.match(AC_careLine('punch', '2026-07-08', {}).text, /ありがとうございます/);
-  assert.match(AC_careLine('ot30', '2026-12-08', {}).text, /年末/);
-  assert.equal(AC_careLine('ot45', '2026-12-08', {}).text, '');                                // 45時間は用件をはっきり
-  assert.match(AC_punchMessage('2026-10-08', {}), /10\/8（木）の打刻が確認できませんでした/);
-  assert.match(AC_overtimeMessage(2800, 45, '2026-10-08'), /上長とご相談をお願いいたします/);
-  assert.match(AC_thanksMessage(5, '2026-10-08', null, { infection: 'インフルエンザ' }), /インフルエンザ/);
+  assert.match(AC_overtimeMessage(2800, 45, '2026-10-08'), /^お疲れ様です。\n\n今月の残業時間が45時間[\s\S]*上長とご相談ください。/);
   assert.match(AC_render('ot45Admin', '2026-10-08', { name: '試験 太郎', code: '90001', hours: '46.6' }), /36協定[\s\S]*業務量の調整/);
   const alert = AC_render('alcoholAlert', '2026-10-08', { time: '08:00', name: '試験 太郎', label: '出勤前', result: '0.20' });
   assert.match(alert, /^【アルコール検知のお知らせ】[\s\S]*運転を開始・継続させず/);
@@ -463,23 +452,18 @@ test('GAS: アルコールチェックの通知は天気を優先、それ以外
 });
 
 test('GAS: 「LINE文面」シートの上書き（空欄は既定、||で日替わり）', () => {
-  const ov = { followAfter: ['A {care}', 'B'], thanks: ['いつもありがとうございます（上書き）'] };
+  const ov = { followAfter: ['A {care}', 'B'], normal: ['ふだんの一言（上書き）'] };
   assert.ok(['A', 'B'].includes(AC_render('followAfter', '2026-10-08', {}, ov)));
-  assert.match(AC_messageFor('morning', '2026-10-08', null, {}, ov), /上書き/);
+  assert.match(AC_messageFor('morning', '2026-10-08', null, {}, ov), /ふだんの一言（上書き）/);
   assert.match(AC_messageFor('evening', '2026-10-08', null, {}, ov), /退勤前/);   // 上書きの無いキーは既定
 });
 
-test('GAS: 気遣いは1日の最初のLINEだけ（2通目以降は用件のみ）', () => {
+test('GAS: 気遣いは朝の案内の1通だけ（同じ日の2通目以降は入れない）', () => {
   const w = { kind: 'rain', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false };
-  const first = AC_composeMessage('morning', '2026-10-08', { weather: w }).text;
-  const second = AC_composeMessage('followBefore', '2026-10-08', { weather: w, careUsed: true }).text;
-  assert.match(first, /雨/);
-  assert.doesNotMatch(second, /雨|ありがとうございます。\n\n本日の/);
-  assert.match(second, /本日の出勤前アルコールチェックについて/);
-  assert.match(AC_composeMessage('evening', '2026-10-08', { weather: w, careUsed: true }).text, /お帰りの際も、安全運転で/);   // 締めの一言は残す
-  assert.doesNotMatch(AC_punchMessage('2026-10-08', { careUsed: true }), /季節の変わり目|いつも業務へのご協力/);
-  assert.doesNotMatch(AC_overtimeMessage(1900, 30, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ|季節の変わり目/);
-  assert.doesNotMatch(AC_thanksMessage(5, '2026-10-08', null, { careUsed: true, infection: 'インフルエンザ' }), /インフルエンザ/);
+  assert.match(AC_composeMessage('morning', '2026-10-08', { weather: w }).text, /雨/);
+  const again = AC_composeMessage('morning', '2026-10-08', { weather: w, careUsed: true }).text;
+  assert.match(again, /^おはようございます！\n\n本日も運転前のアルコールチェック/);   // 気遣いが空でも空行が続かない
+  assert.doesNotMatch(AC_composeMessage('followBefore', '2026-10-08', { weather: w }).text, /雨|路面/);
 });
 
 test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の打刻なしを見つけ、やさしい文面にする', () => {
@@ -498,11 +482,10 @@ test('GAS: 当日の勤怠状況（22:30）：退勤の打刻なし・出勤の�
   const r = JSON.parse(JSON.stringify(AC_todayStatus(R, '2026-10-14')));
   assert.deepEqual(r, [{ tot: '0001', kind: 'noClockOut' }, { tot: '0003', kind: 'noClockIn' }]);
   const out = AC_todayStatusMessage('noClockOut', '2026-10-14', {}, {});
-  assert.match(out, /現在も勤務中の場合は、退勤の打刻を忘れずに/);
-  assert.match(out, /遅くまでお疲れ様です！本当にありがとうございます！/);
-  assert.match(out, /TOTから退勤時刻の修正の申請/);   // 打刻は本人がTOTで申請できる
+  assert.match(out, /現在も勤務中の場合は、退勤時の打刻を忘れずにお願いします！/);
+  assert.match(out, /Touch On Timeから打刻修正の申請[\s\S]*遅い時間までお疲れ様です。\n体調にもお気をつけください😊$/);   // 打刻は本人がTOTで申請できる
   const inMsg = AC_todayStatusMessage('noClockIn', '2026-10-14', {}, {});
-  assert.match(inMsg, /TOTから打刻の修正の申請[\s\S]*勤怠連絡フォームでのご連絡[\s\S]*viewform[\s\S]*ありがとうございます/);   // 休みへの変更はフォーム
+  assert.match(inMsg, /Touch On Timeから打刻修正の申請[\s\S]*上長の承認を得たうえで、勤怠連絡フォームから報告[\s\S]*▼ 勤怠連絡フォーム\nhttps:[^\n]*viewform\n\nよろしくお願いします！$/);   // 休みへの変更はフォーム
 });
 
 test('GAS: LINE送信数のお知らせは80・95・100％の段階で、上限なしなら知らせない', () => {

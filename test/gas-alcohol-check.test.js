@@ -631,3 +631,99 @@ test('GAS: 部門のグループLINE（登録コマンド・部門名・送り�
   assert.doesNotMatch(AC_formPlan({ by: '上司', who: '試験 花子（90002）', kind: '遅刻', from: '2026-10-31', reason: 'x' }, { today: '2026-10-15' }).text, /翌月以降/);
   assert.equal(tp.pause, null); assert.match(tp.text, /テスト期間のため、お知らせは止めていません/);
 });
+
+// ---------------- 2026-10-16 追加：翌月シフトの手動実行・設定の確認（架空データのみ） ----------------
+const X = ctx.module.exports;
+
+test('GAS: 翌月シフト反映の結果行は、切り出し前と同じ形（自動反映の動きは変えない）', () => {
+  const cmp = { rows: [
+    ['2026-11-01', '90001', '試験 太郎', '10:00-19:00', '出勤', '公休', '違い'],
+    ['2026-11-02', '90001', '試験 太郎', '公休', '公休', '', '違い'],
+    ['2026-11-03', '90001', '試験 太郎', '公休', '公休', '公休', '一致'],
+    ['2026-10-31', '90001', '試験 太郎', '公休', '公休', '出勤', '違い'],   // 対象の月ではない
+  ] };
+  const plan = { apply: [{ date: '2026-11-01', code: '90001' }], skipped: [{ date: '2026-11-02', code: '90001' }] };
+  const rows = JSON.parse(JSON.stringify(X.AC_monthShiftRows(cmp, plan, '2026-11')));
+  assert.deepEqual(rows.map(r => r[7]), ['TOTの値に書き換え（元の値：公休）', '数式のセルのため書き換えなし', '']);
+  // 手動：過去の日は書き換えない旨と［手動］を付ける
+  const rows2 = JSON.parse(JSON.stringify(X.AC_monthShiftRows(cmp, { apply: [], skipped: [] }, '2026-11',
+    { past: [{ date: '2026-11-01', code: '90001' }], label: '［手動］' })));
+  assert.equal(rows2[0][7], '過去の日のため書き換えなし');
+  assert.equal(rows2[1][7], 'TOTの値に書き換え（元の値：空欄）［手動］');
+});
+
+test('GAS: 手動反映の対象月と元データ（翌月分が無い・古いデータでは止める）', () => {
+  const emp = [{ code: '1' }];
+  const s = (today, results) => JSON.parse(JSON.stringify(X.AC_manualShiftSource({ today, results }, today === '2026-10-31' ? '2026-10-31' : today)));
+  // 月末の朝のデータ：翌月分のシフトを使う
+  assert.deepEqual(s('2026-10-31', { employees: emp, nextSchedules: [], schedules: [] }), { month: '2026-11', key: 'nextSchedules', today: '2026-10-31' });
+  // 月末の夜のデータ（翌月分が入っていない）→ 止める
+  assert.ok(X.AC_manualShiftSource({ today: '2026-10-31', results: { employees: emp, schedules: [] } }, '2026-10-31').error);
+  // 翌月1日のデータ：当月の予定を使う
+  assert.deepEqual(s('2026-11-01', { employees: emp, schedules: [] }), { month: '2026-11', key: 'schedules', today: '2026-11-01' });
+  // 月の途中のデータ → 止める
+  assert.ok(X.AC_manualShiftSource({ today: '2026-11-15', results: { employees: emp, schedules: [] } }, '2026-11-15').error);
+  // 2日以上前のデータ → 止める（月末のデータを翌日に使うのは可）
+  assert.ok(!X.AC_manualShiftSource({ today: '2026-10-31', results: { employees: emp, nextSchedules: [] } }, '2026-11-01').error);
+  assert.ok(X.AC_manualShiftSource({ today: '2026-10-31', results: { employees: emp, nextSchedules: [] } }, '2026-11-02').error);
+  // 読み取りエラーが混ざったデータ・データ無し → 止める
+  assert.ok(X.AC_manualShiftSource({ today: '2026-10-31', results: { employees: emp, nextSchedules: [{ _error: 'x' }] } }, '2026-10-31').error);
+  assert.ok(X.AC_manualShiftSource(null, '2026-10-31').error);
+});
+
+test('GAS: 手動反映では今日より前の日を書き換えない', () => {
+  const plan = { apply: [{ date: '2026-11-01' }, { date: '2026-11-02' }, { date: '2026-11-03' }], skipped: [{ date: '2026-11-05' }] };
+  const r = JSON.parse(JSON.stringify(X.AC_manualShiftPlan(plan, '2026-11-02')));
+  assert.deepEqual(r.apply.map(u => u.date), ['2026-11-02', '2026-11-03']);
+  assert.deepEqual(r.past.map(u => u.date), ['2026-11-01']);
+  assert.equal(r.skipped.length, 1);
+});
+
+test('GAS: プレビューの後にシートが変わったら反映しない（指紋の確認）', () => {
+  const sv = [[], [], ['', '試験 太郎', 'シフト', '公休', '出勤']];
+  const apply = [{ date: '2026-11-01', code: '90001', row: 2, col: 3, value: '出勤' }];
+  const fp = X.AC_manualShiftFingerprint('2026-11', apply, sv);
+  assert.equal(fp, X.AC_manualShiftFingerprint('2026-11', apply, sv));
+  const edited = [[], [], ['', '試験 太郎', 'シフト', '希望休', '出勤']];   // 人がセルを直した
+  assert.notEqual(fp, X.AC_manualShiftFingerprint('2026-11', apply, edited));
+  assert.notEqual(fp, X.AC_manualShiftFingerprint('2026-11', [{ ...apply[0], value: '有給' }], sv));   // TOT側が変わった
+  const now = 1_000_000_000;
+  assert.equal(X.AC_manualRunCheck({ month: '2026-11', fp, at: now - 60_000 }, '2026-11', fp, now), '');
+  assert.match(X.AC_manualRunCheck(null, '2026-11', fp, now), /先に/);
+  assert.match(X.AC_manualRunCheck({ month: '2026-12', fp, at: now }, '2026-11', fp, now), /月/);
+  assert.match(X.AC_manualRunCheck({ month: '2026-11', fp, at: now - 31 * 60_000 }, '2026-11', fp, now), /30分/);
+  assert.match(X.AC_manualRunCheck({ month: '2026-11', fp: 'other', at: now }, '2026-11', fp, now), /変わりました/);
+});
+
+test('GAS: その月の反映が済んでいるかを結果シートで判定する（文字の日付・日付型の両方）', () => {
+  const head = ['日付'];
+  assert.equal(X.AC_monthShiftSheetDone([head, ['2026-11-01']], '2026-11', () => null), true);
+  assert.equal(X.AC_monthShiftSheetDone([head, ['2026-10-01']], '2026-11', () => null), false);
+  assert.equal(X.AC_monthShiftSheetDone([head, [{ d: 1 }]], '2026-11', () => '2026-11-03'), true);
+  assert.equal(X.AC_monthShiftSheetDone([head], '2026-11', () => null), false);
+  assert.equal(X.AC_monthShiftSheetDone(null, '2026-11'), false);
+});
+
+test('GAS: 設定の確認では秘密の値を表示しない・未設定は既定の動きを表示する', () => {
+  const secret = 'FAKE-SECRET-VALUE-123';
+  const all = { LINE_CHANNEL_ACCESS_TOKEN: secret, TOT_SYNC_SECRET: secret, LINE_ADMIN_USER_ID: 'U' + '1'.repeat(32), EMPLOYEE_MASTER_ID: 'FAKE-ID',
+    TEST_CODES: '90001', ATTENDANCE_TEST: 'true', DRY_RUN: 'false', SOMETHING_NEW: secret };
+  const text = [...X.AC_settingsReport(all, [{ fn: 'alcoholCheckImportTot', type: '時間主導' }, { fn: 'alcoholCheckAlerts', type: '時間主導' },
+    { fn: 'alcoholCheckAlerts', type: '時間主導' }, { fn: 'oldFunction', type: '時間主導' }], { version: 'v1', lastRelay: '2026-10-16', nextMonth: '2026-11' })].join('\n');
+  assert.ok(!text.includes(secret));
+  assert.ok(!text.includes('U111'));
+  assert.ok(!text.includes('FAKE-ID'));
+  assert.ok(!text.includes('90001'));
+  assert.match(text, /LINE_CHANNEL_ACCESS_TOKEN：設定あり/);
+  assert.match(text, /ATTENDANCE_RESPONSE_ID：未設定/);
+  assert.match(text, /ATTENDANCE_TEST：true/);
+  assert.match(text, /AGREEMENT_START_MONTH：未設定＝4月/);
+  assert.match(text, /TOT_MONTHLY_APPLY：未設定＝翌月シフト反映をする/);
+  assert.match(text, /そのほかの設定：1件（SOMETHING_NEW/);
+  assert.match(text, /alcoholCheckAlerts が2個登録/);
+  assert.match(text, /oldFunction.*このコードの関数ではありません/);
+  assert.match(text, /旧CSV取り込み/);
+  assert.match(text, /コードの版：v1/);
+  assert.match(text, /（2026-11）のシフト反映：まだ/);
+  assert.equal(typeof X.AC_CODE_VERSION, 'string');
+});

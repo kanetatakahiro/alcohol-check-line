@@ -39,6 +39,8 @@ var AC_SHEET_FORM = 'フォームの回答 1';
 var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
+// コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
+var AC_CODE_VERSION = '2026-10-16a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1046,12 +1048,7 @@ function AC_applyNextMonthShift_(R, mv, ss, today) {
   var sh = ss.getSheetByName(AC_TOT_MONTH_SHEET) || ss.insertSheet(AC_TOT_MONTH_SHEET);
   sh.clearContents();
   var head = AC_TOT_HEADER.concat(['反映']);
-  var skippedKey = {};
-  plan.skipped.forEach(function (u) { skippedKey[u.date + ':' + u.code] = 1; });
-  var rows = cmp.rows.filter(function (r) { return String(r[0]).slice(0, 7) === month; }).map(function (r) {
-    if (r[6] !== '違い') return r.concat(['']);
-    return r.concat([skippedKey[r[0] + ':' + r[1]] ? '数式のセルのため書き換えなし' : 'TOTの値に書き換え（元の値：' + (r[5] || '空欄') + '）']);
-  });
+  var rows = AC_monthShiftRows(cmp, plan, month);
   sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
   sh.setFrozenRows(1);
   if (rows.length) sh.getRange(2, 1, rows.length, head.length).setValues(rows);
@@ -1064,6 +1061,242 @@ function AC_applyNextMonthShift_(R, mv, ss, today) {
     + (plan.skipped.length ? '・数式のセルのため書き換えなし：' + plan.skipped.length + '件\n' : '')
     + (c['マスタに無い'] ? '・従業員マスタに無い人：' + c['マスタに無い'] + '件\n' : '')
     + '詳しくは従業員マスタの「' + AC_TOT_MONTH_SHEET + '」シートをご覧ください（元の値も残しています）。');
+}
+
+/**
+ * 純粋関数：「TOT翌月シフト反映」シートの行（対象の月の比較結果＋「反映」列）。
+ * extra（任意）：{ past: 書き換えなかった過去の日の更新, label: 書き換えた行に付ける補足 }
+ */
+function AC_monthShiftRows(cmp, plan, month, extra) {
+  extra = extra || {};
+  var skippedKey = {}, pastKey = {};
+  plan.skipped.forEach(function (u) { skippedKey[u.date + ':' + u.code] = 1; });
+  (extra.past || []).forEach(function (u) { pastKey[u.date + ':' + u.code] = 1; });
+  return cmp.rows.filter(function (r) { return String(r[0]).slice(0, 7) === month; }).map(function (r) {
+    if (r[6] !== '違い') return r.concat(['']);
+    if (skippedKey[r[0] + ':' + r[1]]) return r.concat(['数式のセルのため書き換えなし']);
+    if (pastKey[r[0] + ':' + r[1]]) return r.concat(['過去の日のため書き換えなし']);
+    return r.concat(['TOTの値に書き換え（元の値：' + (r[5] || '空欄') + '）' + (extra.label || '')]);
+  });
+}
+
+// ---------------- 翌月シフト反映の手動実行（失敗したときの再実行用） ----------------
+// 自動反映（月末の朝）が失敗したときだけ使う。既存データの上書きを防ぐため、次の順で守る：
+//  1. alcoholCheckPreviewNextMonthShift：書き込まずに、どのセルがどう変わるかを実行ログに出す
+//  2. 内容を確認したうえで、30分以内に alcoholCheckRunNextMonthShift を実行したときだけ反映する
+//     （プレビューの後にシートやTOTデータが変わっていたら反映せずに止める）
+//  - 自動・手動を問わず、その月の反映が済んでいたら（記録または「TOT翌月シフト反映」シートに行がある）実行しない
+//  - 今日より前の日・数式のセルは書き換えない。TOT_MONTHLY_APPLY=false のときも実行しない
+//  - 反映の対象月と元データは、保存済みの tot-latest.json から自動で決める（月末の朝のデータ、または翌月1〜7日のデータ）
+var AC_MANUAL_PREVIEW_KEY = 'totmonth:preview';
+var AC_MANUAL_PREVIEW_MINUTES = 30;
+
+/** 手動確認用：翌月シフト反映のプレビュー（シートには一切書き込まない） */
+function alcoholCheckPreviewNextMonthShift() { AC_manualNextMonthShift_(false); }
+
+/** 手動実行：プレビューで確認した内容を反映する（プレビューから30分以内・内容が同じときだけ） */
+function alcoholCheckRunNextMonthShift() { AC_manualNextMonthShift_(true); }
+
+/** 純粋関数：保存済みのTOTデータから、手動反映の対象月と使うデータを決める。使えないときは error */
+function AC_manualShiftSource(data, realToday) {
+  var R = (data && data.results) || {};
+  var day = function (d) { return Number(String(d).slice(8, 10)); };
+  var t = String((data && data.today) || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return { error: '保存済みのTOTデータが見つからないか、形式が違います' };
+  var age = Math.round((Date.UTC(+realToday.slice(0, 4), +realToday.slice(5, 7) - 1, day(realToday))
+    - Date.UTC(+t.slice(0, 4), +t.slice(5, 7) - 1, day(t))) / 86400000);
+  if (age < 0 || age > 1) return { error: '保存済みのTOTデータが古いです（取得日 ' + t + '）。VPSで取り込みをやり直してください' };
+  if (!Array.isArray(R.employees)) return { error: 'TOTデータに従業員の一覧がありません' };
+  var ok = function (v) { return Array.isArray(v) && !v.some(function (x) { return x && x._error; }); };
+  if (day(t) >= 28 && ok(R.nextSchedules)) return { month: AC_nextMonth(t), key: 'nextSchedules', today: t };
+  if (day(t) <= 7 && ok(R.schedules)) return { month: t.slice(0, 7), key: 'schedules', today: t };   // 翌月に入ってから：当月の予定（今日〜31日先）を使う
+  return { error: '保存済みのTOTデータに翌月分のシフトが入っていません（取得日 ' + t + '）' };
+}
+
+/** 純粋関数：手動反映では今日より前の日を書き換えない */
+function AC_manualShiftPlan(plan, realToday) {
+  var apply = [], past = [];
+  plan.apply.forEach(function (u) { (u.date >= realToday ? apply : past).push(u); });
+  return { apply: apply, skipped: plan.skipped, past: past };
+}
+
+/** 純粋関数：反映内容の指紋（プレビュー後に内容が変わっていないかの確認用） */
+function AC_fingerprint(text) {
+  var h1 = 5381, h2 = 52711, s = String(text);
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    h1 = (h1 * 33) ^ c; h2 = (h2 * 33) ^ c;
+    h1 |= 0; h2 |= 0;
+  }
+  return (h1 >>> 0).toString(16) + (h2 >>> 0).toString(16) + ':' + s.length;
+}
+
+/** 純粋関数：書き換え予定の内容（現在の値を含む）から指紋を作る */
+function AC_manualShiftFingerprint(month, apply, sv) {
+  return AC_fingerprint(month + '|' + apply.map(function (u) {
+    return [u.date, u.code, u.row, u.col, String(sv[u.row][u.col] == null ? '' : sv[u.row][u.col]).trim(), u.value].join(',');
+  }).join(';'));
+}
+
+/** 純粋関数：実行してよいか（プレビューの記録と、今の内容が一致するか）。問題があれば理由を返す */
+function AC_manualRunCheck(preview, month, fp, nowMs) {
+  if (!preview) return '先に alcoholCheckPreviewNextMonthShift を実行して内容を確認してください';
+  if (preview.month !== month) return 'プレビューした月（' + preview.month + '）と対象の月が違います。もう一度プレビューしてください';
+  if (nowMs - preview.at > AC_MANUAL_PREVIEW_MINUTES * 60000) return 'プレビューから' + AC_MANUAL_PREVIEW_MINUTES + '分以上たっています。もう一度プレビューしてください';
+  if (preview.fp !== fp) return 'プレビューの後に管理シートまたはTOTのデータが変わりました。反映せずに止めます。もう一度プレビューしてください';
+  return '';
+}
+
+/** 純粋関数：その月の反映が済んでいるか（「TOT翌月シフト反映」シートの日付列に対象の月の行がある） */
+function AC_monthShiftSheetDone(values, month, toDate) {
+  for (var i = 1; i < (values || []).length; i++) {
+    var d = (toDate && toDate(values[i][0])) || String(values[i][0] == null ? '' : values[i][0]);
+    if (d && String(d).slice(0, 7) === month) return true;
+  }
+  return false;
+}
+
+/** 保存済みの tot-latest.json を読む（フォルダの作成・設定の書き込みはしない） */
+function AC_readTotLatest_() {
+  var id = PropertiesService.getScriptProperties().getProperty('TOT_FOLDER_ID');
+  var folder = null;
+  if (id) folder = DriveApp.getFolderById(id);
+  else { var it = DriveApp.getFoldersByName(AC_TOT_FOLDER); if (it.hasNext()) folder = it.next(); }
+  if (!folder) return null;
+  var files = folder.getFilesByName('tot-latest.json');
+  if (!files.hasNext()) return null;
+  try { return JSON.parse(files.next().getBlob().getDataAsString('UTF-8')); } catch (e) { return null; }
+}
+
+function AC_manualNextMonthShift_(commit) {
+  var title = commit ? '【翌月シフト反映（手動実行）】' : '【翌月シフト反映のプレビュー（書き込みなし）】';
+  var stop = function (msg) { Logger.log('%s 中止：%s', title, msg); };
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return stop('ほかの処理が動いています。少し待ってからやり直してください');
+  try {
+    var props = PropertiesService.getScriptProperties();
+    if (props.getProperty('TOT_MONTHLY_APPLY') === 'false') return stop('TOT_MONTHLY_APPLY が false のため実行しません');
+    if (!props.getProperty('EMPLOYEE_MASTER_ID')) return stop('EMPLOYEE_MASTER_ID が未設定です');
+    var realToday = AC_today_();
+    var data = AC_readTotLatest_();
+    var src = AC_manualShiftSource(data, realToday);
+    if (src.error) return stop(src.error);
+    var month = src.month, label = Number(month.slice(5, 7)) + '月', state = AC_state_();
+    var master = AC_masterSheet_(), ss = master.getParent(), mv = master.getDataRange().getValues();
+    var toDate = AC_toDateFn_();
+    var resultSheet = ss.getSheetByName(AC_TOT_MONTH_SHEET);
+    if (state.getProperty('totmonth:' + month) || (resultSheet && AC_monthShiftSheetDone(resultSheet.getDataRange().getValues(), month, toDate))) {
+      return stop(label + 'のシフト反映はすでに済んでいます。反映後に人が直したセルを守るため、手動では実行しません（詳しくは「' + AC_TOT_MONTH_SHEET + '」シート）');
+    }
+    var schedule = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_SCHEDULE);
+    var range = schedule.getDataRange(), sv = range.getValues(), formulas = range.getFormulas();
+    var hasCols = Object.keys(AC_shiftIndex_(sv, toDate).cols).some(function (d) { return d.slice(0, 7) === month; });
+    if (!hasCols) return stop('管理シート「' + AC_SHEET_SCHEDULE + '」に' + label + 'の日付の列がありません');
+    var R = data.results;
+    var cmp = AC_buildTotCompare(AC_totScheduleItems({ employees: R.employees, schedules: R[src.key] }), mv, sv, toDate);
+    var plan = AC_manualShiftPlan(AC_monthlyApplyPlan(cmp.updates, formulas, month), realToday);
+    var fp = AC_manualShiftFingerprint(month, plan.apply, sv);
+    var c = cmp.counts;
+    Logger.log('%s %s（TOTデータの取得日 %s／%s）\n書き換え予定 %s件／一致 %s件／未設定 %s件／要確認 %s件／数式のため対象外 %s件／過去の日のため対象外 %s件／マスタに無い %s件',
+      title, label, src.today, src.key === 'nextSchedules' ? '翌月分のシフト' : '当月の予定', plan.apply.length, c['一致'], c['未設定'], c['要確認'],
+      plan.skipped.length, plan.past.length, c['マスタに無い']);
+    if (!commit) {
+      var lines = plan.apply.map(function (u) {
+        return u.date + '　' + u.code + '　' + String(sv[u.row][1] || '').trim() + '：' + (String(sv[u.row][u.col] == null ? '' : sv[u.row][u.col]).trim() || '空欄') + ' → ' + u.value;
+      });
+      for (var i = 0; i < lines.length; i += 100) Logger.log(lines.slice(i, i + 100).join('\n'));
+      state.setProperty(AC_MANUAL_PREVIEW_KEY, JSON.stringify({ month: month, fp: fp, at: Date.now() }));
+      Logger.log('内容に問題がなければ、%s分以内に alcoholCheckRunNextMonthShift を実行すると反映します（実行しなければ何も変わりません）', AC_MANUAL_PREVIEW_MINUTES);
+      return;
+    }
+    var preview = null;
+    try { preview = JSON.parse(state.getProperty(AC_MANUAL_PREVIEW_KEY) || 'null'); } catch (e) { preview = null; }
+    var why = AC_manualRunCheck(preview, month, fp, Date.now());
+    if (why) return stop(why);
+    plan.apply.forEach(function (u) { schedule.getRange(u.row + 1, u.col + 1).setValue(u.value); });
+    var sh = resultSheet || ss.insertSheet(AC_TOT_MONTH_SHEET);
+    sh.clearContents();
+    var head = AC_TOT_HEADER.concat(['反映']);
+    var rows = AC_monthShiftRows(cmp, plan, month, { past: plan.past, label: '［手動］' });
+    sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    if (rows.length) sh.getRange(2, 1, rows.length, head.length).setValues(rows);
+    state.setProperty('totmonth:' + month, new Date().toISOString());
+    state.deleteProperty(AC_MANUAL_PREVIEW_KEY);
+    Logger.log('%s 完了：%s件を書き換えました', title, plan.apply.length);
+    AC_pushLine_('【' + label + 'のシフト反映（手動）】TOTの' + label + 'のシフトを管理シートに反映しました。\n'
+      + '・書き換え：' + plan.apply.length + '件\n・一致（変更なし）：' + c['一致'] + '件\n'
+      + (plan.past.length ? '・過去の日のため書き換えなし：' + plan.past.length + '件\n' : '')
+      + (plan.skipped.length ? '・数式のセルのため書き換えなし：' + plan.skipped.length + '件\n' : '')
+      + '詳しくは従業員マスタの「' + AC_TOT_MONTH_SHEET + '」シートをご覧ください（元の値も残しています）。');
+  } finally { lock.releaseLock(); }
+}
+
+// ---------------- 設定の確認（手動） ----------------
+// 値を表示してよい設定（オン／オフ・日付・しきい値など）。これ以外は「設定あり／なし」だけを表示する。
+var AC_SETTINGS_SHOWN = {
+  DRY_RUN: '未設定＝送信しない（"false" のときだけ送信）',
+  NOTIFY_EMPLOYEES: '未設定＝本人へ送らない',
+  NOTIFY_ADMIN: '未設定＝管理者へ送る',
+  REQUIRE_DEVICE: '未設定＝機器所持で絞り込まない',
+  ALERT_THRESHOLD: '未設定＝0.14',
+  NORMAL_RESULTS: '未設定＝なし',
+  TEST_UNTIL: '未設定＝テストモードなし',
+  INFECTION_NAME: '未設定＝なし',
+  INFECTION_UNTIL: '未設定＝なし',
+  ATTENDANCE_NOTIFY: '未設定＝本人へ送らない',
+  ATTENDANCE_TEST: '未設定＝テスト送信しない',
+  TOT_APPLY: '未設定＝毎日のシフト書き換えはしない',
+  TOT_MONTHLY_APPLY: '未設定＝翌月シフト反映をする（"false" で停止）',
+  TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
+  AGREEMENT_START_MONTH: '未設定＝4月',
+  FORM_LIVE_FROM: '未設定＝2026-10-20',
+};
+var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
+  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
+var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
+  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm'];
+
+/**
+ * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
+ * triggers：[{ fn, type }]、extra：{ version, lastRelay, monthDone }
+ */
+function AC_settingsReport(all, triggers, extra) {
+  all = all || {}; extra = extra || {};
+  var out = ['コードの版：' + (extra.version || '不明'), '', '■ 設定（値を表示）'];
+  Object.keys(AC_SETTINGS_SHOWN).forEach(function (k) {
+    var has = Object.prototype.hasOwnProperty.call(all, k) && String(all[k]) !== '';
+    out.push('・' + k + '：' + (has ? String(all[k]) : AC_SETTINGS_SHOWN[k]));
+  });
+  out.push('', '■ 設定（あり／なしだけ表示。値は表示しません）');
+  AC_SETTINGS_PRESENCE.forEach(function (k) { out.push('・' + k + '：' + (all[k] ? '設定あり' : '未設定')); });
+  var other = Object.keys(all).filter(function (k) { return !AC_SETTINGS_SHOWN[k] && AC_SETTINGS_PRESENCE.indexOf(k) === -1; }).sort();
+  if (other.length) out.push('・そのほかの設定：' + other.length + '件（' + other.join('、') + '。値は表示しません）');
+  out.push('', '■ 定期実行（トリガー）');
+  var count = {};
+  (triggers || []).forEach(function (t) { count[t.fn] = (count[t.fn] || 0) + 1; });
+  (triggers || []).forEach(function (t) { out.push('・' + t.fn + '（' + t.type + '）' + (AC_KNOWN_TRIGGERS.indexOf(t.fn) === -1 ? '　※このコードの関数ではありません' : '')); });
+  if (!(triggers || []).length) out.push('・なし');
+  Object.keys(count).forEach(function (fn) { if (count[fn] > 1) out.push('【注意】' + fn + ' が' + count[fn] + '個登録されています（重複して動きます）'); });
+  if (count.alcoholCheckImportTot) out.push('【参考】旧CSV取り込み（alcoholCheckImportTot）の1時間ごとの実行が残っています');
+  out.push('', '■ 状態');
+  out.push('・VPSからTOTデータが最後に届いた日：' + (extra.lastRelay || '記録なし'));
+  out.push('・翌月（' + (extra.nextMonth || '') + '）のシフト反映：' + (extra.monthDone ? '済み（' + extra.monthDone + '）' : 'まだ'));
+  return out;
+}
+
+/** 手動確認用：設定・トリガー・コードの版を実行ログに表示する（送信・シートへの書き込みはしない） */
+function alcoholCheckShowSettings() {
+  var triggers = ScriptApp.getProjectTriggers().map(function (t) {
+    var type = String(t.getEventType()).replace('CLOCK', '時間主導').replace('ON_FORM_SUBMIT', 'フォーム送信時');
+    return { fn: t.getHandlerFunction(), type: type };
+  });
+  var state = PropertiesService.getUserProperties(), next = AC_nextMonth(AC_today_());
+  var lines = AC_settingsReport(PropertiesService.getScriptProperties().getProperties(), triggers, {
+    version: AC_CODE_VERSION, lastRelay: state.getProperty('tot:lastRelay'), nextMonth: next, monthDone: state.getProperty('totmonth:' + next),
+  });
+  Logger.log(lines.join('\n'));
+  Logger.log('※トリガーの時刻・間隔は、エディタ左の「トリガー」画面で確認できます。記録（状態）は実行したアカウントのものです。');
 }
 
 /** 純粋関数：TOTの勤務予定を {tot, date, pattern} に（pattern は「10:00-19:00」か休暇名。有休→有給） */
@@ -2432,5 +2665,8 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage };
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
+    AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
+    AC_CODE_VERSION: AC_CODE_VERSION };
 }

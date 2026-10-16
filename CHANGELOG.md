@@ -1,5 +1,12 @@
 # 変更履歴
 
+## 2026-10-16 本番反映（Apps Script「コード.gs」のみ・デプロイなし）
+- 16:5x、本番の「コード.gs」を GitHub 088053f の gas/AlcoholCheck.gs（版 2026-10-16a）に置き換えて保存。保存後の内容がGitHubと一致することを確認
+- 変更しなかったもの：tmpSetup.gs、Webアプリのデプロイ（バージョン19のまま）、Webhook、トリガー、スクリプトプロパティ
+- 反映後の確認：alcoholCheckShowSettings 正常（承認画面なし）。alcoholCheckPreviewNextMonthShift は「翌月分のシフトが入っていません」で中止（想定どおり・書き込みなし）。alcoholCheckRunNextMonthShift は実行していない
+- 戻し先：c27bbdb（gas/SETUP.md「本番の戻し先」）
+- 今後の確認事項：10/29 さくらのVPSの本契約移行と決済（お試し期間は10/28まで、10/29にクレジットカードで自動決済）／10/31朝 翌月シフト反映の結果／tmpSetup.gs の整理／飲酒検知の確認（alcoholCheckAlerts）のエラー率0.64%の調査
+
 ## 2026-10-16 設定の確認と、翌月シフト反映の手動再実行（プレビュー優先）
 - `alcoholCheckShowSettings`：設定値・トリガー・コードの版（`AC_CODE_VERSION`、今回 `2026-10-16a`）を実行ログに表示。トークン・合言葉・ID・社員番号は「設定あり／なし」のみ。送信・書き込みなし
 - `alcoholCheckPreviewNextMonthShift`：翌月シフト反映の書き換え予定を実行ログに表示（書き込みなし）

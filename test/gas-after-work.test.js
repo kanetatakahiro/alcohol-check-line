@@ -436,7 +436,7 @@ test('実施時刻：入力より前・その勤務日の0時〜翌5時・入力
   assert.equal(S('00:30', 'わからない'), null);
 });
 
-test('打刻漏れが7日間直らない（送信なし）：フォームに「実施時刻」があればそれで確定、無ければ数えない', () => {
+test('打刻漏れが7日間直らない（送信なし）：既定ではフォームに「実施時刻」の列があっても使わず、数えない。承認後に有効にした場合だけ使う', () => {
   const days = [...days6, '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26', '2026-10-27'];
   const sv = sheet(days, [['試験 残業', [...Array(6).fill('出勤'), ...Array(6).fill('公休'), '出勤']]]);
   const withDone = (hhmm) => {
@@ -445,13 +445,20 @@ test('打刻漏れが7日間直らない（送信なし）：フォームに「�
     fv[row][6] = hhmm;
     return fv;
   };
-  const ok = morning({ today: '2026-10-27', sv, fv: withDone('23:50'), totR: out19(''), user: { 'mthanks:init': '2026-10-20' } });
-  assert.equal(ok.user['late:10102:2026-10-19'], 'ok');
-  assert.match(ok.sent[0].text, /6勤務日連続/);
-  assert.ok(ok.logs.some(l => /実施時刻で判定/.test(l)));
-  const ng = morning({ today: '2026-10-27', sv, fv: withDone('19:00'), totR: out19(''), user: { 'mthanks:init': '2026-10-20' } });   // 実施19:00→入力0:30（5時間30分後）
-  assert.equal(ng.user['late:10102:2026-10-19'], 'ng');
-  assert.equal(ng.sent.length, 0);
+  assert.equal(X.AC_USE_FORM_DONE_TIME, false);
+  const off = morning({ today: '2026-10-27', sv, fv: withDone('23:50'), totR: out19(''), user: { 'mthanks:init': '2026-10-20' } });
+  assert.equal(off.user['late:10102:2026-10-19'], 'ng');                 // 列があっても使わない（自動で判定を変えない）
+  assert.equal(off.sent.length, 0);
+  assert.ok(!off.logs.some(l => /実施時刻で判定/.test(l)));
+  // 承認後に有効にした場合（AC_USE_FORM_DONE_TIME = true）だけ使う
+  const days2 = { today: '2026-10-27', sv, fv: withDone('23:50'), totR: out19(''), user: { 'mthanks:init': '2026-10-20' } };
+  const n = night({ today: days2.today, master, shifts: sv, form: days2.fv, punchFor: () => null });
+  Object.assign(n.user, days2.user);
+  n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+  n.ctx.__totR = days2.totR;
+  vm.runInContext('AC_USE_FORM_DONE_TIME = true; AC_readTotLatest_ = function () { return { today: "2026-10-27", results: __totR }; }; AC_morningThanks_();', n.ctx);
+  assert.equal(n.user['late:10102:2026-10-19'], 'ok');
+  assert.ok(n.logs.some(l => /実施時刻で判定/.test(l)));
 });
 
 // ---------------- ③ 判定保留の間も、その後の勤務日の入力は記録が続き、保留が解けたときにお礼を取りこぼさない ----------------

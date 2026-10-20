@@ -493,3 +493,47 @@ test('案内の文面：「運転を開始する前に」チェックを行う�
   assert.match(X.AC_render('followAfter', '2026-10-20', {}), /未実施の場合は/);   // 特例（10015）は従来の文面のまま
   for (const k of ['mthanks5', 'mthanks10', 'mthanksN']) assert.doesNotMatch(X.AC_render(k, '2026-10-20', { n: 6 }), /後から|あとで/);   // お礼で後からの実施を促さない
 });
+
+// ---------------- ⑤ お礼の送信履歴（シートに残し続け、重複送信しない） ----------------
+test('お礼送信履歴：社員番号ごとの最後の行を「前回お礼した節目」として使う（送信・基準・従来の20時。テストは除く）', () => {
+  const rows = [['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '備考'],
+    ['2026-10-14', "'10019", 5, 5, '2026-10-06', '従来の20時', ''],
+    ['2026-10-20', '10115', 13, 10, '2026-10-01', '基準', '再集計'],
+    ['2026-10-21', '10019', 10, 10, '2026-10-06', '送信', ''],
+    ['2026-10-21', '10050', 5, 5, '2026-10-11', 'テスト', '']];
+  const idx = JSON.parse(JSON.stringify(X.AC_thanksLogIndex(rows)));
+  assert.deepEqual(idx, { 10019: { m: 10, start: '2026-10-06' }, 10115: { m: 10, start: '2026-10-01' } });
+});
+
+test('翌朝のお礼（送信なし）：送信履歴シートの「基準」があれば重複送信しない。送ったら履歴に1行残す', () => {
+  const sv = sheet(days6, [['試験 残業', Array(6).fill('出勤')]]);
+  const fv = [['ts', '氏名', '区分', '結果'], ...entries('試験 残業', [...work5, ['2026-10-19', '08:00', '19:00'], ['2026-10-20', '08:00', '']])];
+  const run = (logRows) => {
+    const n = night({ master, shifts: sv, form: fv, punchFor: () => null });
+    n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+    n.ctx.__log = logRows;
+    vm.runInContext(`AC_readTotLatest_ = function () { return null; };
+      AC_thanksLogSheet_ = function () { return { getDataRange: function () { return { getValues: function () { return __log; } }; }, appendRow: function (r) { __log.push(r); } }; };
+      AC_morningThanks_();`, n.ctx);
+    return n;
+  };
+  const head = [['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '備考']];
+  // 基準：5日のお礼は送信済み（再集計で確定）→ 送らない
+  const a = run([...head, ['2026-10-20', '10102', 5, 5, '2026-10-15', '基準', '再集計']]);
+  assert.equal(a.sent.length, 0);
+  // 履歴なし（切り替え後2日目以降）→ 送って、履歴に1行
+  const log = [...head];
+  const b = night({ master, shifts: sv, form: fv, punchFor: () => null });
+  Object.assign(b.user, { 'mthanks:init': '2026-10-19' });
+  b.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+  b.ctx.__log = log;
+  vm.runInContext(`AC_readTotLatest_ = function () { return null; };
+    AC_thanksLogSheet_ = function () { return { getDataRange: function () { return { getValues: function () { return __log; } }; }, appendRow: function (r) { __log.push(r); } }; };
+    AC_morningThanks_();`, b.ctx);
+  assert.equal(b.sent.length, 1);
+  assert.equal(log.length, 2);
+  assert.deepEqual([log[1][1], log[1][2], log[1][3], log[1][4], log[1][5]], ["'10102", 5, 5, '2026-10-15', '送信']);
+  // 次の朝に同じ内容でもう一度動いても、履歴を見て送らない
+  const c = run(log);
+  assert.equal(c.sent.length, 0);
+});

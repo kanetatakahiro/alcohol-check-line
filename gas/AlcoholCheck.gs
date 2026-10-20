@@ -1897,6 +1897,37 @@ function AC_thanksDecision(streak, stored, oldThanked, migrating) {
   return { send: false, m: m, store: stored };
 }
 
+// お礼の送信履歴（従業員マスタのファイルの「お礼送信履歴」シート）。8日で消えず、ずっと残る。
+// 区分：送信（システムが送信）／基準（再集計で確定した値。送信済みとみなす）／従来の20時（従来の仕組みでの送信・推定）
+// 翌朝のお礼は、このシートの社員番号ごとの最後の行（節目・連続の開始日）を「前回お礼した節目」として使う（重複送信しない）。
+var AC_THANKS_LOG_SHEET = 'お礼送信履歴';
+var AC_THANKS_LOG_HEADER = ['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '備考'];
+
+/** 「お礼送信履歴」シート（無ければ見出しつきで作る）。読めなければ null */
+function AC_thanksLogSheet_() {
+  try {
+    var ss = AC_masterSheet_().getParent(), sh = ss.getSheetByName(AC_THANKS_LOG_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(AC_THANKS_LOG_SHEET);
+      sh.getRange(1, 1, 1, AC_THANKS_LOG_HEADER.length).setValues([AC_THANKS_LOG_HEADER]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+    }
+    return sh;
+  } catch (e) { Logger.log('お礼送信履歴シートを開けませんでした：%s', e && e.message ? e.message : ''); return null; }
+}
+
+/** 純粋関数：履歴の行から、社員番号ごとの前回お礼した節目 { m, start }（後の行ほど新しい）。日付の値は toDate で文字にする */
+function AC_thanksLogIndex(rows, toDate) {
+  var out = {};
+  (rows || []).slice(1).forEach(function (r) {
+    var code = AC_cellCode_(r[1]), m = Number(r[3]), kind = String(r[5] || '').trim();
+    if (!code || !m || !/^(送信|基準|従来の20時)$/.test(kind)) return;
+    var start = toDate && Object.prototype.toString.call(r[4]) === '[object Date]' ? toDate(r[4]) : String(r[4] || '').trim();
+    out[code] = { m: m, start: start };
+  });
+  return out;
+}
+
 /** 朝の案内の後に実行：前回の勤務日までの連続記録を確定し、節目のお礼を送る（今日出勤の人だけ。休みの人は次の出勤日の朝） */
 function AC_morningThanks_() {
   var props = PropertiesService.getScriptProperties(), state = AC_state_();
@@ -1915,6 +1946,7 @@ function AC_morningThanks_() {
   try { totLatest = AC_readTotLatest_(); } catch (e) { Logger.log('TOTデータの読み込みに失敗（日付をまたいだ入力は不利にしない）'); }
   var totR = totLatest && totLatest.results;
   var totOk = !!totLatest && totLatest.today === today && !!totR;   // 今朝（7:05）のデータだけを使う。古ければ判定保留
+  var logSheet = AC_thanksLogSheet_(), logIdx = logSheet ? AC_thanksLogIndex(logSheet.getDataRange().getValues(), AC_toDateFn_()) : {};
   d.before.targets.forEach(function (name) {
     var k = AC_normalizeName(name), code = codeMap[k];
     if (!code || paused[k]) return;
@@ -1938,6 +1970,7 @@ function AC_morningThanks_() {
     if (streak.pending.length) { Logger.log('お礼は判定保留のため待ちます：社員番号%s（%s）', code, streak.pending.join('、')); return; }
     var skey = 'thanksLast:' + code, raw = state.getProperty(skey), stored = null;
     try { stored = raw ? JSON.parse(raw) : null; } catch (e) { stored = null; }
+    if (logIdx[code]) stored = logIdx[code];   // 送信履歴シートを優先（再集計の基準・過去の送信を含む）
     var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
     var dec = AC_thanksDecision(streak, stored, oldThanked, migrating);
     if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
@@ -1950,6 +1983,10 @@ function AC_morningThanks_() {
         else return;   // LINE未登録：記録を進めず、登録後の朝に送る
         sent++;
       } catch (e) { Logger.log('お礼の送信に失敗：社員番号%s', code); return; }
+      if (logSheet) {
+        try { logSheet.appendRow([new Date(), "'" + code, streak.n, dec.m, streak.start, test ? 'テスト' : '送信', '']); }
+        catch (e) { Logger.log('お礼送信履歴への記録に失敗：社員番号%s', code); }
+      }
     }
     if (dec.store) state.setProperty(skey, JSON.stringify(dec.store)); else if (raw) state.deleteProperty(skey);
   });
@@ -3427,7 +3464,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_thanksLogIndex: AC_thanksLogIndex, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

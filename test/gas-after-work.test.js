@@ -298,3 +298,85 @@ test('翌朝のお礼（送信なし）：20時以降・日付をまたいで入
   assert.equal(n.sent.length, 2);
   assert.deepEqual(JSON.parse(n.user['thanksLast:10102']), { m: 5, start: '2026-10-15' });
 });
+
+// ---------------- ① 日付をまたいだ入力と、実際の退勤時刻（TOT）の整合 ----------------
+const totDays = (key, code, list) => ({ employees: [emp(key, code)], timerecord: list.map(([date, ...punches]) => ({ date, dailyWorkings: [rec(key, date, ...punches)] })) });
+
+test('退勤の終わり方（TOT）：22時以降・日付をまたいだ退勤・退勤打刻なしは late、22時より前は early、データなしは unknown', () => {
+  const L = (R, day = '2026-10-19') => X.AC_lateFinish(R, '501', day);
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '23:40']]])), 'late');
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '22:00']]])), 'late');
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '21:59']]])), 'early');
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]])), 'early');
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00']], ['2026-10-20', [2, '00:20']]])), 'late');   // 0:00で日付が変わり、退勤が翌日の打刻になった場合
+  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00']]])), 'late');                                // 退勤の打刻が無いまま
+  const crossSameDay = { employees: [emp('k', '501')], timerecord: [{ date: '2026-10-19', dailyWorkings: [{ employeeKey: 'k', date: '2026-10-19', timeRecord: [{ code: '1', time: '2026-10-19T09:00:00+09:00' }, { code: '2', time: '2026-10-20T00:30:00+09:00' }] }] }] };
+  assert.equal(L(crossSameDay), 'late');                                                                         // 前日の勤務として0:30の退勤が付いている場合
+  assert.equal(L(totDays('k', '501', [['2026-10-18', [1, '09:00'], [2, '18:00']]])), 'unknown');              // その日の打刻なし
+  assert.equal(L(null), 'unknown');
+  assert.equal(X.AC_lateFinish(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]]), '', '2026-10-19'), 'unknown');   // TOTコードなし
+});
+
+test('連続記録：0〜5時の「退勤前」は、前日の退勤が22時以降・日付をまたいだと確認できたときだけ前日分（22時より前に退勤なら数えない）', () => {
+  const base = [['2026-10-14', '08:00', '19:00'], ['2026-10-15', '08:00', '19:00'], ['2026-10-17', '08:00', '19:00'], ['2026-10-18', '08:00', '19:00']];
+  const fv = entries('試験 太郎', [...base, ['2026-10-19', '08:00', '00:30', '2026-10-20']]);
+  assert.equal(streak(fv, '2026-10-19', { lateOk: () => true }).n, 5);    // 残業で日付をまたいだ（または確認できない）→ 前日分
+  assert.equal(streak(fv, '2026-10-19', { lateOk: () => false }).n, 0);   // 22時より前に退勤していた → 遅れた入力として数えない
+  const asked = [];
+  streak(fv, '2026-10-19', { lateOk: d => { asked.push(d); return true; } });
+  assert.deepEqual(asked, ['2026-10-19']);                                // 0時以降の入力だけ、前日の退勤を確かめる
+});
+
+// 朝のお礼を、TOTデータ（朝7:05の tot-latest.json）つきで、送信せずに確認する
+const morning = ({ fv, sv, totR, extraMaster = [] }) => {
+  const m = [...master, ...extraMaster];
+  const n = night({ master: m, shifts: sv, form: fv, punchFor: () => null });
+  n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+  n.ctx.__totR = totR;
+  vm.runInContext('AC_readTotLatest_ = function () { return __totR ? { results: __totR } : null; };', n.ctx);
+  return n;
+};
+const days6 = ['2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18', '2026-10-19', '2026-10-20'];
+const work5 = [['2026-10-15', '08:00', '19:00'], ['2026-10-16', '08:00', '19:00'], ['2026-10-17', '08:00', '19:00'], ['2026-10-18', '08:00', '19:00']];
+
+test('翌朝のお礼（送信なし）：前日の退勤が23:40なら0:30の入力で5日連続のお礼。退勤が18:00なら0:30の入力は数えずお礼なし。判定は記録して後から変えない', () => {
+  const sv = sheet(days6, [['試験 残業', Array(6).fill('出勤')]]);
+  const fv = [['ts', '氏名', '区分', '結果'], ...entries('試験 残業', [...work5, ['2026-10-19', '08:00', '00:30', '2026-10-20'], ['2026-10-20', '08:00', '']])];
+  const late = morning({ sv, fv, totR: totDays('k102', '102', [['2026-10-19', [1, '09:00'], [2, '23:40']]]) });
+  vm.runInContext('AC_morningThanks_()', late.ctx);
+  assert.equal(late.sent.length, 1);
+  assert.match(late.sent[0].text, /5勤務日連続/);
+  assert.equal(late.user['late:10102:2026-10-19'], 'ok');
+  const early = morning({ sv, fv, totR: totDays('k102', '102', [['2026-10-19', [1, '09:00'], [2, '18:00']]]) });
+  vm.runInContext('AC_morningThanks_()', early.ctx);
+  assert.equal(early.sent.length, 0);
+  assert.equal(early.user['late:10102:2026-10-19'], 'ng');
+  const none = morning({ sv, fv, totR: null });                          // TOTデータが無い朝は不利にしない
+  vm.runInContext('AC_morningThanks_()', none.ctx);
+  assert.equal(none.sent.length, 1);
+  assert.equal(none.user['late:10102:2026-10-19'], undefined);          // 確認できないときは記録しない（次の朝に判定）
+});
+
+// ---------------- ② 管理監督者（10015）：20時の確認連絡のあと、当日23:59までの入力で連続記録とお礼を維持 ----------------
+test('特例（10015・送信なし）：20時に確認連絡 → 21:30に入力 → 翌朝、連続記録が続き5日連続のお礼。翌日0:10の入力では前日分にしない', () => {
+  const sv = sheet(days6, [['試験 管理', Array(6).fill('出勤')]]);
+  const make = after => [['ts', '氏名', '区分', '結果'], ...entries('試験 管理', [...work5, after, ['2026-10-20', '08:00', '']])];
+  // 19日の夜：20時の確認連絡（従来の文面）が届く
+  const eve = night({ today: '2026-10-19', master, shifts: sv, form: [['ts', '氏名', '区分', '結果'], ...entries('試験 管理', [...work5, ['2026-10-19', '08:00', '']])], punchFor: () => null });
+  eve.at(20); eve.at(21); eve.at(22); eve.at(23);
+  assert.equal(eve.sent.filter(s => s.to === uid(4)).length, 1);
+  assert.match(eve.sent[0].text, /本日の退勤前アルコールチェックについて、まだ入力が確認できていません/);
+  // 21:30に入力 → 翌朝お礼
+  const ok = morning({ sv, fv: make(['2026-10-19', '08:00', '21:30']), totR: null });
+  vm.runInContext('AC_morningThanks_()', ok.ctx);
+  assert.equal(ok.sent.length, 1);
+  assert.match(ok.sent[0].text, /5勤務日連続/);
+  // 23:59に入力 → お礼
+  const edge = morning({ sv, fv: make(['2026-10-19', '08:00', '23:59']), totR: null });
+  vm.runInContext('AC_morningThanks_()', edge.ctx);
+  assert.equal(edge.sent.length, 1);
+  // 翌日0:10の入力 → 19日分にしない（打刻がないことは理由にしない。当日中という特例のルール）
+  const ng = morning({ sv, fv: make(['2026-10-19', '08:00', '00:10', '2026-10-20']), totR: totDays('k999', '999', [['2026-10-19', [1, '09:00'], [2, '23:50']]]) });
+  vm.runInContext('AC_morningThanks_()', ng.ctx);
+  assert.equal(ng.sent.length, 0);
+});

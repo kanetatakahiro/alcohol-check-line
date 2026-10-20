@@ -1551,7 +1551,8 @@ var AC_AFTER_FINAL_HOUR = 23;
 var AC_PUNCH_EXEMPT_CODES = ['10015'];   // TOTで打刻しない管理監督者（社員番号）
 var AC_PUNCH_FILE = 'tot-punch-latest.json';
 var AC_PUNCH_MAX_AGE_MIN = 70;           // これより古い打刻データは使わない（推測で退勤済みとしない）
-var AC_AFTER_GRACE_HOUR = 5;             // 「退勤前」の入力を、翌日のこの時刻より前なら前日の勤務日分として数える（TOTの日付変更時刻に合わせる）
+var AC_AFTER_GRACE_HOUR = 5;             // 「退勤前」の入力を、翌日のこの時刻より前なら前日の勤務日分として数える。
+                                         // TOTの日付変更時刻は全所属「00:00」（2026-10-20確認）のため、TOTの区切りとは別に、残業で日付をまたいだ入力を救う猶予として5時までとする
 var AC_MILESTONES_FIRST = [5, 10];       // 以降は10日ごと（20・30・40…）
 
 function AC_afterWorkEnabled_() { return PropertiesService.getScriptProperties().getProperty('AFTER_WORK_TOT') === 'true'; }

@@ -1778,7 +1778,7 @@ function AC_streakUpTo(d, name, lastDay, opts) {
       if (h < AC_AFTER_GRACE_HOUR) {
         var prev = AC_addDays_(day, -1);
         // 実際の退勤時刻と照らす：ok → 前日分／ng → 数えない（遅れた入力）／pending → 判定保留（途切れさせず、お礼も待つ）
-        var v = opts.crossCheck ? opts.crossCheck(prev, d.fv[i][0]) : 'ok';
+        var v = opts.crossCheck ? opts.crossCheck(prev, d.fv[i][0], d.fv[i]) : 'ok';
         if (v === 'ng') continue;
         if (v === 'pending') { (done[prev] = done[prev] || {}).pending = true; continue; }
         day = prev;
@@ -1803,7 +1803,8 @@ function AC_streakUpTo(d, name, lastDay, opts) {
   return { n: n, start: start, end: end, pending: pending };
 }
 
-var AC_CROSS_INPUT_HOURS = 3;   // 実際の退勤時刻から何時間以内の入力を、その勤務日分として数えるか（0〜5時の「退勤前」の入力に使う）
+var AC_CROSS_INPUT_HOURS = 3;   // 実際の退勤時刻から何時間以内の入力を、その勤務日分として数えるか（0〜5時の「退勤前」の入力に使う）。
+                                // あくまで「フォームへの入力の遅れ」に対する猶予。アルコールチェック自体は必ず運転開始前に行う前提で、文面でもそう案内する
 var AC_PENDING_DAYS = 7;        // 判定保留にできる日数（TOTのデータは朝7:05に過去7日分を取得。打刻の修正が反映されれば自動で決まる）
 
 /**
@@ -1841,6 +1842,29 @@ function AC_crossEntryCheck(R, dataOk, tot, day, entryTs) {
   var outMs = Date.parse(out.time), entryMs = entryTs instanceof Date || Object.prototype.toString.call(entryTs) === '[object Date]' ? entryTs.getTime() : Date.parse(entryTs);
   if (isNaN(outMs) || isNaN(entryMs)) return 'noData';
   return entryMs <= outMs + AC_CROSS_INPUT_HOURS * 3600000 ? 'ok' : 'ng';   // 退勤前の入力（勤務中の入力）も前日分
+}
+
+/**
+ * 純粋関数：フォームの「実施時刻」（任意の設問。今のフォームには無い）から、その入力を勤務日 day の分と認めるか。
+ * 退勤打刻が7日間直らなかったときだけ使う。実施時刻は入力時刻以前で、day の0時〜翌日5時の間、かつ入力が実施から3時間以内なら 'ok'。
+ * hhmm：「21:30」などの文字、またはフォームの時刻の値（日付つき）。読めなければ null（使わない）
+ */
+function AC_selfReportedCheck(entryTs, hhmm, day) {
+  var hm = null;
+  if (hhmm && Object.prototype.toString.call(hhmm) === '[object Date]' && !isNaN(hhmm)) {
+    var j = new Date(hhmm.getTime() + 9 * 3600000);   // 日本時間の時・分
+    hm = [j.getUTCHours(), j.getUTCMinutes()];
+  } else {
+    var m = /^\s*(\d{1,2})[:：](\d{2})/.exec(String(hhmm || ''));
+    if (m && Number(m[1]) < 24 && Number(m[2]) < 60) hm = [Number(m[1]), Number(m[2])];
+  }
+  var entryMs = Object.prototype.toString.call(entryTs) === '[object Date]' ? entryTs.getTime() : Date.parse(entryTs);
+  if (!hm || isNaN(entryMs)) return null;
+  var e = new Date(entryMs + 9 * 3600000);
+  var t = Date.UTC(e.getUTCFullYear(), e.getUTCMonth(), e.getUTCDate(), hm[0], hm[1]) - 9 * 3600000;   // 入力日のその時刻（日本時間）
+  if (t > entryMs) t -= 86400000;                                                                     // 入力より後なら前日の時刻
+  var dayStart = Date.parse(day + 'T00:00:00+09:00'), limit = Date.parse(AC_addDays_(day, 1) + 'T0' + AC_AFTER_GRACE_HOUR + ':00:00+09:00');
+  return t >= dayStart && t < limit && entryMs - t <= AC_CROSS_INPUT_HOURS * 3600000 ? 'ok' : 'ng';
 }
 
 /** 純粋関数：n までに達した一番大きい節目（5・10・20・30…）。無ければ0 */
@@ -1882,6 +1906,8 @@ function AC_morningThanks_() {
   var registry = notifyPeople ? AC_loadRegistry_() : {}, tests = AC_testNames_(props, today), overrides = AC_templateOverrides_();
   var lastDay = AC_addDays_(today, -1), sent = 0;
   var migrating = !state.getProperty('mthanks:init');   // 切り替え後の最初の朝
+  var doneCol = -1;   // フォームに「実施時刻」の設問があれば使う（今のフォームには無い）
+  (d.fv[0] || []).forEach(function (h, i) { if (doneCol === -1 && /実施時刻/.test(String(h))) doneCol = i; });
   var totLatest = null;
   try { totLatest = AC_readTotLatest_(); } catch (e) { Logger.log('TOTデータの読み込みに失敗（日付をまたいだ入力は不利にしない）'); }
   var totR = totLatest && totLatest.results;
@@ -1891,14 +1917,16 @@ function AC_morningThanks_() {
     if (!code || paused[k]) return;
     var exempt = AC_PUNCH_EXEMPT_CODES.indexOf(code) !== -1;
     var tot = totMap[code];
-    var crossCheck = function (day, ts) {   // 決まった判定は記録して後から変えない。保留は毎朝見直し、AC_PENDING_DAYS 日を過ぎたら自動で決める
+    var crossCheck = function (day, ts, row) {   // 決まった判定は記録して後から変えない。保留は毎朝見直し、AC_PENDING_DAYS 日を過ぎたら自動で決める
       var lk = 'late:' + code + ':' + day, v = state.getProperty(lk);
       if (v) return v;
       var st = AC_crossEntryCheck(totR, totOk, tot, day, ts);
       var res = st === 'ok' || st === 'noTot' ? 'ok' : st === 'ng' ? 'ng' : 'pending';
       if (res === 'pending' && AC_addDays_(day, AC_PENDING_DAYS) < today) {
-        res = st === 'noData' ? 'ok' : 'ng';   // 期限切れ：TOTの不具合なら数える（不利にしない）／退勤の打刻が直されないままなら数えない
-        Logger.log('判定保留の期限切れ：社員番号%s %s → %s（%s）', code, day, res === 'ok' ? '数える' : '数えない', st);
+        // 期限切れ：TOTの不具合なら数える（不利にしない）。退勤打刻が直らないままなら、フォームの「実施時刻」があればそれで判定、無ければ数えない
+        var self = st === 'noOut' && doneCol >= 0 && row ? AC_selfReportedCheck(ts, row[doneCol], day) : null;
+        res = st === 'noData' ? 'ok' : self || 'ng';
+        Logger.log('判定保留の期限切れ：社員番号%s %s → %s（%s%s）', code, day, res === 'ok' ? '数える' : '数えない', st, self ? '・実施時刻で判定' : '');
       }
       if (res !== 'pending' && !dryRun) state.setProperty(lk, res);
       return res;
@@ -3396,7 +3424,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_crossEntryCheck: AC_crossEntryCheck, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

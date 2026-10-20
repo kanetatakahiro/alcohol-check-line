@@ -1824,20 +1824,23 @@ var AC_WARNING_STALE_HOURS = 48;       // これより古い発表の「発表�
 
 /**
  * 警報・注意報のコード → [表示名, 危険度, 気遣いの種類]。
+ * 表示名は気象庁「警報・注意報の種類」（https://www.jma.go.jp/jma/kishou/know/bosai/warning_kind.html）の正式名どおり
+ * （大雨・氾濫・土砂災害・高潮は「レベル３大雨警報」のように全角数字のレベルが前に付く）。
+ * 表示名が null のコード（2026年5月の改定で新設・変更され、番号と名前の対応を公式資料で確認できていないもの）は、
+ * 名前を断定せず「大雨に関する警報」「大雨に関する注意報」と表示する。
  * 危険度：5 特別警報／4 危険警報／3 警報／2 注意報。種類：rain・wind・snow・thunder・fog・cold（それ以外は気遣いに使わない）
- * 出典：気象庁「新たな防災気象情報」（2026年5月29日〜）。表に無いコードは使わずにログへ残す。
+ * 表に無いコードは使わずにログへ残す。
  */
 var AC_WARNING_CODES = {
-  '33': ['大雨特別警報（レベル5）', 5, 'rain'], '34': ['氾濫特別警報（レベル5）', 5, 'rain'], '39': ['土砂災害特別警報（レベル5）', 5, 'rain'],
-  '35': ['暴風特別警報', 5, 'wind'], '32': ['暴風雪特別警報', 5, 'snow'], '36': ['大雪特別警報', 5, 'snow'],
-  '43': ['大雨危険警報（レベル4）', 4, 'rain'], '44': ['氾濫危険警報（レベル4）', 4, 'rain'], '49': ['土砂災害危険警報（レベル4）', 4, 'rain'],
-  '03': ['大雨警報（レベル3）', 3, 'rain'], '04': ['氾濫警報（レベル3）', 3, 'rain'], '09': ['土砂災害警報（レベル3）', 3, 'rain'],
-  '05': ['暴風警報', 3, 'wind'], '02': ['暴風雪警報', 3, 'snow'], '06': ['大雪警報', 3, 'snow'],
-  '10': ['大雨注意報（レベル2）', 2, 'rain'], '18': ['氾濫注意報（レベル2）', 2, 'rain'], '29': ['土砂災害注意報（レベル2）', 2, 'rain'],
-  '15': ['強風注意報', 2, 'wind'], '12': ['大雪注意報', 2, 'snow'], '13': ['風雪注意報', 2, 'snow'], '26': ['着雪注意報', 2, 'snow'],
-  '14': ['雷注意報', 2, 'thunder'], '20': ['濃霧注意報', 2, 'fog'],
+  '33': ['レベル５大雨特別警報', 5, 'rain'], '35': ['暴風特別警報', 5, 'wind'], '32': ['暴風雪特別警報', 5, 'snow'], '36': ['大雪特別警報', 5, 'snow'],
+  '03': ['レベル３大雨警報', 3, 'rain'], '05': ['暴風警報', 3, 'wind'], '02': ['暴風雪警報', 3, 'snow'], '06': ['大雪警報', 3, 'snow'],
+  '10': ['レベル２大雨注意報', 2, 'rain'], '15': ['強風注意報', 2, 'wind'], '12': ['大雪注意報', 2, 'snow'], '13': ['風雪注意報', 2, 'snow'],
+  '26': ['着雪注意報', 2, 'snow'], '14': ['雷注意報', 2, 'thunder'], '20': ['濃霧注意報', 2, 'fog'],
   '23': ['低温注意報', 2, 'cold'], '24': ['霜注意報', 2, 'cold'], '25': ['着氷注意報', 2, 'cold'],
-  // さいたま市では気遣いに使わない（海・山・乾燥など）
+  // 新設・変更された種類（氾濫・土砂災害・危険警報）：名前は断定しない
+  '34': [null, 5, 'rain'], '39': [null, 5, 'rain'], '43': [null, 4, 'rain'], '44': [null, 4, 'rain'], '49': [null, 4, 'rain'],
+  '04': [null, 3, 'rain'], '09': [null, 3, 'rain'], '18': [null, 2, 'rain'], '29': [null, 2, 'rain'],
+  // さいたま市では気遣いに使わない（波浪・高潮・乾燥・なだれ・融雪・その他）
   '07': null, '37': null, '16': null, '08': null, '38': null, '48': null, '19': null, '21': null, '22': null, '17': null, '27': null,
 };
 var AC_ALERT_GROUP_ORDER = ['rain', 'wind', 'snow', 'thunder', 'fog', 'cold'];
@@ -1966,7 +1969,7 @@ function AC_warningsFromJma(json, areaCode, nowMs, info) {
         var def = AC_WARNING_CODES[c];
         if (!def || seen[c]) return;
         seen[c] = true;
-        out.push({ code: c, name: def[0], level: def[1], group: def[2], status: st });
+        out.push({ code: c, name: def[0] || (def[1] >= 3 ? '大雨に関する警報' : '大雨に関する注意報'), level: def[1], group: def[2], status: st });
       });
     });
   });
@@ -2019,7 +2022,7 @@ var AC_TEMPLATES = {
  * 気遣いの一文（朝8:30の案内だけで使う）。天候の説明だけでなく、安全や体調への気遣いを添える。
  * 優先順：気象警報・注意報 → 雷 → 激しい雨 → 台風・暴風 → 強風 → 雪 → 凍結 → 雨 → 猛暑 → 暑い → 寒い → 寒暖差 → にわか雨 → 晴れ → くもり。
  * 天気が取れない日は「通常」（天気には触れない）。各キーは「LINE文面」シートで上書きでき、「||」区切りで日替わり。
- * 差し込み：{alert} 発表中の警報・注意報の名前（例：大雨警報（レベル3）・雷注意報）。気温は文面の後ろに自動で付く。
+ * 差し込み：{alert} 発表中の警報・注意報の名前（例：レベル３大雨警報・雷注意報）。気温は文面の後ろに自動で付く。
  */
 var AC_CARE = {
   alertRain: ['さいたま市に{alert}が出ています。道路の冠水や視界不良のおそれがありますので、無理をせず安全第一で運転してください！',
@@ -2099,7 +2102,9 @@ function AC_careKey(w) {
 
 /** 純粋関数：発表中の警報・注意報の名前（危険度の高い順に最大3つ） */
 function AC_alertNames(w) {
-  return ((w && w.alerts) || []).slice(0, 3).map(function (a) { return a.name; }).join('・');
+  var seen = {}, names = [];
+  ((w && w.alerts) || []).forEach(function (a) { if (a.name && !seen[a.name]) { seen[a.name] = true; names.push(a.name); } });
+  return names.slice(0, 3).join('・');
 }
 
 var AC_ALCOHOL_KINDS = { morning: 1, followBefore: 1, evening: 1, followAfter: 1 };
@@ -2179,6 +2184,38 @@ function AC_overtimeMessage(min, level, today, overrides, ctx) {
   return AC_render(key, today || '', { hours: h, care: AC_careLine(key, today || '', ctx, overrides).text }, overrides);
 }
 
+/**
+ * 以前の版の既定の気遣い文（いまは使っていない）。「LINE文面」シートの文面欄にこれらがそのまま残っていても使わず、
+ * 新しい既定文を使う（管理本部が自分で書いた文章はそのまま使う）。空白・改行の違いは無視して比べる。
+ */
+var AC_OLD_CARE_DEFAULTS = [
+  "今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！",
+  "雪や路面の凍結が予想されます❄️ 運転の際は十分お気をつけください！",
+  "今日はかなり暑くなりそうです☀️ こまめな水分補給と休憩を心がけてください！",
+  "今日は天気が良さそうですね！",
+  "今日は晴れの予報です。気持ちよく過ごせそうですね！",
+  "今日はくもりの予報です。",
+  "今日は雲の多い一日になりそうです。",
+  "今日は雨の予報です☔\n路面が滑りやすくなりますので、車両移動の際はお気をつけください。",
+  "今日は雨が降りそうです☔\n視界や路面に注意して、移動の際はお気をつけください。",
+  "路面が滑りやすくなる可能性がありますので、運転の際は十分お気をつけください。",
+  "雪や路面の凍結が心配な予報です。運転の際は十分お気をつけください。",
+  "風が強い予報ですので、車のドアの開閉などにもお気をつけください。",
+  "今日は気温が高くなる予報です。こまめな水分補給をお願いいたします。",
+  "今日は暑くなりそうです。こまめな水分補給と休憩をお願いいたします。",
+  "今日は朝から冷え込んでいますね。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。",
+  "今日は冷え込む予報です。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。",
+  "朝晩と日中で気温差があるようです。体調管理にお気をつけください。"
+];
+
+/** 純粋関数：天気の気遣いの上書きから、以前の既定文と同じものを除く（全部除かれたら空＝新しい既定文を使う） */
+function AC_dropOldCareDefaults(list) {
+  var norm = function (t) { return String(t || '').replace(/[\s　]+/g, ''); };
+  var old = {};
+  AC_OLD_CARE_DEFAULTS.forEach(function (t) { old[norm(t)] = true; });
+  return (list || []).filter(function (t) { return !old[norm(t)]; });
+}
+
 /** 「LINE文面」シートの上書き（空欄は既定文）。無ければ既定文でシートを作る */
 var AC_TPL_CACHE = null;
 function AC_templateOverrides_() {
@@ -2206,10 +2243,23 @@ function AC_templateOverrides_() {
     Object.keys(AC_TEMPLATES).forEach(function (k) { if (!have[k]) add.push([k, 'テンプレート', '', AC_TEMPLATES[k].join('||')]); });
     Object.keys(AC_CARE).forEach(function (k) { if (!have[k]) add.push([k, '気遣いの一文', '', AC_CARE[k].join('||')]); });
     if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 4).setValues(add);
-    sh.getDataRange().getValues().slice(1).forEach(function (r) {
-      var v = String(r[2] || '').trim();
-      if (r[0] && v) out[String(r[0]).trim()] = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);
+    var rowsNow = sh.getDataRange().getValues();
+    rowsNow.slice(1).forEach(function (r) {
+      var k = String(r[0] || '').trim(), v = String(r[2] || '').trim();
+      if (!k || !v) return;
+      var list = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);
+      if (AC_CARE[k]) list = AC_dropOldCareDefaults(list);   // 天気の気遣いだけ：以前の既定文の残りは使わない
+      if (list.length) out[k] = list;
     });
+    // 参考欄（D列）の天気の気遣いを最新の既定文にそろえる（編集の参考用。通知の内容には影響しない）
+    try {
+      rowsNow.forEach(function (r, i) {
+        var k = String(r[0] || '').trim();
+        if (i === 0 || !AC_CARE[k]) return;
+        var ref = AC_CARE[k].join('||');
+        if (String(r[3] || '') !== ref) sh.getRange(i + 1, 4).setValue(ref);
+      });
+    } catch (e2) { Logger.log('LINE文面シートの参考欄の更新に失敗（通知には影響なし）'); }
   } catch (e) { Logger.log('LINE文面シートの読み込みに失敗（既定文を使用）'); }
   AC_TPL_CACHE = out;
   return out;
@@ -2891,7 +2941,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

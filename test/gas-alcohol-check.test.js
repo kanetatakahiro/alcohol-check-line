@@ -9,7 +9,7 @@ vm.runInNewContext(readFileSync(new URL('../gas/AlcoholCheck.gs', import.meta.ur
 const { AC_reconcile, AC_buildMessage, AC_parseEmployeeCode, AC_buildRegistry,
   AC_planNotifications, AC_planRegistration, AC_rosterNames, AC_mergeRoster, AC_nameKey, AC_isValidDate, AC_isRetired, AC_namesForCode,
   AC_messageFor, AC_morningMessage, AC_thanksMessage, AC_streak, AC_isMilestone, AC_thanksTargets, AC_buildDay,
-  AC_recipientsFor, AC_weatherFromJma, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
+  AC_recipientsFor, AC_weatherFromJma, AC_warningsFromJma, AC_careKey, AC_tempLabel, AC_weatherSamples, AC_findAlerts, AC_notTargetReason, AC_isNormalResult, AC_deviceCodes,
   AC_filterRegistryByCodes, AC_parseTotCsv, AC_totPatternToShift, AC_buildTotCompare, AC_totScheduleItems,
   AC_attendanceFindings, AC_lineByTotCode, AC_attendanceReport, AC_punchMessage, AC_overtimeMessage, AC_careLine, AC_render, AC_composeMessage, AC_todayStatus, AC_todayStatusMessage, AC_quotaLevel, AC_nextMonth, AC_isMonthEnd, AC_monthlyApplyPlan, AC_addMonths, AC_agreementCheck, AC_paidLeavePeriod, AC_paidLeaveCheck, AC_monthlyByTot, AC_pendingRequests, AC_paidLeaveStatus, AC_pauseIndex, AC_isPaused, AC_pausedNames, AC_formChoices, AC_codeFromChoice, AC_formPlan, AC_parseDeptRegistration, AC_deptNames, AC_groupsByDept } = ctx.module.exports;
 
@@ -293,8 +293,8 @@ test('GAS: 感謝の節目と文面（評価ではなく感謝）', () => {
 });
 
 test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れる', () => {
-  const jma = (code, weather, pops, temps) => [{ timeSeries: [
-    { timeDefines: ['2026-10-08T05:00:00+09:00', '2026-10-09T00:00:00+09:00'], areas: [{ area: { code: '110010' }, weatherCodes: [code, '100'], weathers: [weather, '晴れ'] }] },
+  const jma = (code, weather, pops, temps, winds = ['北の風', '南の風']) => [{ timeSeries: [
+    { timeDefines: ['2026-10-08T05:00:00+09:00', '2026-10-09T00:00:00+09:00'], areas: [{ area: { code: '110010' }, weatherCodes: [code, '100'], weathers: [weather, '晴れ'], winds }] },
     { timeDefines: ['2026-10-08T06:00:00+09:00', '2026-10-08T12:00:00+09:00'], areas: [{ area: { code: '110010' }, pops }] },
     { timeDefines: ['2026-10-08T00:00:00+09:00', '2026-10-08T09:00:00+09:00'], areas: [{ area: { code: '43241' }, temps }] },
   ] }];
@@ -304,13 +304,67 @@ test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れ
   assert.equal(AC_weatherFromJma(jma('100', '晴れ', ['0', '0'], ['24', '33']), '2026-10-08').kind, 'hot');
   assert.equal(AC_weatherFromJma(jma('200', 'くもり', ['0', '0'], ['2', '9']), '2026-10-08').kind, 'cold');
   assert.equal(AC_weatherFromJma(null, '2026-10-08'), null);
+  assert.equal(AC_weatherFromJma(jma('100', '晴れ', ['0'], ['15', '26']), '2026-10-07'), null);   // 今日の予報が無ければ別の日の予報は使わない
   const w = AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08');
-  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔\n\n今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！（さいたま 最高20℃／最低15℃）\n\n本日も運転前のアルコールチェック[\s\S]*viewform\?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗$/);
+  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔\n\n今日は雨の予報です。[^\n]*\n（さいたま 最高20℃／最低15℃）\n\n本日も運転前のアルコールチェック[\s\S]*viewform\?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗$/);
   const plain = AC_morningMessage('2026-10-08', null);
   assert.equal(plain, 'おはようございます！\n\n体調に気をつけて、今日も一日頑張りましょう！\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いします！\n\n▼ アルコールチェック入力フォーム\nhttps://docs.google.com/forms/d/e/1FAIpQLSemLVglUlSIc44wxMzmd8e9g09KRDXGUruMbZ54kuWrT6ZAhA/viewform?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗');   // 天気が取れないときは天気に触れない
   const snowy = AC_weatherFromJma(jma('400', '雪', ['50', '80'], ['-1', '3']), '2026-10-08');
   assert.equal(snowy.snow, true);
   assert.equal(snowy.freeze, true);
+});
+
+test('GAS: 気温は取得できた値だけ表示（朝5時の発表で最低気温が無い日は最高だけ）', () => {
+  // 2026-10-20 朝5時の実際の発表の形：今日の0時欄・9時欄の両方に最高気温（26）が入っている
+  const real = [{ timeSeries: [
+    { timeDefines: ['2026-10-20T05:00:00+09:00', '2026-10-21T00:00:00+09:00'], areas: [{ area: { code: '110010' }, weatherCodes: ['200', '201'], weathers: ['くもり　所により　雨', 'くもり　時々　晴れ　所により　夜　雨'], winds: ['北の風　日中　南の風', '南の風'] }] },
+    { timeDefines: ['2026-10-20T06:00:00+09:00', '2026-10-20T12:00:00+09:00', '2026-10-20T18:00:00+09:00', '2026-10-21T00:00:00+09:00'], areas: [{ area: { code: '110010' }, pops: ['20', '30', '20', '20'] }] },
+    { timeDefines: ['2026-10-20T09:00:00+09:00', '2026-10-20T00:00:00+09:00', '2026-10-21T00:00:00+09:00', '2026-10-21T09:00:00+09:00'], areas: [{ area: { code: '43241' }, temps: ['26', '26', '18', '30'] }] },
+  ] }];
+  const w = AC_weatherFromJma(real, '2026-10-20');
+  assert.equal(w.max, 26);
+  assert.equal(w.min, null);                 // 「最低26℃」とは表示しない
+  assert.equal(w.kind, 'cloudy');
+  assert.equal(w.showers, true);             // 所により雨
+  assert.equal(w.pop, 30);
+  assert.equal(AC_careKey(w), 'showers');
+  const msg = AC_morningMessage('2026-10-20', w);
+  assert.match(msg, /^おはようございます！☂️\n\n[^\n]*雨[^\n]*\n（さいたま 最高26℃）\n\n本日も/);
+  assert.doesNotMatch(msg, /最低/);
+  assert.equal(AC_tempLabel({ max: null, min: 10 }), '');
+  assert.equal(AC_tempLabel({ max: 20, min: null }), '（さいたま 最高20℃）');
+  assert.equal(AC_tempLabel({ max: 20, min: -1 }), '（さいたま 最高20℃／最低-1℃）');
+});
+
+test('GAS: 気象警報（新形式）から、さいたま市で発表中のものだけを拾う', () => {
+  const now = Date.parse('2026-10-20T08:30:00+09:00');
+  const doc = (type, reported, kinds, area = '1110000') => ({ dataTypeCode: type, reportDatetime: reported,
+    warning: { class10Items: [], class20Items: [{ areaCode: '1120100', kinds: [{ code: '05', status: '発表' }] }, { areaCode: area, kinds }] } });
+  const r = AC_warningsFromJma([
+    doc('VPWW55', '2026-10-20T05:10:00+09:00', [{ code: '10', status: '継続' }]),
+    doc('VPWW58', '2026-10-20T05:10:00+09:00', [{ code: '15', status: '解除' }]),
+    doc('VPWW61', '2026-10-20T06:00:00+09:00', [{ code: '14', status: '発表' }, { code: '21', status: '発表' }]),
+    doc('VPWW56', '2026-10-20T07:00:00+09:00', [{ code: '03', status: '発表' }, { code: '99', status: '発表' }]),
+    doc('VPWW57', '2026-10-20T07:00:00+09:00', [{ status: '発表警報・注意報はなし' }]),
+  ], '1110000', now, {});
+  assert.deepEqual(Array.from(r, a => a.code), ['03', '10', '14']);   // 警報が先。解除・乾燥（使わない）・表に無いコード・他の市は除く
+  assert.equal(r[0].name, '大雨警報（レベル3）');
+  const info = {};
+  const old = AC_warningsFromJma([doc('VPWW61', '2026-10-15T06:00:00+09:00', [{ code: '14', status: '発表' }])], '1110000', now, info);
+  assert.equal(old.length, 0);                                 // 48時間より古い「発表中」は使わない
+  assert.match(info.notes.join(), /古い発表/);
+  assert.equal(AC_warningsFromJma({ foo: 1 }, '1110000', now, {}), null);   // 形が違う → null（通知は通常どおり）
+  assert.equal(AC_warningsFromJma([doc('VPWW61', '2026-10-06T06:50:00+09:00', [{ status: '発表警報・注意報はなし' }])], '1110000', now, {}).length, 0);
+  // 文面：警報を最優先し、名前は実際に発表中のものだけ
+  const w = { kind: 'sunny', max: 24, min: 15, forecast: true, alerts: r };
+  assert.equal(AC_careKey(w), 'alertRain');
+  const msg = AC_morningMessage('2026-10-20', w);
+  assert.match(msg, /^おはようございます！⚠️\n\nさいたま市に大雨警報（レベル3）・大雨注意報（レベル2）・雷注意報が/);
+  assert.match(msg, /（さいたま 最高24℃／最低15℃）/);
+  // 予報が取れず警報だけ取れた日も、警報の注意喚起は入れる（気温は出さない）
+  const onlyAlert = AC_morningMessage('2026-10-20', { forecast: false, max: null, min: null, alerts: [r[2]] });
+  assert.match(onlyAlert, /^おはようございます！⚡\n\nさいたま市に雷注意報が/);
+  assert.doesNotMatch(onlyAlert, /最高/);
 });
 
 test('GAS: 測定結果が「通常」の値以外の当日回答を拾う', () => {
@@ -429,18 +483,34 @@ test('GAS: シフト表が空欄の日は、TOTの「公休」では埋めない
 });
 
 test('GAS: 天候・気温の気遣いは朝の案内だけ（それ以外の通知には入れない）', () => {
-  const w = (o) => Object.assign({ kind: 'cloudy', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false }, o);
+  const w = (o) => Object.assign({ kind: 'cloudy', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false, forecast: true, alerts: [] }, o);
   const care = o => AC_careLine('morning', '2026-10-08', { weather: o }).text;
-  assert.match(care(w({ kind: 'rain', wind: true })), /^今日は雨の予報です☔/);         // 雨が強風より先
-  assert.match(care(w({ kind: 'cold', snow: true })), /^雪や路面の凍結/);              // 雪・凍結が最優先
-  assert.match(care(w({ kind: 'hot', max: 36 })), /^今日はかなり暑くなりそうです☀️/);  // 猛暑（35℃以上）
-  assert.match(care(w({ kind: 'hot', max: 32 })), /^今日は気温が高くなる予報です/);
-  assert.match(care(w({ kind: 'cold' })), /^今日は冷え込む予報です/);
-  assert.match(care(w({ swing: true })), /^朝晩と日中の気温差/);
-  assert.match(care(w({ wind: true })), /^今日は風が強い予報です/);
-  assert.equal(care(w({ kind: 'sunny' })), '体調に気をつけて、今日も一日頑張りましょう！');
-  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }) }).usedWeather, false);
+  const key = o => AC_careKey(o);
+  assert.equal(key(w({ kind: 'rain', wind: true })), 'wind');           // 強風は雨より先（安全を優先）
+  assert.equal(key(w({ kind: 'rain', thunder: true, heavyRain: true })), 'thunder');
+  assert.equal(key(w({ kind: 'rain', heavyRain: true })), 'heavyRain');
+  assert.equal(key(w({ kind: 'rain', storm: true, wind: true })), 'storm');
+  assert.equal(key(w({ kind: 'snow', snow: true, freeze: true })), 'snow');
+  assert.equal(key(w({ kind: 'cold', freeze: true })), 'freeze');
+  assert.equal(key(w({ kind: 'hot', max: 36 })), 'hotExtreme');
+  assert.equal(key(w({ kind: 'hot', max: 32 })), 'hot');
+  assert.equal(key(w({ kind: 'cold' })), 'cold');
+  assert.equal(key(w({ swing: true })), 'swing');
+  assert.equal(key(w({ showers: true })), 'showers');
+  assert.equal(key(w({ kind: 'sunny' })), 'sunny');
+  assert.equal(key(w({ kind: 'cloudy' })), 'cloudy');
+  assert.equal(key(null), 'normal');
+  assert.match(care(w({ kind: 'sunny' })), /晴れ|天気|お天気/);                             // 晴れの日も天気に合わせたあいさつ
+  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }) }).usedWeather, true);
+  assert.match(care(w({ kind: 'cloudy' })), /雲|くもり/);
+  assert.match(care(w({ kind: 'rain' })), /雨/);
+  assert.match(care(w({ kind: 'hot', max: 36 })), /熱中症|暑/);
   assert.equal(care(null), '体調に気をつけて、今日も一日頑張りましょう！');                // 天気が取れない日
+  // 日付で言い回しが変わる（2日続けて同じ文にならない）
+  for (const k of ['rain', 'sunny', 'cloudy', 'cold']) {
+    const o = k === 'rain' ? w({ kind: 'rain' }) : w({ kind: k });
+    assert.notEqual(care(o), AC_careLine('morning', '2026-10-09', { weather: o }).text, k);
+  }
   for (const k of ['followBefore', 'evening', 'followAfter', 'punch', 'todayNoClockOut', 'todayNoClockIn', 'ot30', 'ot45', 'thanks']) {
     assert.equal(AC_careLine(k, '2026-12-08', { weather: w({ kind: 'rain' }), infection: 'インフルエンザ' }).text, '', k);
   }
@@ -449,6 +519,59 @@ test('GAS: 天候・気温の気遣いは朝の案内だけ（それ以外の通
   const alert = AC_render('alcoholAlert', '2026-10-08', { time: '08:00', name: '試験 太郎', label: '出勤前', result: '0.20' });
   assert.match(alert, /^【アルコール検知のお知らせ】[\s\S]*運転を開始・継続させず/);
   assert.doesNotMatch(alert, /天気|ありがとう/);
+});
+
+test('GAS: 天気の取得に失敗しても例外を出さず、理由をログに残して通常のあいさつにする', () => {
+  const logs = [];
+  ctx.Logger = { log: (f, ...a) => logs.push(String(f).replace(/%s/g, () => String(a.shift()))) };   // Apps ScriptのLoggerと同じく %s に差し込む
+  const forecastOk = JSON.stringify([{ timeSeries: [
+    { timeDefines: ['2026-10-20T05:00:00+09:00'], areas: [{ area: { code: '110010' }, weatherCodes: ['100'], weathers: ['晴れ'], winds: ['北の風'] }] },
+    { timeDefines: ['2026-10-20T06:00:00+09:00'], areas: [{ area: { code: '110010' }, pops: ['0'] }] },
+    { timeDefines: ['2026-10-20T09:00:00+09:00', '2026-10-20T00:00:00+09:00'], areas: [{ area: { code: '43241' }, temps: ['24', '24'] }] },
+  ] }]);
+  const resp = (code, body) => ({ getResponseCode: () => code, getContentText: () => body });
+  const run = (f, w) => { ctx.UrlFetchApp = { fetch: url => (/forecast/.test(url) ? f : w)() }; logs.length = 0; return vm.runInContext('AC_fetchWeather_("2026-10-20")', ctx); };
+  // 両方失敗 → null（通常のあいさつ）、理由はログへ
+  assert.equal(run(() => resp(500, ''), () => { throw new Error('タイムアウト'); }), null);
+  assert.match(logs.join('\n'), /天気予報の取得に失敗：HTTP 500/);
+  assert.match(logs.join('\n'), /気象警報の取得に失敗：タイムアウト/);
+  // 形が違うデータ → null、理由をログへ
+  assert.equal(run(() => resp(200, '{"x":1}'), () => resp(200, '[]')), null);
+  assert.match(logs.join('\n'), /天気予報の読み取りに失敗：データの形が想定と違います/);
+  assert.match(logs.join('\n'), /気象警報の読み取りに失敗/);
+  // 壊れたJSON → 例外を外へ出さない
+  assert.equal(run(() => resp(200, '<html>'), () => resp(200, '<html>')), null);
+  // 予報は取れて警報だけ失敗 → 天気のあいさつは出す（警報は「取得できず」）
+  const w = run(() => resp(200, forecastOk), () => resp(503, ''));
+  assert.equal(w.kind, 'sunny');
+  assert.equal(w.alertsOk, false);
+  assert.equal(w.min, null);
+  assert.match(logs.join('\n'), /警報・注意報：取得できず/);
+  assert.match(AC_morningMessage('2026-10-20', w), /^おはようございます！☀️/);
+  delete ctx.UrlFetchApp; delete ctx.Logger;
+});
+
+test('GAS: 天気の見本（送信なしの確認用）がすべて文面になり、見本ごとに想定どおりの気遣いになる', () => {
+  const samples = AC_weatherSamples();
+  const expected = { '晴れ': 'sunny', 'くもり（最低気温の発表なし）': 'cloudy', 'くもり所により雨': 'showers', '雨': 'rain', '雷': 'thunder', '激しい雨': 'heavyRain',
+    '台風・暴風': 'storm', '強風': 'wind', '雪': 'snow', '凍結（晴れ・最低気温0℃以下）': 'freeze', '猛暑': 'hotExtreme', '暑い': 'hot', '寒い': 'cold', '寒暖差': 'swing',
+    '大雨警報＋雷注意報': 'alertRain', '暴風警報': 'alertWind', '大雪警報': 'alertSnow', '天気が取れない日': 'normal' };
+  for (const s of samples) {
+    assert.equal(AC_careKey(s.weather), expected[s.label], s.label);
+    const m = AC_composeMessage('morning', '2026-10-20', { weather: s.weather }).text;
+    assert.match(m, /^おはようございます！/, s.label);
+    assert.match(m, /本日も運転前のアルコールチェック[\s\S]*安全運転でよろしくお願いします！🚗$/, s.label);   // 通知の本文はそのまま
+    assert.doesNotMatch(m, /\{|\}|undefined|null|NaN/, s.label);
+    assert.doesNotMatch(m, /\n\n\n/, s.label);
+  }
+  assert.doesNotMatch(AC_composeMessage('morning', '2026-10-20', { weather: samples[1].weather }).text, /最低/);
+});
+
+test('GAS: 天気の気遣いも「LINE文面」シートで上書きできる（警報名の差し込みも可）', () => {
+  const ov = { sunny: ['晴れの日の一言（上書き）'], alertRain: ['{alert}です。気をつけて（上書き）'] };
+  assert.match(AC_messageFor('morning', '2026-10-08', { kind: 'sunny', max: 20, min: 10, forecast: true, alerts: [] }, {}, ov), /^おはようございます！☀️\n\n晴れの日の一言（上書き）\n（さいたま 最高20℃／最低10℃）/);
+  const alerts = AC_warningsFromJma([{ reportDatetime: '2026-10-20T07:00:00+09:00', warning: { class20Items: [{ areaCode: '1110000', kinds: [{ code: '03', status: '発表' }] }] } }], '1110000', Date.parse('2026-10-20T08:30:00+09:00'), {});
+  assert.match(AC_messageFor('morning', '2026-10-08', { kind: 'rain', max: null, min: null, forecast: true, alerts }, {}, ov), /大雨警報（レベル3）です。気をつけて（上書き）/);
 });
 
 test('GAS: 「LINE文面」シートの上書き（空欄は既定、||で日替わり）', () => {

@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-20b';
+var AC_CODE_VERSION = '2026-10-20c';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1553,7 +1553,7 @@ var AC_PUNCH_FILE = 'tot-punch-latest.json';
 var AC_PUNCH_MAX_AGE_MIN = 70;           // これより古い打刻データは使わない（推測で退勤済みとしない）
 var AC_AFTER_GRACE_HOUR = 5;             // 「退勤前」の入力を、翌日のこの時刻より前なら前日の勤務日分として数える。
                                          // TOTの日付変更時刻は全所属「00:00」（2026-10-20確認）のため、TOTの区切りとは別に、残業で日付をまたいだ入力を救う猶予として5時までとする
-var AC_MILESTONES_FIRST = [5, 10];       // 以降は10日ごと（20・30・40…）
+var AC_MILESTONE_STEP = 5;               // お礼の節目：5勤務日ごと（5・10・15・20・25・30…）全員共通
 
 function AC_afterWorkEnabled_() { return PropertiesService.getScriptProperties().getProperty('AFTER_WORK_TOT') === 'true'; }
 
@@ -1870,12 +1870,17 @@ function AC_selfReportedCheck(entryTs, hhmm, day) {
   return t >= dayStart && t < limit && entryMs - t <= AC_CROSS_INPUT_HOURS * 3600000 ? 'ok' : 'ng';
 }
 
-/** 純粋関数：n までに達した一番大きい節目（5・10・20・30…）。無ければ0 */
+/** 純粋関数：n までに達した一番大きい節目（5勤務日ごと：5・10・15・20…）。無ければ0 */
 function AC_milestoneAtMost(n) {
-  if (n >= 20) return Math.floor(n / 10) * 10;
-  if (n >= 10) return 10;
-  if (n >= 5) return 5;
-  return 0;
+  return n >= AC_MILESTONE_STEP ? Math.floor(n / AC_MILESTONE_STEP) * AC_MILESTONE_STEP : 0;   // 5・10・15・20・25…（全員共通）
+}
+
+/** 純粋関数：お礼の文面のキー。15日の節目は特別な文面（全員共通）。日数は実際の連続日数を差し込む */
+function AC_mthanksKey(n, m) {
+  if (m === 15) return 'mthanks15';
+  if (n === 5) return 'mthanks5';
+  if (n === 10) return 'mthanks10';
+  return 'mthanksN';
 }
 
 /**
@@ -1934,6 +1939,18 @@ function AC_thanksLogIndex(rows, toDate) {
   return out;
 }
 
+/** 純粋関数：履歴にある「社員番号|連続の開始日|節目」の組（二重送信の防止。テスト・決めた区分以外は除く） */
+function AC_thanksLogKeys(rows, toDate) {
+  var keys = {};
+  (rows || []).slice(1).forEach(function (r) {
+    var code = AC_cellCode_(r[1]), m = Number(r[3]), kind = String(r[5] || '').trim();
+    if (!code || !m || !AC_THANKS_LOG_KINDS.test(kind)) return;
+    var start = toDate && Object.prototype.toString.call(r[4]) === '[object Date]' ? toDate(r[4]) : String(r[4] || '').trim();
+    keys[code + '|' + start + '|' + m] = true;
+  });
+  return keys;
+}
+
 /** 朝の案内の後に実行：前回の勤務日までの連続記録を確定し、節目のお礼を送る（今日出勤の人だけ。休みの人は次の出勤日の朝） */
 function AC_morningThanks_() {
   var props = PropertiesService.getScriptProperties(), state = AC_state_();
@@ -1952,7 +1969,8 @@ function AC_morningThanks_() {
   try { totLatest = AC_readTotLatest_(); } catch (e) { Logger.log('TOTデータの読み込みに失敗（日付をまたいだ入力は不利にしない）'); }
   var totR = totLatest && totLatest.results;
   var totOk = !!totLatest && totLatest.today === today && !!totR;   // 今朝（7:05）のデータだけを使う。古ければ判定保留
-  var logSheet = AC_thanksLogSheet_(), logIdx = logSheet ? AC_thanksLogIndex(logSheet.getDataRange().getValues(), AC_toDateFn_()) : {};
+  var logSheet = AC_thanksLogSheet_(), logRows = logSheet ? logSheet.getDataRange().getValues() : [];
+  var logIdx = AC_thanksLogIndex(logRows, AC_toDateFn_()), logKeys = AC_thanksLogKeys(logRows, AC_toDateFn_());
   d.before.targets.forEach(function (name) {
     var k = AC_normalizeName(name), code = codeMap[k];
     if (!code || paused[k]) return;
@@ -1979,10 +1997,11 @@ function AC_morningThanks_() {
     if (logIdx[code]) stored = logIdx[code];   // 送信履歴シートを優先（引き継ぎの記録・過去の送信を含む）
     var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
     var dec = AC_thanksDecision(streak, stored, oldThanked, migrating);
+    if (dec.send && logKeys[code + '|' + streak.start + '|' + dec.m]) { dec.send = false; Logger.log('送信履歴にあるため送りません：社員番号%s（%s日・開始%s）', code, dec.m, streak.start); }   // 社員番号＋開始日＋節目で二重送信を防ぐ
     if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
     if (dec.send) {
       var test = tests[k], reg = registry[k];
-      var text = AC_render(streak.n === 5 ? 'mthanks5' : streak.n === 10 ? 'mthanks10' : 'mthanksN', today, { n: streak.n }, overrides);   // 文面の日数は実際の連続日数
+      var text = AC_render(AC_mthanksKey(streak.n, dec.m), today, { n: streak.n }, overrides);   // 文面の日数は実際の連続日数
       try {
         if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て（お礼）】\n' + text);
         else if (reg) AC_pushTo_(reg.userId, text);
@@ -2527,6 +2546,7 @@ var AC_TEMPLATES = {
   followAfterWorking: ['本日もお疲れ様です😊\n\n勤務終了後、車を運転開始する前にアルコールチェックを実施し、フォームへの入力をお願いします🚗\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL],
   mthanks5: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
   mthanks10: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n今日もよろしくお願いします！'],
+  mthanks15: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで{n}勤務日連続となりました！🎉\n\n毎日欠かさず継続していただき、本当にありがとうございます！\n日々の積み重ねが、職場全体の安全意識向上につながっています。\n\nこれからもよろしくお願いします！✨'],
   mthanksN: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
   thanks5: ['お疲れ様です！😊\n\nアルコールチェックの入力が、5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanks10: ['お疲れ様です！😊\n\nアルコールチェックの入力が、10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n引き続きよろしくお願いします！'],
@@ -3470,7 +3490,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_thanksLogIndex: AC_thanksLogIndex, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_thanksLogIndex: AC_thanksLogIndex, AC_thanksLogKeys: AC_thanksLogKeys, AC_mthanksKey: AC_mthanksKey, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

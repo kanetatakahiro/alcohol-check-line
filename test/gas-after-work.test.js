@@ -150,7 +150,7 @@ test('連続記録：管理監督者の特例（打刻なし）は当日23:59ま
 });
 
 test('お礼：節目を取りこぼさず、同じ節目は二度送らない。連続が途切れたら数え直す', () => {
-  assert.deepEqual([0, 4, 5, 9, 10, 19, 20, 27, 30].map(n => X.AC_milestoneAtMost(n)), [0, 0, 5, 5, 10, 10, 20, 20, 30]);
+  assert.deepEqual([0, 4, 5, 9, 10, 14, 15, 19, 20, 27, 30].map(n => X.AC_milestoneAtMost(n)), [0, 0, 5, 5, 10, 10, 15, 15, 20, 25, 30]);   // 5勤務日ごと（全員共通）
   const dec = (n, start, stored, old = false, migrating = true) => JSON.parse(JSON.stringify(X.AC_thanksDecision({ n, start }, stored, old, migrating)));
   // 20時以降の入力で5日目を達成 → 翌朝お礼
   assert.equal(dec(5, 'S', { m: 0, start: 'S' }).send, true);
@@ -558,4 +558,70 @@ test('引き継ぎ（送信なし）：未確認の5日（再送保留）の記�
   assert.match(n.sent[0].text, /前回の勤務までで10勤務日連続/);
   assert.equal(log.at(-1)[3], 10);
   assert.equal(log.at(-1)[5], '送信');
+});
+
+// ---------------- 節目は5勤務日ごと（全員共通）・15日の特別な文面・社員番号＋開始日＋節目で重複防止 ----------------
+const runThanks = ({ names: nm = ['試験 残業'], days, fvRows, log, today, user = { 'mthanks:init': '2026-10-01' } }) => {
+  const sv = sheet([...days, today], nm.map(n => [n, Array(days.length + 1).fill('出勤')]));
+  const fv = [['ts', '氏名', '区分', '結果'], ...fvRows, ...nm.map(n => [ts(today, '08:00'), n, '出勤前', 'x'])];
+  const n = night({ today, master, shifts: sv, form: fv, punchFor: () => null });
+  Object.assign(n.user, user);
+  n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+  n.ctx.__log = log;
+  vm.runInContext(`AC_readTotLatest_ = function () { return null; };
+    AC_thanksLogSheet_ = function () { return { getDataRange: function () { return { getValues: function () { return __log; } }; }, appendRow: function (r) { __log.push(r); } }; };
+    AC_morningThanks_();`, n.ctx);
+  return n;
+};
+const workDays = (from, count) => Array.from({ length: count }, (_, i) => { const t = new Date(`${from}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + i); return t.toISOString().slice(0, 10); });
+const LOGHEAD = ['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '送信日', '備考'];
+
+test('15勤務日連続（送信なし）：全員共通で特別な文面。13日（未確認の10日の記録あり）→ 14日は送らず、15日に達した翌朝に送る', () => {
+  const log = [LOGHEAD, ['2026-10-21', "'10102", 13, 10, '2026-10-01', '引き継ぎ：送信状況未確認（再送保留）', '', '10/12の10日は送信を確認できず']];
+  const d14 = workDays('2026-10-01', 14);
+  const a = runThanks({ days: d14, fvRows: entries('試験 残業', d14.map(dd => [dd, '08:00', '19:00'])), log, today: '2026-10-15' });
+  assert.equal(a.sent.length, 0);                                   // 14日：節目でない（10日は再送しない）
+  const d15 = workDays('2026-10-01', 15);
+  const b = runThanks({ days: d15, fvRows: entries('試験 残業', d15.map(dd => [dd, '08:00', '19:00'])), log, today: '2026-10-16' });
+  assert.equal(b.sent.length, 1);
+  assert.equal(b.sent[0].text, 'おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで15勤務日連続となりました！🎉\n\n毎日欠かさず継続していただき、本当にありがとうございます！\n日々の積み重ねが、職場全体の安全意識向上につながっています。\n\nこれからもよろしくお願いします！✨');
+  assert.deepEqual([log.at(-1)[1], log.at(-1)[2], log.at(-1)[3], log.at(-1)[4], log.at(-1)[5]], ["'10102", 15, 15, '2026-10-01', '送信']);
+  const c = runThanks({ days: d15, fvRows: entries('試験 残業', d15.map(dd => [dd, '08:00', '19:00'])), log, today: '2026-10-16' });
+  assert.equal(c.sent.length, 0);                                   // 同じ朝に再実行しても二重送信しない
+});
+
+test('5勤務日ごとの節目（送信なし）：5→10→15→20→25 で毎回1通。途中の日は送らない', () => {
+  const log = [LOGHEAD];
+  const sentAt = [];
+  for (let k = 1; k <= 26; k++) {
+    const dd = workDays('2026-11-01', k);
+    const today = workDays('2026-11-01', k + 1)[k];
+    const r = runThanks({ days: dd, fvRows: entries('試験 残業', dd.map(x => [x, '08:00', '19:00'])), log, today });
+    if (r.sent.length) sentAt.push(k);
+  }
+  assert.deepEqual(sentAt, [5, 10, 15, 20, 25]);
+  assert.deepEqual(log.slice(1).map(r => r[3]), [5, 10, 15, 20, 25]);
+});
+
+test('二重送信の防止：「社員番号＋連続の開始日＋節目」が履歴にあれば、最後の行が別の内容でも送らない', () => {
+  const keys = JSON.parse(JSON.stringify(X.AC_thanksLogKeys([LOGHEAD,
+    ['x', "'10102", 10, 10, '2026-10-05', '送信', '2026-10-15', ''],
+    ['x', '10102', 3, 0, '2026-10-20', '送信', '', ''],                    // 節目なしの行は無視
+    ['x', '10102', 5, 5, '2026-10-05', 'テスト', '', '']])));                 // テストは無視
+  assert.deepEqual(keys, { '10102|2026-10-05|10': true });
+  // 最後の行が古い節目（5）でも、同じ開始日の10日が履歴にあれば送らない
+  const log = [LOGHEAD, ['x', "'10102", 10, 10, '2026-10-05', '引き継ぎ：送信済み', '2026-10-15', ''], ['x', "'10102", 10, 5, '2026-10-05', '引き継ぎ：送信状況未確認（再送保留）', '', '']];
+  const dd = workDays('2026-10-05', 10);
+  const r = runThanks({ days: dd, fvRows: entries('試験 残業', dd.map(x => [x, '08:00', '19:00'])), log, today: '2026-10-15' });
+  assert.equal(r.sent.length, 0);
+});
+
+test('文面の選び方：15日の節目は特別な文面（日数は実際の値）。5日・10日はそれぞれの文面、それ以外は共通の文面', () => {
+  assert.equal(X.AC_mthanksKey(15, 15), 'mthanks15');
+  assert.equal(X.AC_mthanksKey(16, 15), 'mthanks15');
+  assert.match(X.AC_render('mthanks15', '2026-10-20', { n: 16 }), /16勤務日連続となりました！🎉/);
+  assert.equal(X.AC_mthanksKey(5, 5), 'mthanks5');
+  assert.equal(X.AC_mthanksKey(10, 10), 'mthanks10');
+  assert.equal(X.AC_mthanksKey(20, 20), 'mthanksN');
+  assert.equal(X.AC_mthanksKey(11, 10), 'mthanksN');
 });

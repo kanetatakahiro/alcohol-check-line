@@ -30,6 +30,8 @@ if [ -d "$APP/.git" ]; then git -C "$APP" pull --ff-only; else git clone https:/
 N="$(command -v node)"
 ( crontab -l 2>/dev/null | grep -v 'tot-relay.js' ; \
   echo "5 7 * * * cd $APP && $N --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1" ; \
-  echo "30 22 * * * cd $APP && $N --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1" ) | crontab -
+  echo "30 22 * * * cd $APP && $N --env-file=.env src/tot-relay.js >> $HOME/tot-relay.log 2>&1" ; \
+  echo "0 20-23 * * * cd $APP && $N --env-file=.env src/tot-relay.js --punch >> $HOME/tot-relay.log 2>&1" ) | crontab -
+# 20〜23時の毎時0分：当日の打刻だけ（退勤後のアルコールチェック確認用。Apps Scriptは保存するだけ）
 echo "== 準備完了（node $(node -v)） =="
 echo "続けて： bash $APP/deploy/set-env.sh"

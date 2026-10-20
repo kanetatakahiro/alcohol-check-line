@@ -22,6 +22,8 @@ export function addDays(date, n) {
  *  朝（morning）：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（シフト反映・勤怠チェック表）
  *  夜（night、20時以降）：上に加えて、今日の予定と打刻（当日の勤怠状況のお知らせ用）
  *  毎月28日以降の朝：翌月1日〜末日のシフトも取る（翌月分のシフトを管理シートへ反映するため）
+ *  打刻だけ（punch、--punch）：従業員と、昨日・今日の打刻だけ（20〜23時の退勤後のアルコールチェック確認用）。
+ *    Apps Scriptへは type: 'tot-punch' で送り、保存だけさせる（勤怠のお知らせ・集計・シフト照合は動かない）
  */
 export function nextMonthRange(today) {
   const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
@@ -32,6 +34,12 @@ export function nextMonthRange(today) {
 }
 
 export function plan(today, mode = 'morning', opts = {}) {
+  if (mode === 'punch') {
+    return [
+      { name: 'employees', path: `/employees?date=${today}&includeResigner=false` },
+      { name: 'timerecord', path: `/daily-workings/timerecord?start=${addDays(today, -1)}&end=${today}` },
+    ];
+  }
   const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
   const prev = m === 1 ? `${y - 1}-12-01` : `${y}-${String(m - 1).padStart(2, '0')}-01`;
   const yesterday = addDays(today, -1);
@@ -107,13 +115,37 @@ export function japanHour(d) {
   return Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', hourCycle: 'h23' }).format(d));
 }
 
-export async function runRelay({ env = process.env, fetchImpl = fetch, now = () => new Date(), leaves = false,
+/**
+ * 純粋関数：打刻の確認結果（--check 用）。人数と最新の打刻時刻だけで、氏名・社員番号は出さない。
+ */
+export function punchCheckSummary(results, today) {
+  const rows = [];
+  for (const d of Array.isArray(results.timerecord) ? results.timerecord : []) for (const w of d.dailyWorkings || []) rows.push(w);
+  const s = { today, employees: Array.isArray(results.employees) ? results.employees.length : null, clockedIn: 0, clockedOut: 0, working: 0, latestIn: '', latestOut: '',
+    errors: Object.keys(results).filter(k => results[k] && results[k]._error) };
+  for (const w of rows) {
+    if (w.date !== today) continue;
+    const recs = (w.timeRecord || []).filter(r => String(r.code) === '1' || String(r.code) === '2').sort((a, b) => String(a.time).localeCompare(String(b.time)));
+    if (!recs.length) continue;
+    s.clockedIn++;
+    const last = recs[recs.length - 1];
+    if (String(last.code) === '2') s.clockedOut++; else s.working++;
+    for (const r of recs) {
+      const t = String(r.time || '');
+      if (String(r.code) === '1' && t > s.latestIn) s.latestIn = t;
+      if (String(r.code) === '2' && t > s.latestOut) s.latestOut = t;
+    }
+  }
+  return s;
+}
+
+export async function runRelay({ env = process.env, fetchImpl = fetch, now = () => new Date(), leaves = false, punch = false, check = false,
   wait = ms => new Promise(r => setTimeout(r, ms)), log = console.log } = {}) {
   const token = env.TOT_ACCESS_TOKEN, url = env.GAS_WEBAPP_URL, secret = env.TOT_SYNC_SECRET;
   if (!token || !url || !secret) throw new Error('サーバーの .env に TOT_ACCESS_TOKEN / GAS_WEBAPP_URL / TOT_SYNC_SECRET を設定してください。');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('GAS_WEBAPP_URL の形式を確認してください。');
   const today = japanDate(now());
-  const mode = japanHour(now()) >= 20 ? 'night' : 'morning';   // 20時以降の実行は当日の勤怠状況用
+  const mode = punch ? 'punch' : japanHour(now()) >= 20 ? 'night' : 'morning';   // 20時以降の実行は当日の勤怠状況用（--punch は打刻だけ）
   const results = {}, status = {};
   let first = true;
   for (const item of plan(today, mode, { leaves })) {
@@ -134,10 +166,14 @@ export async function runRelay({ env = process.env, fetchImpl = fetch, now = () 
       else results[item.name] = { _error: res.status, errors };
     }
   }
+  if (check) {   // 確認だけ：Apps Scriptへは送らない。人数と最新の打刻時刻だけを表示
+    log(JSON.stringify({ check: true, mode, status, summary: punchCheckSummary(results, today) }));
+    return;
+  }
   const res = await fetchImpl(url, {
     method: 'POST', redirect: 'follow', signal: AbortSignal.timeout(120000),
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'tot-raw', secret, fetchedAt: now().toISOString(), today, mode, results }),
+    body: JSON.stringify({ type: mode === 'punch' ? 'tot-punch' : 'tot-raw', secret, fetchedAt: now().toISOString(), today, mode, results }),
   });
   const text = await res.text();
   log(JSON.stringify({ today, mode, status, gas: res.status, result: text.slice(0, 120) }));
@@ -145,5 +181,5 @@ export async function runRelay({ env = process.env, fetchImpl = fetch, now = () 
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runRelay({ leaves: process.argv.includes('--leaves') }).catch(e => { console.error(e.message); process.exitCode = 1; });
+  runRelay({ leaves: process.argv.includes('--leaves'), punch: process.argv.includes('--punch'), check: process.argv.includes('--check') }).catch(e => { console.error(e.message); process.exitCode = 1; });
 }

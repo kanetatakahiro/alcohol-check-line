@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-20a';
+var AC_CODE_VERSION = '2026-10-20b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -85,17 +85,26 @@ var AC_SCHEDULE = [
   { fn: 'alcoholCheckMorning', hour: 8, minute: 30 },
   { fn: 'alcoholCheckBeforeWork', hour: 10, minute: 0 },
   { fn: 'alcoholCheckEvening', hour: 18, minute: 30 },
-  { fn: 'alcoholCheckAfterWork', hour: 20, minute: 0 },
+  // 退勤後の確認：20・21・22・23時（VPSが毎時0分にTOTの打刻を送るので、その後の20分ごろに実行）
+  { fn: 'alcoholCheckAfterWorkHourly', hour: 20, minute: 20 },
+  { fn: 'alcoholCheckAfterWorkHourly', hour: 21, minute: 20 },
+  { fn: 'alcoholCheckAfterWorkHourly', hour: 22, minute: 20 },
+  { fn: 'alcoholCheckAfterWorkHourly', hour: 23, minute: 20 },
 ];
 
-function alcoholCheckMorning() { AC_dispatch_('morning'); }
+function alcoholCheckMorning() {
+  AC_dispatch_('morning');
+  // 連続記録のお礼（前日分を確定）。朝の案内とは別に、失敗しても朝の案内に影響しない
+  if (AC_afterWorkEnabled_()) { try { AC_morningThanks_(); } catch (e) { Logger.log('連続記録のお礼の処理に失敗：%s', e && e.message ? e.message : ''); } }
+}
 function alcoholCheckBeforeWork() { AC_dispatch_('followBefore'); }
 function alcoholCheckEvening() { AC_dispatch_('evening'); }
-function alcoholCheckAfterWork() { AC_dispatch_('followAfter'); }
+/** 旧トリガー（20:00）用。AFTER_WORK_TOT が "true" なら20時の確認、それ以外は従来どおり */
+function alcoholCheckAfterWork() { if (AC_afterWorkEnabled_()) AC_afterWorkCheck_(20); else AC_dispatch_('followAfter'); }
 
 /** 定期実行の登録（このプロジェクトの通知用トリガーを消してから登録し直す） */
 function alcoholCheckSetupTriggers() {
-  var names = AC_SCHEDULE.map(function (s) { return s.fn; }).concat(['alcoholCheckAlerts', 'alcoholCheckImportTot']);
+  var names = AC_SCHEDULE.map(function (s) { return s.fn; }).concat(['alcoholCheckAfterWork', 'alcoholCheckAlerts', 'alcoholCheckImportTot']);
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (names.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
@@ -107,6 +116,54 @@ function alcoholCheckSetupTriggers() {
   ScriptApp.newTrigger('alcoholCheckAlerts').timeBased().everyMinutes(10).create();
   // TOTのCSV（ドライブの「TOT取り込み」フォルダ）の確認は1時間ごと
   ScriptApp.newTrigger('alcoholCheckImportTot').timeBased().everyHours(1).create();
+}
+
+/**
+ * 退勤後の確認のトリガーだけを入れ替える（ほかのトリガーは触らない）：
+ * 旧 alcoholCheckAfterWork（20:00）を消し、alcoholCheckAfterWorkHourly を20・21・22・23時（各20分ごろ）に登録する。
+ * AFTER_WORK_TOT が "true" でない間は、20時の回が従来の確認連絡を行うだけ（21〜23時は何もしない）。
+ */
+function alcoholCheckSetupAfterWorkTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    var fn = t.getHandlerFunction();
+    if (fn === 'alcoholCheckAfterWork' || fn === 'alcoholCheckAfterWorkHourly') ScriptApp.deleteTrigger(t);
+  });
+  AC_SCHEDULE.filter(function (s) { return s.fn === 'alcoholCheckAfterWorkHourly'; }).forEach(function (s) {
+    ScriptApp.newTrigger(s.fn).timeBased().everyDays(1).atHour(s.hour).nearMinute(s.minute).inTimezone(AC_TZ).create();
+  });
+  Logger.log('退勤後の確認のトリガーを登録しました（%s時）', AC_AFTER_HOURS.join('・'));
+}
+
+/** 元に戻す：退勤後の確認のトリガーを、従来の alcoholCheckAfterWork（20:00）1つに戻す（ほかのトリガーは触らない） */
+function alcoholCheckRestoreAfterWorkTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    var fn = t.getHandlerFunction();
+    if (fn === 'alcoholCheckAfterWork' || fn === 'alcoholCheckAfterWorkHourly') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('alcoholCheckAfterWork').timeBased().everyDays(1).atHour(20).nearMinute(0).inTimezone(AC_TZ).create();
+  Logger.log('退勤後の確認のトリガーを従来の20:00の1つに戻しました');
+}
+
+/**
+ * 手動確認用：退勤後の確認を、送信せずに実行ログで確認する（今の時刻を指定時刻とみなす。LINE送信・記録の変更なし）。
+ * 引数なしで実行すると20時と23時の両方を表示。打刻データの状態と、だれが「送信／保留／対象外」になるかを表示する。
+ */
+function alcoholCheckAfterWorkPreview() {
+  var today = AC_today_(), d = AC_loadDay_(today), state = AC_state_();
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  var paused = AC_pausedNames(mv, AC_pauseIndex_(), today);
+  var missing = d.after.missing.filter(function (n) { return !paused[AC_normalizeName(n)]; });
+  var codeMap = AC_codeByName(mv), totMap = AC_totByCode(mv), punch = AC_loadPunch_(), nowMs = Date.now();
+  Logger.log('打刻データ：%s', punch ? (punch.ok ? '取得 ' + punch.fetchedAt + '（' + punch.today + '・' + punch.codes.length + '人）' : '取得失敗（' + punch.errors.join(',') + '）') : 'なし');
+  [20, 23].forEach(function (h) {
+    var plan = AC_afterWorkPlan({ hour: h, today: today, missing: missing, nowMs: nowMs, punch: punch,
+      codeOf: function (n) { return codeMap[AC_normalizeName(n)] || ''; }, totOf: function (c) { return totMap[c] || ''; },
+      sentBefore: function (who) { return !!state.getProperty('sent:' + today + ':afterRemind:' + who); } });
+    Logger.log('【%s時とみなした場合】未入力 %s人\n%s', h, missing.length, plan.map(function (p) {
+      return '・' + (p.code ? '社員番号' + p.code : '社員番号不明') + '：' + p.reason + (p.action === 'send' ? '（' + p.template + '）' : '');
+    }).join('\n') || '（なし）');
+  });
+  Logger.log('【文面：退勤済み】\n%s\n\n【文面：最終確認（勤務中・確認できず）】\n%s', AC_render('followAfterOut', today, {}, AC_templateOverrides_()), AC_render('followAfterWorking', today, {}, AC_templateOverrides_()));
 }
 
 /** 手動確認用：今日、本人へ送れる人数（登録・確認済み、機器所持の絞り込み後）をログに出す（氏名は出さない） */
@@ -1236,6 +1293,7 @@ function AC_manualNextMonthShift_(commit) {
 // 値を表示してよい設定（オン／オフ・日付・しきい値など）。これ以外は「設定あり／なし」だけを表示する。
 var AC_SETTINGS_SHOWN = {
   DRY_RUN: '未設定＝送信しない（"false" のときだけ送信）',
+  AFTER_WORK_TOT: '未設定＝退勤後の確認は従来どおり20時に1回（"true" でTOTの打刻を見て20〜23時に確認）',
   NOTIFY_EMPLOYEES: '未設定＝本人へ送らない',
   NOTIFY_ADMIN: '未設定＝管理者へ送る',
   REQUIRE_DEVICE: '未設定＝機器所持で絞り込まない',
@@ -1254,7 +1312,7 @@ var AC_SETTINGS_SHOWN = {
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
   'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
-var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
+var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAfterWorkHourly', 'alcoholCheckAlerts',
   'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm'];
 
 /**
@@ -1277,7 +1335,9 @@ function AC_settingsReport(all, triggers, extra) {
   (triggers || []).forEach(function (t) { count[t.fn] = (count[t.fn] || 0) + 1; });
   (triggers || []).forEach(function (t) { out.push('・' + t.fn + '（' + t.type + '）' + (AC_KNOWN_TRIGGERS.indexOf(t.fn) === -1 ? '　※このコードの関数ではありません' : '')); });
   if (!(triggers || []).length) out.push('・なし');
-  Object.keys(count).forEach(function (fn) { if (count[fn] > 1) out.push('【注意】' + fn + ' が' + count[fn] + '個登録されています（重複して動きます）'); });
+  var expected = { alcoholCheckAfterWorkHourly: AC_AFTER_HOURS.length };   // 20〜23時の4つ
+  Object.keys(count).forEach(function (fn) { if (count[fn] > (expected[fn] || 1)) out.push('【注意】' + fn + ' が' + count[fn] + '個登録されています（重複して動きます）'); });
+  if (count.alcoholCheckAfterWork && count.alcoholCheckAfterWorkHourly) out.push('【注意】退勤後の確認が新旧両方登録されています（alcoholCheckAfterWork を削除してください）');
   if (count.alcoholCheckImportTot) out.push('【参考】旧CSV取り込み（alcoholCheckImportTot）の1時間ごとの実行が残っています');
   out.push('', '■ 状態');
   out.push('・VPSからTOTデータが最後に届いた日：' + (extra.lastRelay || '記録なし'));
@@ -1477,6 +1537,322 @@ function AC_checkLineQuota_(today) {
   state.setProperty(key, new Date().toISOString());
 }
 
+// ---------------- 退勤後のアルコールチェック（TOTの打刻で退勤を確認・20〜23時） ----------------
+// 退勤後のチェックは「勤務を終えて、車の運転を始める前」に行うもの。残業中の人に催促しないよう、
+// さくらのVPSが毎時（20・21・22・23時）にTOTの当日の打刻だけを読み取って送り（type: tot-punch）、
+// Apps Scriptは「tot-punch-latest.json」に保存するだけ。毎時の確認（alcoholCheckAfterWorkHourly）がそれを読んで判定する。
+//  - 退勤済み・未入力 → 確認連絡（同じ勤務日に1回だけ）／勤務中・打刻なし・TOTで確認できない → 保留
+//  - 23時の最終確認：まだ連絡していない未入力の人へ、退勤済みなら「退勤後」の文面、それ以外は「勤務終了後、運転前に」の文面
+//  - 打刻しない管理監督者（AC_PUNCH_EXEMPT_CODES・社員番号で判定）は、従来どおり20時に1回だけ。21〜23時は対象外
+//  - 連続記録とお礼は翌朝（8:30の朝の案内の後）に前日分を確定して判定（alcoholCheckMorning の後に実行）
+//  - スクリプトプロパティ AFTER_WORK_TOT が "true" のときだけ動く。"true" 以外なら20時に従来の確認連絡＋お礼（今までどおり）
+var AC_AFTER_HOURS = [20, 21, 22, 23];
+var AC_AFTER_FINAL_HOUR = 23;
+var AC_PUNCH_EXEMPT_CODES = ['10015'];   // TOTで打刻しない管理監督者（社員番号）
+var AC_PUNCH_FILE = 'tot-punch-latest.json';
+var AC_PUNCH_MAX_AGE_MIN = 70;           // これより古い打刻データは使わない（推測で退勤済みとしない）
+var AC_AFTER_GRACE_HOUR = 5;             // 「退勤前」の入力を、翌日のこの時刻より前なら前日の勤務日分として数える（TOTの日付変更時刻に合わせる）
+var AC_MILESTONES_FIRST = [5, 10];       // 以降は10日ごと（20・30・40…）
+
+function AC_afterWorkEnabled_() { return PropertiesService.getScriptProperties().getProperty('AFTER_WORK_TOT') === 'true'; }
+
+/** 毎時の確認（トリガー：20・21・22・23時）。AFTER_WORK_TOT が "true" でなければ、20時に従来の確認連絡だけを行う */
+function alcoholCheckAfterWorkHourly() {
+  var hour = Number(Utilities.formatDate(new Date(), AC_TZ, 'H'));
+  if (!AC_afterWorkEnabled_()) { if (hour === 20) AC_dispatch_('followAfter'); return; }
+  if (AC_AFTER_HOURS.indexOf(hour) === -1) { Logger.log('退勤後の確認の時間外（%s時）のため何もしません', hour); return; }
+  AC_afterWorkCheck_(hour);
+}
+
+/** 純粋関数：TOTの打刻（tot-punch）から、TOTコードごと・日付ごとの出退勤の要約（氏名などは残さない） */
+function AC_punchSummary(results, today, fetchedAt) {
+  var R = results || {};
+  var errors = Object.keys(R).filter(function (k) { return R[k] && R[k]._error; });
+  var out = { today: today, fetchedAt: fetchedAt || '', ok: !errors.length && Array.isArray(R.employees) && Array.isArray(R.timerecord),
+    errors: errors, codes: [], byTot: {} };
+  if (!out.ok) return out;
+  var codeByKey = AC_totCodeByKey_(R.employees);
+  Object.keys(codeByKey).forEach(function (k) { if (codeByKey[k]) out.codes.push(AC_totKey(codeByKey[k])); });
+  AC_totFlat_(R.timerecord).forEach(function (t) {
+    var tot = AC_totKey(codeByKey[t.employeeKey]);
+    if (!tot || !t.date) return;
+    var recs = (t.timeRecord || []).filter(function (r) { return String(r.code) === '1' || String(r.code) === '2'; })
+      .slice().sort(function (a, b) { return String(a.time) < String(b.time) ? -1 : String(a.time) > String(b.time) ? 1 : 0; });
+    var s = { in: 0, out: 0, last: '', lastTime: '' };
+    recs.forEach(function (r) { if (String(r.code) === '1') s.in++; else s.out++; s.last = String(r.code) === '1' ? 'in' : 'out'; s.lastTime = String(r.time || ''); });
+    (out.byTot[tot] = out.byTot[tot] || {})[t.date] = s;
+  });
+  return out;
+}
+
+/**
+ * 純粋関数：その人のその日の勤務状況。
+ *  out：退勤の打刻が最後（退勤済み）／working：出勤の打刻が最後（勤務中）／none：その日の打刻が無い
+ *  unknown：打刻データが無い・古い・取得失敗・TOTコードが無い・TOTに居ない（推測で退勤済みにしない）
+ */
+function AC_punchStatus(summary, tot, date, nowMs) {
+  if (!summary || !summary.ok || summary.today !== date) return 'unknown';
+  var at = Date.parse(summary.fetchedAt || '');
+  if (isNaN(at) || (nowMs && nowMs - at > AC_PUNCH_MAX_AGE_MIN * 60000) || (nowMs && at - nowMs > 10 * 60000)) return 'unknown';
+  var key = AC_totKey(tot);
+  if (!key || (summary.codes || []).indexOf(key) === -1) return 'unknown';
+  var s = (summary.byTot[key] || {})[date];
+  if (!s || (!s.in && !s.out)) return 'none';
+  return s.last === 'out' ? 'out' : 'working';
+}
+
+/**
+ * 純粋関数：毎時の確認でだれに何を送るか。
+ * input：{ hour, today, missing（未入力の氏名）, codeOf(氏名→社員番号), totOf(社員番号→TOTコード), punch, nowMs, sentBefore(社員番号or氏名→bool) }
+ * 戻り値：[{ name, code, status, action: 'send'|'hold'|'skip', template, reason }]
+ */
+function AC_afterWorkPlan(input) {
+  var final = input.hour >= AC_AFTER_FINAL_HOUR;
+  return (input.missing || []).map(function (name) {
+    var code = input.codeOf(name) || '';
+    var who = code || AC_normalizeName(name);
+    var exempt = !!code && AC_PUNCH_EXEMPT_CODES.indexOf(code) !== -1;
+    if (input.sentBefore(who)) return { name: name, code: code, status: exempt ? 'exempt' : '', action: 'skip', reason: 'この勤務日は連絡済み' };
+    if (exempt) {
+      return input.hour === AC_AFTER_HOURS[0]
+        ? { name: name, code: code, status: 'exempt', action: 'send', template: 'followAfter', reason: '打刻なしの特例（20時に1回）' }
+        : { name: name, code: code, status: 'exempt', action: 'skip', reason: '打刻なしの特例（21時以降は送らない）' };
+    }
+    var status = AC_punchStatus(input.punch, code ? input.totOf(code) : '', input.today, input.nowMs);
+    if (status === 'out') return { name: name, code: code, status: status, action: 'send', template: 'followAfterOut', reason: '退勤済み・未入力' };
+    if (!final) return { name: name, code: code, status: status, action: 'hold', reason: { working: '勤務中', none: '打刻なし', unknown: 'TOTで確認できず' }[status] + 'のため保留' };
+    return { name: name, code: code, status: status, action: 'send', template: 'followAfterWorking', reason: '最終確認（' + { working: '勤務中', none: '打刻なし', unknown: 'TOTで確認できず' }[status] + '）' };
+  });
+}
+
+/** 純粋関数：従業員マスタから「氏名（別表記も）→ 社員番号」（退職者は除く。同じ氏名で別の人がいれば使わない） */
+function AC_codeByName(masterValues) {
+  var map = {}, dup = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var r = masterValues[i], code = AC_cellCode_(r[AC_COL.code]);
+    if (!code || String(r[AC_COL.status]).trim() === '退職') continue;
+    [r[AC_COL.name], r[AC_COL.alias]].forEach(function (n) {
+      var k = AC_normalizeName(n);
+      if (!k) return;
+      if (map[k] && map[k] !== code) dup[k] = true;
+      map[k] = code;
+    });
+  }
+  Object.keys(dup).forEach(function (k) { delete map[k]; });
+  return map;
+}
+
+/** 純粋関数：従業員マスタから「社員番号 → TOTコード」 */
+function AC_totByCode(masterValues) {
+  var out = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var code = AC_cellCode_(masterValues[i][AC_COL.code]), tot = AC_totKey(masterValues[i][AC_COL.totCode]);
+    if (code && tot) out[code] = tot;
+  }
+  return out;
+}
+
+/** VPSから届いた当日の打刻（type: tot-punch）を保存するだけ（判定・送信はしない）。Webアプリ（doPost）から呼ばれる */
+function AC_handleTotPunch_(body) {
+  var secret = PropertiesService.getScriptProperties().getProperty('TOT_SYNC_SECRET');
+  if (!secret || body.secret !== secret || !body.results) return 'NG';
+  var summary = AC_punchSummary(body.results, body.today, body.fetchedAt);
+  var json = JSON.stringify(summary);
+  var folder = AC_totFolder_(), it = folder.getFilesByName(AC_PUNCH_FILE);
+  if (it.hasNext()) it.next().setContent(json); else folder.createFile(AC_PUNCH_FILE, json, MimeType.PLAIN_TEXT);
+  Logger.log('TOT打刻を受信 %s（%s）', summary.ok ? '正常' : '取得失敗', summary.errors.join(','));
+  return 'OK punch ' + (summary.ok ? 'ok' : 'error');
+}
+
+/** 保存済みの打刻の要約を読む。無い・壊れているときは null */
+function AC_loadPunch_() {
+  try {
+    var it = AC_totFolder_().getFilesByName(AC_PUNCH_FILE);
+    if (!it.hasNext()) return null;
+    return JSON.parse(it.next().getBlob().getDataAsString());
+  } catch (e) { Logger.log('TOT打刻データの読み込みに失敗：%s', e && e.message ? e.message : ''); return null; }
+}
+
+/** 毎時の確認の本体（20〜23時）。同じ時刻の確認は1日1回。データ不備のときは誰にも送らず管理者へ知らせる */
+function AC_afterWorkCheck_(hour) {
+  var props = PropertiesService.getScriptProperties(), state = AC_state_();
+  var dryRun = props.getProperty('DRY_RUN') !== 'false';
+  var notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';
+  var notifyAdmin = props.getProperty('NOTIFY_ADMIN') !== 'false';
+  var today = AC_today_(), runKey = 'sent:' + today + ':afterCheck:' + hour;
+  if (state.getProperty(runKey)) { Logger.log('実行済みのため中止'); return; }
+  AC_cleanupSentKeys_(state, today);
+  var d;
+  try { d = AC_loadDay_(today); } catch (e) {
+    Logger.log('照合失敗：%s', e && e.message ? e.message : '');
+    if (!dryRun) {
+      AC_adminNotice_('afterload', '【エラー】' + today + ' の退勤後のアルコールチェックの確認がうまくできませんでした🙇‍♀️\nシフト表（2026-2028）やフォームの回答シートに変わったところがないか、見ていただけますか？（' + (e && e.code ? e.code : '不明なエラー') + '）');
+      state.setProperty(runKey, new Date().toISOString());
+    }
+    return;
+  }
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  var paused = AC_pausedNames(mv, AC_pauseIndex_(), today);
+  var missing = d.after.missing.filter(function (n) { return !paused[AC_normalizeName(n)]; });
+  var codeMap = AC_codeByName(mv), totMap = AC_totByCode(mv);
+  var punch = AC_loadPunch_(), nowMs = Date.now();
+  var remindKey = function (who) { return 'sent:' + today + ':afterRemind:' + who; };
+  var plan = AC_afterWorkPlan({ hour: hour, today: today, missing: missing, nowMs: nowMs, punch: punch,
+    codeOf: function (n) { return codeMap[AC_normalizeName(n)] || ''; }, totOf: function (c) { return totMap[c] || ''; },
+    sentBefore: function (who) { return !!state.getProperty(remindKey(who)); } });
+  var punchOk = AC_punchStatus(punch, (punch && punch.codes && punch.codes[0]) || '', today, nowMs) !== 'unknown';
+  Logger.log('%s %s時 退勤後の確認：未入力 %s人／送信予定 %s人／保留 %s人／TOTの打刻 %s', today, hour, missing.length,
+    plan.filter(function (p) { return p.action === 'send'; }).length, plan.filter(function (p) { return p.action === 'hold'; }).length,
+    punchOk ? '確認できた（' + punch.fetchedAt + '）' : '確認できず');
+  plan.forEach(function (p) { Logger.log('・%s：%s', p.code ? '社員番号' + p.code : '社員番号不明', p.reason); });
+  if (dryRun) { Logger.log('DRY_RUNのため送信しません'); return; }
+  if (!punchOk && missing.length) {
+    AC_adminNotice_('totpunch', '【確認のお願い】TOTの打刻（退勤状況）を確認できなかったため、退勤後のアルコールチェックの確認連絡を保留しています🙇‍♀️\n'
+      + '23時の最終確認では、未入力の方へ「勤務終了後、運転を開始する前に」の案内を送ります。\n（' + (punch ? (punch.ok ? '打刻データが古い：' + punch.fetchedAt : '取得失敗：' + (punch.errors || []).join(',')) : '打刻データがありません') + '）');
+  }
+  var registry = notifyPeople ? AC_loadRegistry_() : {};
+  var tests = AC_testNames_(props, today), overrides = AC_templateOverrides_();
+  var sent = 0, failed = [], unregistered = [];
+  plan.filter(function (p) { return p.action === 'send'; }).forEach(function (p) {
+    var key = AC_normalizeName(p.name), test = tests[key], reg = registry[key];
+    var who = p.code || key;
+    var text = AC_render(p.template, today, {}, overrides);
+    try {
+      if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て（' + hour + '時・' + p.reason + '）】\n' + text);
+      else if (reg) AC_pushTo_(reg.userId, text);
+      else { unregistered.push(p.name); return; }
+      state.setProperty(remindKey(who), new Date().toISOString());
+      sent++;
+    } catch (e) { failed.push(p.name); }
+  });
+  if (notifyAdmin && (hour === AC_AFTER_HOURS[0] || hour >= AC_AFTER_FINAL_HOUR) && missing.length) {
+    AC_pushLine_(AC_afterWorkAdminMessage(today, hour, d.after.targets.length, plan, registry, failed));
+  }
+  Logger.log('送信 %s通／LINE未登録 %s人／失敗 %s人', sent, unregistered.length, failed.length);
+  state.setProperty(runKey, new Date().toISOString());
+}
+
+/** 純粋関数：管理者向けの一覧（20時と23時だけ）。氏名と状況 */
+function AC_afterWorkAdminMessage(today, hour, total, plan, registry, failed) {
+  var mark = function (p) {
+    if ((failed || []).indexOf(p.name) !== -1) return '（本人通知に失敗）';
+    var reg = registry && Object.keys(registry).length ? registry[AC_normalizeName(p.name)] : true;
+    if (p.action === 'send') return reg ? '（本人に通知：' + p.reason + '）' : '（LINE未登録）';
+    if (p.action === 'hold') return '（' + p.reason + '）';
+    return '（' + p.reason + '）';
+  };
+  return '【アルコールチェック】' + today + ' 退勤後（' + hour + '時' + (hour >= AC_AFTER_FINAL_HOUR ? '・最終確認' : '') + '）未入力（' + plan.length + '/' + total + '人）\n'
+    + plan.map(function (p) { return '・' + p.name + mark(p); }).join('\n')
+    + '\n※シフト表の「出勤」・フォーム回答・TOTの打刻で確認した結果です。';
+}
+
+// ---------------- 連続記録とお礼（翌朝に前日分を確定） ----------------
+
+/**
+ * 純粋関数：lastDay までの連続記録。シフトが「出勤」の日をさかのぼり、その勤務日分の出勤前・退勤前の両方がある日を数える。
+ * 「退勤前」の回答は、翌日の AC_AFTER_GRACE_HOUR 時より前なら前日の勤務日分（残業で日付をまたいだ場合）。
+ * 打刻しない管理監督者（opts.exempt）は当日23:59までの入力だけを、その日の分として数える。
+ * ※入力時刻の扱いであり、アルコールチェックの実施は必ず運転開始前（文面でもそう案内する）。
+ * 戻り値：{ n, start（連続の最初の勤務日）, end（連続の最後＝直近の勤務日） }。確認連絡を送ったかどうかは関係しない。打刻の有無も使わない。
+ * opts：{ exempt, hourOf(ts) }（hourOf はテスト用。省略時は日本時間）
+ */
+function AC_streakUpTo(d, name, lastDay, opts) {
+  opts = opts || {};
+  var sv = d.sv, toDate = d.toDate, key = AC_normalizeName(name);
+  var row = -1, current = '';
+  for (var r = 2; r < sv.length; r++) {
+    if (String(sv[r][1]).trim()) current = String(sv[r][1]).trim();
+    if (String(sv[r][2]).trim() === 'シフト' && AC_normalizeName(current) === key) { row = r; break; }
+  }
+  if (row === -1) return { n: 0, start: '', end: '' };
+  var done = {};
+  for (var i = 1; i < d.fv.length; i++) {
+    if (AC_normalizeName(d.fv[i][1]) !== key) continue;
+    var label = String(d.fv[i][2]).trim(), day = toDate(d.fv[i][0]);
+    if (!day) continue;
+    if (label === '退勤前' && !opts.exempt) {
+      var h = opts.hourOf ? opts.hourOf(d.fv[i][0]) : Number(Utilities.formatDate(d.fv[i][0], AC_TZ, 'H'));
+      if (h < AC_AFTER_GRACE_HOUR) day = AC_addDays_(day, -1);
+    }
+    (done[day] = done[day] || {})[label] = true;
+  }
+  var cols = [];
+  for (var c = 3; c < sv[1].length; c++) {
+    var day2 = toDate(sv[1][c]);
+    if (day2 && day2 <= lastDay) cols.push({ c: c, day: day2 });
+  }
+  cols.sort(function (a, b) { return a.day < b.day ? 1 : -1; });
+  var n = 0, start = '', end = '';
+  for (var j = 0; j < cols.length; j++) {
+    if (String(sv[row][cols[j].c]).trim() !== '出勤') continue;
+    var x = done[cols[j].day] || {};
+    if (x['出勤前'] && x['退勤前']) { n++; start = cols[j].day; if (!end) end = cols[j].day; } else break;
+  }
+  return { n: n, start: start, end: end };
+}
+
+/** 純粋関数：n までに達した一番大きい節目（5・10・20・30…）。無ければ0 */
+function AC_milestoneAtMost(n) {
+  if (n >= 20) return Math.floor(n / 10) * 10;
+  if (n >= 10) return 10;
+  if (n >= 5) return 5;
+  return 0;
+}
+
+/**
+ * 純粋関数：お礼を送るか。stored：前回お礼した節目 { m, start }（無ければ null）。
+ * 同じ連続（start が同じ）で、まだお礼していない節目に達していれば送る（取りこぼし・重複なし）。
+ * 初めて判定する人（stored が null）：前回の勤務日にちょうど節目に達し、従来の20時のお礼（oldThanked）が無ければ送る。
+ * 戻り値：{ send, m, store: { m, start } }
+ */
+function AC_thanksDecision(streak, stored, oldThanked) {
+  var m = AC_milestoneAtMost(streak.n);
+  if (!m) return { send: false, m: 0, store: stored && stored.start === streak.start ? stored : null };
+  if (!stored) {
+    var send = streak.n === m && !oldThanked;
+    return { send: send, m: m, store: { m: m, start: streak.start } };
+  }
+  if (stored.start !== streak.start || m > stored.m) return { send: true, m: m, store: { m: m, start: streak.start } };
+  return { send: false, m: m, store: stored };
+}
+
+/** 朝の案内の後に実行：前回の勤務日までの連続記録を確定し、節目のお礼を送る（今日出勤の人だけ。休みの人は次の出勤日の朝） */
+function AC_morningThanks_() {
+  var props = PropertiesService.getScriptProperties(), state = AC_state_();
+  var dryRun = props.getProperty('DRY_RUN') !== 'false', notifyPeople = props.getProperty('NOTIFY_EMPLOYEES') === 'true';
+  var today = AC_today_(), runKey = 'sent:' + today + ':mthanksRun';
+  if (state.getProperty(runKey)) return;
+  var d = AC_loadDay_(today);
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  var paused = AC_pausedNames(mv, AC_pauseIndex_(), today), codeMap = AC_codeByName(mv);
+  var registry = notifyPeople ? AC_loadRegistry_() : {}, tests = AC_testNames_(props, today), overrides = AC_templateOverrides_();
+  var lastDay = AC_addDays_(today, -1), sent = 0;
+  d.before.targets.forEach(function (name) {
+    var k = AC_normalizeName(name), code = codeMap[k];
+    if (!code || paused[k]) return;
+    var exempt = AC_PUNCH_EXEMPT_CODES.indexOf(code) !== -1;
+    var streak = AC_streakUpTo(d, name, lastDay, { exempt: exempt });
+    var skey = 'thanksLast:' + code, raw = state.getProperty(skey), stored = null;
+    try { stored = raw ? JSON.parse(raw) : null; } catch (e) { stored = null; }
+    var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
+    var dec = AC_thanksDecision(streak, stored, oldThanked);
+    if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
+    if (dec.send) {
+      var test = tests[k], reg = registry[k];
+      var text = AC_render(dec.m === 5 ? 'mthanks5' : dec.m === 10 ? 'mthanks10' : 'mthanksN', today, { n: streak.n }, overrides);
+      try {
+        if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て（お礼）】\n' + text);
+        else if (reg) AC_pushTo_(reg.userId, text);
+        else return;   // LINE未登録：記録を進めず、登録後の朝に送る
+        sent++;
+      } catch (e) { Logger.log('お礼の送信に失敗：社員番号%s', code); return; }
+    }
+    if (dec.store) state.setProperty(skey, JSON.stringify(dec.store)); else if (raw) state.deleteProperty(skey);
+  });
+  Logger.log('%s 連続記録のお礼：%s通', today, sent);
+  if (!dryRun) state.setProperty(runKey, new Date().toISOString());
+}
+
 // ---------------- 内部処理 ----------------
 
 /** 1回分の通知を実行する。同じ日・同じ種類は1回だけ。データ不備のときは誰にも送らず管理者へ知らせる。 */
@@ -1515,7 +1891,7 @@ function AC_dispatch_(kind) {
   if (kind === 'morning') { try { AC_refreshFormChoices_(); } catch (e) { Logger.log('フォームの選択肢の更新に失敗'); } }
   var paused = AC_pausedNames(AC_masterSheet_().getDataRange().getValues(), AC_pauseIndex_(), today);   // お休み中の人には送らない
   var people = AC_recipientsFor(kind, d).filter(function (n) { return !paused[AC_normalizeName(n)]; });
-  var thanks = (kind === 'followAfter' ? AC_thanksTargets(d) : []).filter(function (t) { return !paused[AC_normalizeName(t.name)]; });
+  var thanks = (kind === 'followAfter' && !AC_afterWorkEnabled_() ? AC_thanksTargets(d) : []).filter(function (t) { return !paused[AC_normalizeName(t.name)]; });
   state.setProperty('stat:' + today + ':' + kind, String(people.length + thanks.length));
   Logger.log('%s %s：対象 %s人／感謝 %s人（全員登録済みなら %s通）', today, kind, people.length, thanks.length,
     people.length + thanks.length);
@@ -2000,6 +2376,11 @@ var AC_TEMPLATES = {
   followBefore: ['おはようございます！😊\n\n本日の出勤前アルコールチェックについて、まだ入力が確認できていません。\n\nすでに実施済みの場合は、フォームへの入力をお願いします！\n\n未実施の場合は、運転前に必ずチェックをお願いします🚗\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL + '\n\nよろしくお願いします！'],
   evening: ['お疲れ様です！😊\n\n退勤前のアルコールチェックと、フォームへの入力をお願いします！\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL + '\n\n本日も一日お疲れ様でした！\n\nお帰りの際はお気をつけください🚗'],
   followAfter: ['お疲れ様です！😊\n\n本日の退勤前アルコールチェックについて、まだ入力が確認できていません。\n\nすでに実施済みの場合は、フォームへの入力をお願いします！\n\n未実施の場合は、運転終了後のアルコールチェックを実施してください🚗\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL + '\n\n本日も一日お疲れ様でした！'],
+  followAfterOut: ['お疲れ様です！😊\n\n退勤後のアルコールチェックがまだ確認できていません。\n\n運転を開始する前にアルコールチェックを実施し、フォームへの入力をお願いします🚗\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL],
+  followAfterWorking: ['本日もお疲れ様です😊\n\n勤務終了後、車を運転開始する前にアルコールチェックを実施し、フォームへの入力をお願いします🚗\n\n▼ アルコールチェック入力フォーム\n' + AC_ALCOHOL_FORM_URL],
+  mthanks5: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
+  mthanks10: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n今日もよろしくお願いします！'],
+  mthanksN: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
   thanks5: ['お疲れ様です！😊\n\nアルコールチェックの入力が、5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanks10: ['お疲れ様です！😊\n\nアルコールチェックの入力が、10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanksN: ['お疲れ様です！😊\n\nアルコールチェックの入力が、{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
@@ -2476,6 +2857,7 @@ function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
     if (body.type === 'tot-raw') return ContentService.createTextOutput(AC_handleTotRaw_(body));
+    if (body.type === 'tot-punch') return ContentService.createTextOutput(AC_handleTotPunch_(body));   // 退勤後の確認用（保存だけ）
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
@@ -2941,7 +3323,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

@@ -1898,10 +1898,16 @@ function AC_thanksDecision(streak, stored, oldThanked, migrating) {
 }
 
 // お礼の送信履歴（従業員マスタのファイルの「お礼送信履歴」シート）。8日で消えず、ずっと残る。
-// 区分：送信（システムが送信）／基準（再集計で確定した値。送信済みとみなす）／従来の20時（従来の仕組みでの送信・推定）
-// 翌朝のお礼は、このシートの社員番号ごとの最後の行（節目・連続の開始日）を「前回お礼した節目」として使う（重複送信しない）。
+// 区分（実際の送信と、引き継ぎ用の記録を混同しない）：
+//   送信　　　　　　　　　　　　　　：新しい仕組みが実際に送った（送信日＝送った日）
+//   引き継ぎ：送信済み　　　　　　　：切り替え前の仕組みで送ったと確認できた（送信日＝その日）
+//   引き継ぎ：送信状況未確認（再送保留）：送ったか確認できない。再送しない（送信日は空欄）
+//   テスト　　　　　　　　　　　　　：テストモードで管理者へ送ったもの（判定には使わない）
+// 未送信の節目は行を作らない（翌朝のお礼の候補になる）。
+// 翌朝のお礼は、社員番号ごとの最後の行（テストを除く）の節目・連続の開始日を「前回お礼した節目」として使い、同じ節目を二度送らない。
 var AC_THANKS_LOG_SHEET = 'お礼送信履歴';
-var AC_THANKS_LOG_HEADER = ['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '備考'];
+var AC_THANKS_LOG_HEADER = ['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '送信日', '備考'];
+var AC_THANKS_LOG_KINDS = /^(送信|引き継ぎ：送信済み|引き継ぎ：送信状況未確認（再送保留）)$/;
 
 /** 「お礼送信履歴」シート（無ければ見出しつきで作る）。読めなければ null */
 function AC_thanksLogSheet_() {
@@ -1921,7 +1927,7 @@ function AC_thanksLogIndex(rows, toDate) {
   var out = {};
   (rows || []).slice(1).forEach(function (r) {
     var code = AC_cellCode_(r[1]), m = Number(r[3]), kind = String(r[5] || '').trim();
-    if (!code || !m || !/^(送信|基準|従来の20時)$/.test(kind)) return;
+    if (!code || !m || !AC_THANKS_LOG_KINDS.test(kind)) return;
     var start = toDate && Object.prototype.toString.call(r[4]) === '[object Date]' ? toDate(r[4]) : String(r[4] || '').trim();
     out[code] = { m: m, start: start };
   });
@@ -1970,7 +1976,7 @@ function AC_morningThanks_() {
     if (streak.pending.length) { Logger.log('お礼は判定保留のため待ちます：社員番号%s（%s）', code, streak.pending.join('、')); return; }
     var skey = 'thanksLast:' + code, raw = state.getProperty(skey), stored = null;
     try { stored = raw ? JSON.parse(raw) : null; } catch (e) { stored = null; }
-    if (logIdx[code]) stored = logIdx[code];   // 送信履歴シートを優先（再集計の基準・過去の送信を含む）
+    if (logIdx[code]) stored = logIdx[code];   // 送信履歴シートを優先（引き継ぎの記録・過去の送信を含む）
     var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
     var dec = AC_thanksDecision(streak, stored, oldThanked, migrating);
     if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
@@ -1984,7 +1990,7 @@ function AC_morningThanks_() {
         sent++;
       } catch (e) { Logger.log('お礼の送信に失敗：社員番号%s', code); return; }
       if (logSheet) {
-        try { logSheet.appendRow([new Date(), "'" + code, streak.n, dec.m, streak.start, test ? 'テスト' : '送信', '']); }
+        try { logSheet.appendRow([new Date(), "'" + code, streak.n, dec.m, streak.start, test ? 'テスト' : '送信', today, '']); }
         catch (e) { Logger.log('お礼送信履歴への記録に失敗：社員番号%s', code); }
       }
     }

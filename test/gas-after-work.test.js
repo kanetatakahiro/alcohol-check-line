@@ -133,8 +133,8 @@ const streak = (fvRows, lastDay, opts = {}) => {
 
 test('連続記録：20時以降の入力もその勤務日分。日付をまたいだ残業の入力（翌朝5時より前）は前日分。確認連絡を送ったかは関係しない', () => {
   const base = [['2026-10-14', '08:00', '19:00'], ['2026-10-15', '08:00', '22:45'], ['2026-10-17', '08:00', '18:30'], ['2026-10-18', '08:00', '20:30']];
-  assert.deepEqual(streak(entries('試験 太郎', [...base, ['2026-10-19', '08:00', '00:40', '2026-10-20']]), '2026-10-19'),
-    { n: 5, start: '2026-10-14', end: '2026-10-19' });                       // 19日の退勤前を20日0:40に入力 → 19日分。公休の16日は飛ばす
+  assert.deepEqual(JSON.parse(JSON.stringify(streak(entries('試験 太郎', [...base, ['2026-10-19', '08:00', '00:40', '2026-10-20']]), '2026-10-19'))),
+    { n: 5, start: '2026-10-14', end: '2026-10-19', pending: [] });                       // 19日の退勤前を20日0:40に入力 → 19日分。公休の16日は飛ばす
   assert.equal(streak(entries('試験 太郎', [...base, ['2026-10-19', '08:00', '05:30', '2026-10-20']]), '2026-10-19').n, 0);   // 翌朝5時以降は前日分にしない
   assert.equal(streak(entries('試験 太郎', [...base, ['2026-10-19', '08:00', '04:59', '2026-10-20']]), '2026-10-19').n, 5);
   assert.equal(streak(entries('試験 太郎', [...base]), '2026-10-19').n, 0);   // 19日の退勤前が無い → 0（リセット）
@@ -151,7 +151,7 @@ test('連続記録：管理監督者の特例（打刻なし）は当日23:59ま
 
 test('お礼：節目を取りこぼさず、同じ節目は二度送らない。連続が途切れたら数え直す', () => {
   assert.deepEqual([0, 4, 5, 9, 10, 19, 20, 27, 30].map(n => X.AC_milestoneAtMost(n)), [0, 0, 5, 5, 10, 10, 20, 20, 30]);
-  const dec = (n, start, stored, old = false) => JSON.parse(JSON.stringify(X.AC_thanksDecision({ n, start }, stored, old)));
+  const dec = (n, start, stored, old = false, migrating = true) => JSON.parse(JSON.stringify(X.AC_thanksDecision({ n, start }, stored, old, migrating)));
   // 20時以降の入力で5日目を達成 → 翌朝お礼
   assert.equal(dec(5, 'S', { m: 0, start: 'S' }).send, true);
   // すでに5でお礼済み → 6日目は送らない、10日目で送る
@@ -168,6 +168,9 @@ test('お礼：節目を取りこぼさず、同じ節目は二度送らない�
   assert.equal(dec(5, 'S', null, true).send, false);
   assert.equal(dec(7, 'S', null, false).send, false);
   assert.deepEqual(dec(7, 'S', null, false).store, { m: 5, start: 'S' });
+  // 切り替え後2日目以降：記録が無い人（判定保留が解けた等）は、従来のお礼の記録が無ければ送る
+  assert.equal(dec(6, 'S', null, false, false).send, true);
+  assert.equal(dec(6, 'S', null, true, false).send, false);
 });
 
 test('トリガー：退勤後の確認は20・21・22・23時（各20分ごろ）。ほかの通知の時刻は変えない', () => {
@@ -288,6 +291,8 @@ test('翌朝のお礼（送信なし）：20時以降・日付をまたいで入
   n.setHour(8);
   // 日付の時刻はテスト用に実際の日本時間で判定する
   n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
+  n.ctx.__totR = totDays('k102', '102', [['2026-10-19', [1, '09:00'], [2, '23:55']]]);   // 19日は23:55退勤（0:30の入力は3時間以内）
+  vm.runInContext('AC_readTotLatest_ = function () { return { today: "2026-10-20", results: __totR }; };', n.ctx);
   vm.runInContext('AC_morningThanks_()', n.ctx);
   const byTo = Object.fromEntries(n.sent.map(s => [s.to, s.text]));
   assert.match(byTo[uid(2)], /前回の勤務までで5勤務日連続/);                    // 残業（19日分を20日0:30に入力）も5日連続
@@ -302,59 +307,96 @@ test('翌朝のお礼（送信なし）：20時以降・日付をまたいで入
 // ---------------- ① 日付をまたいだ入力と、実際の退勤時刻（TOT）の整合 ----------------
 const totDays = (key, code, list) => ({ employees: [emp(key, code)], timerecord: list.map(([date, ...punches]) => ({ date, dailyWorkings: [rec(key, date, ...punches)] })) });
 
-test('退勤の終わり方（TOT）：22時以降・日付をまたいだ退勤・退勤打刻なしは late、22時より前は early、データなしは unknown', () => {
-  const L = (R, day = '2026-10-19') => X.AC_lateFinish(R, '501', day);
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '23:40']]])), 'late');
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '22:00']]])), 'late');
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '21:59']]])), 'early');
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]])), 'early');
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00']], ['2026-10-20', [2, '00:20']]])), 'late');   // 0:00で日付が変わり、退勤が翌日の打刻になった場合
-  assert.equal(L(totDays('k', '501', [['2026-10-19', [1, '09:00']]])), 'late');                                // 退勤の打刻が無いまま
-  const crossSameDay = { employees: [emp('k', '501')], timerecord: [{ date: '2026-10-19', dailyWorkings: [{ employeeKey: 'k', date: '2026-10-19', timeRecord: [{ code: '1', time: '2026-10-19T09:00:00+09:00' }, { code: '2', time: '2026-10-20T00:30:00+09:00' }] }] }] };
-  assert.equal(L(crossSameDay), 'late');                                                                         // 前日の勤務として0:30の退勤が付いている場合
-  assert.equal(L(totDays('k', '501', [['2026-10-18', [1, '09:00'], [2, '18:00']]])), 'unknown');              // その日の打刻なし
-  assert.equal(L(null), 'unknown');
-  assert.equal(X.AC_lateFinish(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]]), '', '2026-10-19'), 'unknown');   // TOTコードなし
+test('深夜の入力（0〜5時の「退勤前」）：実際の退勤時刻から3時間以内なら前日分、過ぎていれば数えない。退勤打刻なし・データなしは判定保留', () => {
+  const C = (R, entry, { ok = true, tot = '501' } = {}) => X.AC_crossEntryCheck(R, ok, tot, '2026-10-19', ts('2026-10-20', entry));
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '23:40']]]), '00:30'), 'ok');    // 残業で遅く退勤
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '21:30']]]), '00:20'), 'ok');    // 22時前の退勤でも3時間以内なら数える
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '21:30']]]), '00:31'), 'ng');    // 3時間を過ぎた
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]]), '00:30'), 'ng');    // 遅れた入力
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00']], ['2026-10-20', [2, '00:20']]]), '00:40'), 'ok');   // 退勤が0時を過ぎ、翌日の打刻になった場合
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00']], ['2026-10-20', [2, '00:20']]]), '00:10'), 'ok');   // 退勤打刻の前の入力も前日分
+  const crossSameDay = { employees: [emp('k', '501')], timerecord: [{ date: '2026-10-19', dailyWorkings: [{ employeeKey: 'k', date: '2026-10-19', timeRecord: [{ code: '1', time: '2026-10-19T09:00:00+09:00' }, { code: '2', time: '2026-10-20T01:10:00+09:00' }] }] }] };
+  assert.equal(C(crossSameDay, '01:30'), 'ok');                                                                     // 前日の勤務に1:10の退勤が付いている場合
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00']]]), '00:30'), 'noOut');                        // 退勤打刻なし → 保留
+  assert.equal(C(totDays('k', '501', [['2026-10-18', [1, '09:00'], [2, '18:00']]]), '00:30'), 'noOut');          // その日の打刻なし → 保留
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']], ['2026-10-20', [1, '09:00']]]), '00:30'), 'ng');   // 翌日の出勤は混ぜない
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '23:40']]]), '00:30', { ok: false }), 'noData');   // 今朝のデータでない
+  assert.equal(C(null, '00:30'), 'noData');
+  assert.equal(C(totDays('k', '999', [['2026-10-19', [1, '09:00'], [2, '23:40']]]), '00:30'), 'noData');    // TOTにいない
+  assert.equal(C(totDays('k', '501', [['2026-10-19', [1, '09:00'], [2, '18:00']]]), '00:30', { tot: '' }), 'noTot');   // TOTコードなし
 });
 
-test('連続記録：0〜5時の「退勤前」は、前日の退勤が22時以降・日付をまたいだと確認できたときだけ前日分（22時より前に退勤なら数えない）', () => {
+test('連続記録：前日分（ok）は数える、遅れた入力（ng）は数えない、判定保留（pending）は数えないが途切れさせない', () => {
   const base = [['2026-10-14', '08:00', '19:00'], ['2026-10-15', '08:00', '19:00'], ['2026-10-17', '08:00', '19:00'], ['2026-10-18', '08:00', '19:00']];
   const fv = entries('試験 太郎', [...base, ['2026-10-19', '08:00', '00:30', '2026-10-20']]);
-  assert.equal(streak(fv, '2026-10-19', { lateOk: () => true }).n, 5);    // 残業で日付をまたいだ（または確認できない）→ 前日分
-  assert.equal(streak(fv, '2026-10-19', { lateOk: () => false }).n, 0);   // 22時より前に退勤していた → 遅れた入力として数えない
+  assert.equal(streak(fv, '2026-10-19', { crossCheck: () => 'ok' }).n, 5);
+  assert.equal(streak(fv, '2026-10-19', { crossCheck: () => 'ng' }).n, 0);
+  const p = streak(fv, '2026-10-19', { crossCheck: () => 'pending' });
+  assert.equal(p.n, 4);                                                    // 19日は数えないが、14〜18日の連続は続く
+  assert.deepEqual(Array.from(p.pending), ['2026-10-19']);
   const asked = [];
-  streak(fv, '2026-10-19', { lateOk: d => { asked.push(d); return true; } });
-  assert.deepEqual(asked, ['2026-10-19']);                                // 0時以降の入力だけ、前日の退勤を確かめる
+  streak(fv, '2026-10-19', { crossCheck: (d, t) => { asked.push([d, toDate(t)]); return 'ok'; } });
+  assert.deepEqual(asked, [['2026-10-19', '2026-10-20']]);               // 0時以降の「退勤前」の入力だけを確かめる
 });
 
 // 朝のお礼を、TOTデータ（朝7:05の tot-latest.json）つきで、送信せずに確認する
-const morning = ({ fv, sv, totR, extraMaster = [] }) => {
-  const m = [...master, ...extraMaster];
-  const n = night({ master: m, shifts: sv, form: fv, punchFor: () => null });
+const morning = ({ fv, sv, totR, today = '2026-10-20', totToday, user = {} }) => {
+  const n = night({ today, master, shifts: sv, form: fv, punchFor: () => null });
+  Object.assign(n.user, user);
   n.ctx.Utilities.formatDate = (d, tz, f) => (f === 'H' ? String(jstHour(d)) : toDate(d));
-  n.ctx.__totR = totR;
-  vm.runInContext('AC_readTotLatest_ = function () { return __totR ? { results: __totR } : null; };', n.ctx);
+  n.ctx.__totR = totR; n.ctx.__totToday = totToday || today;
+  vm.runInContext('AC_readTotLatest_ = function () { return __totR ? { today: __totToday, results: __totR } : null; };', n.ctx);
+  vm.runInContext('AC_morningThanks_()', n.ctx);
   return n;
 };
 const days6 = ['2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18', '2026-10-19', '2026-10-20'];
 const work5 = [['2026-10-15', '08:00', '19:00'], ['2026-10-16', '08:00', '19:00'], ['2026-10-17', '08:00', '19:00'], ['2026-10-18', '08:00', '19:00']];
+const sv6 = sheet(days6, [['試験 残業', Array(6).fill('出勤')]]);
+const fvLate = (hm = '00:30') => [['ts', '氏名', '区分', '結果'], ...entries('試験 残業', [...work5, ['2026-10-19', '08:00', hm, '2026-10-20'], ['2026-10-20', '08:00', '']])];
+const out19 = (hm, extra = []) => totDays('k102', '102', [['2026-10-19', [1, '09:00'], ...(hm ? [[2, hm]] : [])], ...extra]);
 
-test('翌朝のお礼（送信なし）：前日の退勤が23:40なら0:30の入力で5日連続のお礼。退勤が18:00なら0:30の入力は数えずお礼なし。判定は記録して後から変えない', () => {
-  const sv = sheet(days6, [['試験 残業', Array(6).fill('出勤')]]);
-  const fv = [['ts', '氏名', '区分', '結果'], ...entries('試験 残業', [...work5, ['2026-10-19', '08:00', '00:30', '2026-10-20'], ['2026-10-20', '08:00', '']])];
-  const late = morning({ sv, fv, totR: totDays('k102', '102', [['2026-10-19', [1, '09:00'], [2, '23:40']]]) });
-  vm.runInContext('AC_morningThanks_()', late.ctx);
-  assert.equal(late.sent.length, 1);
-  assert.match(late.sent[0].text, /5勤務日連続/);
-  assert.equal(late.user['late:10102:2026-10-19'], 'ok');
-  const early = morning({ sv, fv, totR: totDays('k102', '102', [['2026-10-19', [1, '09:00'], [2, '18:00']]]) });
-  vm.runInContext('AC_morningThanks_()', early.ctx);
-  assert.equal(early.sent.length, 0);
-  assert.equal(early.user['late:10102:2026-10-19'], 'ng');
-  const none = morning({ sv, fv, totR: null });                          // TOTデータが無い朝は不利にしない
-  vm.runInContext('AC_morningThanks_()', none.ctx);
-  assert.equal(none.sent.length, 1);
-  assert.equal(none.user['late:10102:2026-10-19'], undefined);          // 確認できないときは記録しない（次の朝に判定）
+test('翌朝のお礼（送信なし）：実際の退勤時刻を優先。23:40退勤・0:30入力 → お礼／21:30退勤・0:20入力 → お礼／18:00退勤・0:30入力 → 数えない', () => {
+  const a = morning({ sv: sv6, fv: fvLate('00:30'), totR: out19('23:40') });
+  assert.equal(a.sent.length, 1);
+  assert.match(a.sent[0].text, /5勤務日連続/);
+  assert.equal(a.user['late:10102:2026-10-19'], 'ok');                  // 決まった判定は記録（後から変えない）
+  const b = morning({ sv: sv6, fv: fvLate('00:20'), totR: out19('21:30') });
+  assert.equal(b.sent.length, 1);
+  const c = morning({ sv: sv6, fv: fvLate('00:30'), totR: out19('18:00') });
+  assert.equal(c.sent.length, 0);
+  assert.equal(c.user['late:10102:2026-10-19'], 'ng');
+});
+
+test('翌朝のお礼（送信なし）：退勤打刻なし → 判定保留（リセットせず、お礼は待つ）→ 打刻が直った朝に自動で判定してお礼', () => {
+  const a = morning({ sv: sv6, fv: fvLate(), totR: out19('') });
+  assert.equal(a.sent.length, 0);
+  assert.equal(a.user['late:10102:2026-10-19'], undefined);             // 保留は記録しない（毎朝見直す）
+  assert.equal(a.user['thanksLast:10102'], undefined);                  // お礼の記録も進めない
+  assert.ok(a.logs.some(l => /判定保留のため待ちます/.test(l)));
+  // 翌朝：本人の申請で退勤が23:30に直っていた
+  const sv7 = sheet([...days6, '2026-10-21'], [['試験 残業', Array(7).fill('出勤')]]);
+  const fv7 = [...fvLate(), [ts('2026-10-20', '19:00'), '試験 残業', '退勤前', 'x'], [ts('2026-10-21', '08:00'), '試験 残業', '出勤前', 'x']];
+  const b = morning({ today: '2026-10-21', sv: sv7, fv: fv7, user: a.user, totR: out19('23:30', [['2026-10-20', [1, '09:00'], [2, '18:30']]]) });
+  assert.equal(b.sent.length, 1);
+  assert.match(b.sent[0].text, /6勤務日連続/);                          // 19日も数えて、15〜20日の6日連続
+});
+
+test('翌朝のお礼（送信なし）：TOTのデータが取れない・古い朝は判定保留（途切れさせない）。期限（7日）を過ぎたら、TOTの不具合なら数える／打刻が直らないままなら数えない', () => {
+  const none = morning({ sv: sv6, fv: fvLate(), totR: null });
+  assert.equal(none.sent.length, 0);
+  assert.equal(none.user['late:10102:2026-10-19'], undefined);
+  const old = morning({ sv: sv6, fv: fvLate(), totR: out19('23:40'), totToday: '2026-10-19' });   // 7:05の取得に失敗し、前日のデータのまま
+  assert.equal(old.sent.length, 0);
+  // 期限切れ（10/27の朝）
+  const days = [...days6, '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26', '2026-10-27'];
+  const sv = sheet(days, [['試験 残業', [...Array(6).fill('出勤'), ...Array(6).fill('公休'), '出勤']]]);
+  const fv = [...fvLate(), [ts('2026-10-20', '19:00'), '試験 残業', '退勤前', 'x'], [ts('2026-10-27', '08:00'), '試験 残業', '出勤前', 'x']];
+  const sysFail = morning({ today: '2026-10-27', sv, fv, totR: null, user: { 'mthanks:init': '2026-10-20' } });
+  assert.equal(sysFail.user['late:10102:2026-10-19'], 'ok');            // TOTの不具合 → 数える（不利にしない）
+  assert.match(sysFail.sent[0].text, /6勤務日連続/);
+  const noFix = morning({ today: '2026-10-27', sv, fv, totR: out19(''), user: { 'mthanks:init': '2026-10-20' } });
+  assert.equal(noFix.user['late:10102:2026-10-19'], 'ng');              // 退勤打刻が直らないまま → 数えない
+  assert.equal(noFix.sent.length, 0);                                   // 20日の1日だけ（節目に届かない）
 });
 
 // ---------------- ② 管理監督者（10015）：20時の確認連絡のあと、当日23:59までの入力で連続記録とお礼を維持 ----------------

@@ -1752,11 +1752,12 @@ function AC_afterWorkAdminMessage(today, hour, total, plan, registry, failed) {
 /**
  * 純粋関数：lastDay までの連続記録。シフトが「出勤」の日をさかのぼり、その勤務日分の出勤前・退勤前の両方がある日を数える。
  * 「退勤前」の回答は、翌日の AC_AFTER_GRACE_HOUR 時より前なら前日の勤務日分（残業で日付をまたいだ場合）。
- * ただし opts.lateOk(前日) が false（TOTで前日は22時より前に退勤と確認できた）なら、前日分にもその日の分にもしない。
+ * そのとき opts.crossCheck(前日, 入力時刻) で実際の退勤時刻と照らす：'ok' 前日分／'ng' 数えない／'pending' 判定保留（数えないが途切れさせない）。
  * 打刻しない管理監督者（opts.exempt）は当日23:59までの入力だけを、その日の分として数える。
  * ※入力時刻の扱いであり、アルコールチェックの実施は必ず運転開始前（文面でもそう案内する）。
- * 戻り値：{ n, start（連続の最初の勤務日）, end（連続の最後＝直近の勤務日） }。確認連絡を送ったかどうかは関係しない。打刻の有無も使わない。
- * opts：{ exempt, lateOk(day), hourOf(ts) }（hourOf はテスト用。省略時は日本時間）
+ * 戻り値：{ n, start（連続の最初の勤務日）, end（連続の最後＝直近の勤務日）, pending }。確認連絡を送ったかどうかは関係しない。打刻の有無も使わない。
+ * opts：{ exempt, crossCheck(day, ts), hourOf(ts) }（hourOf はテスト用。省略時は日本時間）
+ * 戻り値の pending：判定保留の勤務日（連続の途中にあっても途切れさせない。保留がある間はお礼を待つ）
  */
 function AC_streakUpTo(d, name, lastDay, opts) {
   opts = opts || {};
@@ -1776,8 +1777,10 @@ function AC_streakUpTo(d, name, lastDay, opts) {
       var h = opts.hourOf ? opts.hourOf(d.fv[i][0]) : Number(Utilities.formatDate(d.fv[i][0], AC_TZ, 'H'));
       if (h < AC_AFTER_GRACE_HOUR) {
         var prev = AC_addDays_(day, -1);
-        // 前日の退勤が22時以降・日付をまたいだと確認できたときだけ前日分。22時より前に退勤していたら、遅れた入力として数えない
-        if (opts.lateOk && !opts.lateOk(prev)) continue;
+        // 実際の退勤時刻と照らす：ok → 前日分／ng → 数えない（遅れた入力）／pending → 判定保留（途切れさせず、お礼も待つ）
+        var v = opts.crossCheck ? opts.crossCheck(prev, d.fv[i][0]) : 'ok';
+        if (v === 'ng') continue;
+        if (v === 'pending') { (done[prev] = done[prev] || {}).pending = true; continue; }
         day = prev;
       }
     }
@@ -1789,43 +1792,55 @@ function AC_streakUpTo(d, name, lastDay, opts) {
     if (day2 && day2 <= lastDay) cols.push({ c: c, day: day2 });
   }
   cols.sort(function (a, b) { return a.day < b.day ? 1 : -1; });
-  var n = 0, start = '', end = '';
+  var n = 0, start = '', end = '', pending = [];
   for (var j = 0; j < cols.length; j++) {
     if (String(sv[row][cols[j].c]).trim() !== '出勤') continue;
     var x = done[cols[j].day] || {};
-    if (x['出勤前'] && x['退勤前']) { n++; start = cols[j].day; if (!end) end = cols[j].day; } else break;
+    if (x['出勤前'] && x['退勤前']) { n++; start = cols[j].day; if (!end) end = cols[j].day; }
+    else if (x['出勤前'] && x.pending) pending.push(cols[j].day);   // 判定保留の日：数えないが、途切れさせない
+    else break;
   }
-  return { n: n, start: start, end: end };
+  return { n: n, start: start, end: end, pending: pending };
 }
 
-var AC_LATE_FINISH_HOUR = 22;   // 前日の退勤がこの時刻以降（または日付をまたいだ）と確認できたときだけ、0〜5時の「退勤前」の入力を前日分にする
+var AC_CROSS_INPUT_HOURS = 3;   // 実際の退勤時刻から何時間以内の入力を、その勤務日分として数えるか（0〜5時の「退勤前」の入力に使う）
+var AC_PENDING_DAYS = 7;        // 判定保留にできる日数（TOTのデータは朝7:05に過去7日分を取得。打刻の修正が反映されれば自動で決まる）
 
 /**
- * 純粋関数：その人の勤務日 day の終わり方（TOTの打刻。朝7:05に取得した tot-latest.json の results を使う）。
- *  late：退勤が22時以降／日付をまたいで退勤（翌日の0〜5時に退勤の打刻）／退勤の打刻が無いまま（勤務が続いた・打ち忘れ）
- *  early：22時より前に退勤（0時を過ぎてからの入力は前日分にしない＝遅れた入力）
- *  unknown：データが無い・TOTコードが無い・その日の打刻が無い（不利にしない）
+ * 純粋関数：0〜5時に入力された「退勤前」（entryTs）を、前日の勤務日 day の分として数えるか。実際の退勤時刻を優先して決める。
+ * R：朝7:05に取得したTOTデータ（tot-latest.json の results）。dataOk：R が今朝のデータで day を含むか。
+ *  ok：前日の退勤（日付をまたいだ退勤を含む）から AC_CROSS_INPUT_HOURS 時間以内の入力 → 前日分として数える
+ *  ng：前日の退勤から AC_CROSS_INPUT_HOURS 時間を過ぎた入力 → 遅れた入力として数えない
+ *  noOut：前日の退勤打刻が無い → 判定保留（打刻の修正を待つ）
+ *  noData：TOTのデータが無い・古い・取得失敗 → 判定保留（システムの都合で途切れさせない）
+ *  noTot：TOTコードが無い（打刻で判定できない人）→ 5時までの入力を前日分として数える（従来のルール）
  */
-function AC_lateFinish(R, tot, day) {
-  if (!R || !Array.isArray(R.employees) || !Array.isArray(R.timerecord)) return 'unknown';
-  var key = null, want = AC_totKey(tot);
-  if (!want) return 'unknown';
+function AC_crossEntryCheck(R, dataOk, tot, day, entryTs) {
+  var want = AC_totKey(tot);
+  if (!want) return 'noTot';
+  if (!dataOk || !R || !Array.isArray(R.employees) || !Array.isArray(R.timerecord)) return 'noData';
+  var key = null;
   R.employees.forEach(function (e) { if (e && AC_totKey(e.code) === want) key = e.key; });
-  if (!key) return 'unknown';
-  var next = AC_addDays_(day, 1), byDate = {};
+  if (!key) return 'noData';
+  var next = AC_addDays_(day, 1), recs = [];
   AC_totFlat_(R.timerecord).forEach(function (t) {
     if (t.employeeKey !== key || (t.date !== day && t.date !== next)) return;
-    byDate[t.date] = (byDate[t.date] || []).concat((t.timeRecord || []).filter(function (r) { return String(r.code) === '1' || String(r.code) === '2'; }));
+    (t.timeRecord || []).forEach(function (r) {
+      var c = String(r.code), tm = String(r.time || '');
+      if (c !== '1' && c !== '2') return;
+      if (t.date === next && tm >= next + 'T' + (AC_AFTER_GRACE_HOUR < 10 ? '0' : '') + AC_AFTER_GRACE_HOUR + ':00') return;   // 翌日5時以降は翌日の勤務
+      recs.push({ code: c, time: tm });
+    });
   });
-  var sort = function (a) { return a.slice().sort(function (x, y) { return String(x.time) < String(y.time) ? -1 : String(x.time) > String(y.time) ? 1 : 0; }); };
-  var recs = sort(byDate[day] || []);
-  if (!recs.length) return 'unknown';
-  var last = recs[recs.length - 1];
-  if (String(last.code) === '2') {
-    var t = String(last.time || '');
-    return t >= day + 'T' + (AC_LATE_FINISH_HOUR < 10 ? '0' : '') + AC_LATE_FINISH_HOUR + ':00' ? 'late' : 'early';   // 翌日の日付の時刻（日またぎ）も late
-  }
-  return 'late';   // 出勤の打刻が最後（日付をまたいで勤務、または退勤の打ち忘れ）。翌日の0〜5時の退勤の打刻もここに含まれる
+  recs.sort(function (x, y) { return x.time < y.time ? -1 : x.time > y.time ? 1 : 0; });
+  var dayRecs = recs.filter(function (r) { return r.time < next + 'T00:00'; });
+  if (!dayRecs.length) return 'noOut';          // その日の打刻が無い（打ち忘れ）→ 保留
+  var out = null;
+  recs.forEach(function (r) { if (r.code === '2') out = r; });
+  if (!out || recs[recs.length - 1].code !== '2') return 'noOut';   // 最後が出勤（退勤の打ち忘れ・まだ修正されていない）→ 保留
+  var outMs = Date.parse(out.time), entryMs = entryTs instanceof Date || Object.prototype.toString.call(entryTs) === '[object Date]' ? entryTs.getTime() : Date.parse(entryTs);
+  if (isNaN(outMs) || isNaN(entryMs)) return 'noData';
+  return entryMs <= outMs + AC_CROSS_INPUT_HOURS * 3600000 ? 'ok' : 'ng';   // 退勤前の入力（勤務中の入力）も前日分
 }
 
 /** 純粋関数：n までに達した一番大きい節目（5・10・20・30…）。無ければ0 */
@@ -1839,14 +1854,16 @@ function AC_milestoneAtMost(n) {
 /**
  * 純粋関数：お礼を送るか。stored：前回お礼した節目 { m, start }（無ければ null）。
  * 同じ連続（start が同じ）で、まだお礼していない節目に達していれば送る（取りこぼし・重複なし）。
- * 初めて判定する人（stored が null）：前回の勤務日にちょうど節目に達し、従来の20時のお礼（oldThanked）が無ければ送る。
+ * 記録が無い人（stored が null）：切り替え後の最初の朝（migrating）は、前回の勤務日にちょうど節目に達し、従来の20時のお礼（oldThanked）が無ければ送る。
+ * それ以降の朝は、従来のお礼の記録が無ければ送る（判定保留が解けた後など）。
  * 戻り値：{ send, m, store: { m, start } }
  */
-function AC_thanksDecision(streak, stored, oldThanked) {
+function AC_thanksDecision(streak, stored, oldThanked, migrating) {
   var m = AC_milestoneAtMost(streak.n);
   if (!m) return { send: false, m: 0, store: stored && stored.start === streak.start ? stored : null };
   if (!stored) {
-    var send = streak.n === m && !oldThanked;
+    // 切り替え後の最初の朝（migrating）：節目を過ぎている人は従来の20時にお礼済みとみなす。それ以降は、従来のお礼の記録が無ければ送る
+    var send = migrating ? streak.n === m && !oldThanked : !oldThanked;
     return { send: send, m: m, store: { m: m, start: streak.start } };
   }
   if (stored.start !== streak.start || m > stored.m) return { send: true, m: m, store: { m: m, start: streak.start } };
@@ -1864,31 +1881,38 @@ function AC_morningThanks_() {
   var paused = AC_pausedNames(mv, AC_pauseIndex_(), today), codeMap = AC_codeByName(mv), totMap = AC_totByCode(mv);
   var registry = notifyPeople ? AC_loadRegistry_() : {}, tests = AC_testNames_(props, today), overrides = AC_templateOverrides_();
   var lastDay = AC_addDays_(today, -1), sent = 0;
+  var migrating = !state.getProperty('mthanks:init');   // 切り替え後の最初の朝
   var totLatest = null;
   try { totLatest = AC_readTotLatest_(); } catch (e) { Logger.log('TOTデータの読み込みに失敗（日付をまたいだ入力は不利にしない）'); }
   var totR = totLatest && totLatest.results;
+  var totOk = !!totLatest && totLatest.today === today && !!totR;   // 今朝（7:05）のデータだけを使う。古ければ判定保留
   d.before.targets.forEach(function (name) {
     var k = AC_normalizeName(name), code = codeMap[k];
     if (!code || paused[k]) return;
     var exempt = AC_PUNCH_EXEMPT_CODES.indexOf(code) !== -1;
     var tot = totMap[code];
-    var lateOk = function (day) {   // 判定は一度決めたら記録し、後から変わらないようにする（TOTで確認できない日は不利にしない）
+    var crossCheck = function (day, ts) {   // 決まった判定は記録して後から変えない。保留は毎朝見直し、AC_PENDING_DAYS 日を過ぎたら自動で決める
       var lk = 'late:' + code + ':' + day, v = state.getProperty(lk);
-      if (v) return v === 'ok';
-      var st = AC_lateFinish(totR, tot, day);
-      if (st === 'unknown') return true;
-      if (!dryRun) state.setProperty(lk, st === 'late' ? 'ok' : 'ng');
-      return st === 'late';
+      if (v) return v;
+      var st = AC_crossEntryCheck(totR, totOk, tot, day, ts);
+      var res = st === 'ok' || st === 'noTot' ? 'ok' : st === 'ng' ? 'ng' : 'pending';
+      if (res === 'pending' && AC_addDays_(day, AC_PENDING_DAYS) < today) {
+        res = st === 'noData' ? 'ok' : 'ng';   // 期限切れ：TOTの不具合なら数える（不利にしない）／退勤の打刻が直されないままなら数えない
+        Logger.log('判定保留の期限切れ：社員番号%s %s → %s（%s）', code, day, res === 'ok' ? '数える' : '数えない', st);
+      }
+      if (res !== 'pending' && !dryRun) state.setProperty(lk, res);
+      return res;
     };
-    var streak = AC_streakUpTo(d, name, lastDay, { exempt: exempt, lateOk: lateOk });
+    var streak = AC_streakUpTo(d, name, lastDay, { exempt: exempt, crossCheck: crossCheck });
+    if (streak.pending.length) { Logger.log('お礼は判定保留のため待ちます：社員番号%s（%s）', code, streak.pending.join('、')); return; }
     var skey = 'thanksLast:' + code, raw = state.getProperty(skey), stored = null;
     try { stored = raw ? JSON.parse(raw) : null; } catch (e) { stored = null; }
     var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
-    var dec = AC_thanksDecision(streak, stored, oldThanked);
+    var dec = AC_thanksDecision(streak, stored, oldThanked, migrating);
     if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
     if (dec.send) {
       var test = tests[k], reg = registry[k];
-      var text = AC_render(dec.m === 5 ? 'mthanks5' : dec.m === 10 ? 'mthanks10' : 'mthanksN', today, { n: streak.n }, overrides);
+      var text = AC_render(streak.n === 5 ? 'mthanks5' : streak.n === 10 ? 'mthanks10' : 'mthanksN', today, { n: streak.n }, overrides);   // 文面の日数は実際の連続日数
       try {
         if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て（お礼）】\n' + text);
         else if (reg) AC_pushTo_(reg.userId, text);
@@ -1899,7 +1923,7 @@ function AC_morningThanks_() {
     if (dec.store) state.setProperty(skey, JSON.stringify(dec.store)); else if (raw) state.deleteProperty(skey);
   });
   Logger.log('%s 連続記録のお礼：%s通', today, sent);
-  if (!dryRun) state.setProperty(runKey, new Date().toISOString());
+  if (!dryRun) { state.setProperty(runKey, new Date().toISOString()); if (migrating) state.setProperty('mthanks:init', today); }
 }
 
 // ---------------- 内部処理 ----------------
@@ -3372,7 +3396,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_lateFinish: AC_lateFinish, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_crossEntryCheck: AC_crossEntryCheck, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

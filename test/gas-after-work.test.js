@@ -669,3 +669,33 @@ test('15日の確実な送信（送信なし）：連続が続いていれば15�
   assert.equal(b.sent.length, 1);
   assert.match(b.sent[0].text, /15勤務日連続となっていました！🎉\nお知らせが遅くなりましたが、毎日欠かさず継続していただき/);
 });
+
+// ---------------- 旧システムの送信が確認できない10日（10/20・10/21達成）：再送保留で重複送信しない ----------------
+test('再送保留（送信なし）：10日を「送信状況未確認（再送保留）」で引き継いだ人は、11〜14日では送らず、15日で初めて送る', () => {
+  const log = [LOGHEAD, ['x', "'10102", 10, 10, '2026-10-06', '引き継ぎ：送信状況未確認（再送保留）', '', '10/20達成・旧システムの送信を確認できず']];
+  const sentAt = [];
+  for (let k = 10; k <= 15; k++) {
+    const dd = workDays('2026-10-06', k), today = workDays('2026-10-06', k + 1)[k];
+    if (runThanks({ days: dd, fvRows: entries('試験 残業', dd.map(x => [x, '08:00', '19:00'])), log, today }).sent.length) sentAt.push(k);
+  }
+  assert.deepEqual(sentAt, [15]);                                     // 10日は再送しない
+  assert.deepEqual(log.slice(1).map(r => [r[3], r[5]]), [[10, '引き継ぎ：送信状況未確認（再送保留）'], [15, '送信']]);
+});
+
+test('引き継ぎと通常のお礼が同じ朝に重なったら1通だけ：引き継ぎを先に送り、通常のお礼は翌朝。どちらも二重には送らない', () => {
+  // 旧い連続（開始10/1）の10日が未送信のまま途切れ、新しい連続（開始10/13）が5日に達した
+  const old = workDays('2026-10-01', 10), fresh = workDays('2026-10-13', 5);
+  const days = [...old, '2026-10-11', '2026-10-12', ...fresh];
+  const fvRows = [...entries('試験 残業', old.map(d => [d, '08:00', '19:00'])), [ts('2026-10-11', '08:00'), '試験 残業', '出勤前', 'x'], ...entries('試験 残業', fresh.map(d => [d, '08:00', '19:00']))];
+  const log = [LOGHEAD, ['x', "'10102", 10, 10, '2026-10-01', '引き継ぎ：未送信（次回送信）', '', '']];
+  const a = runThanks({ days: days.filter(d => d !== '2026-10-12'), fvRows, log, today: '2026-10-18' });
+  assert.equal(a.sent.length, 1);
+  assert.match(a.sent[0].text, /10勤務日連続となっていました/);       // 引き継ぎを先に
+  const days2 = [...days.filter(d => d !== '2026-10-12'), '2026-10-18'];
+  const b = runThanks({ days: days2, fvRows: [...fvRows, ...entries('試験 残業', [['2026-10-18', '08:00', '19:00']])], log, today: '2026-10-19' });
+  assert.equal(b.sent.length, 1);
+  assert.match(b.sent[0].text, /前回の勤務までで6勤務日連続/);         // 翌朝に通常のお礼（新しい連続の5日の節目）
+  const c = runThanks({ days: days2, fvRows: [...fvRows, ...entries('試験 残業', [['2026-10-18', '08:00', '19:00']])], log, today: '2026-10-19' });
+  assert.equal(c.sent.length, 0);                                     // 二重には送らない
+  assert.deepEqual(log.slice(1).map(r => [r[3], r[4], r[5]]), [[10, '2026-10-01', '引き継ぎ：未送信（次回送信）'], [10, '2026-10-01', '送信'], [5, '2026-10-13', '送信']]);   // 履歴の節目は5（6日目の朝に送った）
+});

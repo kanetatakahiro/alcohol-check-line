@@ -2024,7 +2024,11 @@ function AC_morningThanks_() {
     var oldThanked = !!streak.end && !!state.getProperty('sent:' + streak.end + ':thanks:' + code);   // 従来の20時のお礼（移行時の重複防止）
     var dec = AC_thanksDecision(streak, stored, oldThanked, migrating);
     if (dec.send && logKeys[code + '|' + streak.start + '|' + dec.m]) { dec.send = false; Logger.log('送信履歴にあるため送りません：社員番号%s（%s日・開始%s）', code, dec.m, streak.start); }   // 社員番号＋開始日＋節目で二重送信を防ぐ
-    if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); return; }
+    // 引き継ぎの未送信分：今朝の通常のお礼で済まないものがあれば、そちらを先に送り、通常のお礼は翌朝に回す（同じ朝に2通送らない）
+    var carry = (carryAll[code] || []).filter(function (c) { return !(dec.send && streak.start === c.start && dec.m >= c.m); });
+    if (carry.length && dec.send) { dec.send = false; dec.store = stored; Logger.log('引き継ぎのお礼を先に送るため、通常のお礼は翌朝に回します：社員番号%s', code); }
+    if (carry.length > 1) carry = [carry.reduce(function (a, b) { return b.m > a.m ? b : a; })];   // 引き継ぎが複数あっても1通（大きい節目）
+    if (dryRun) { if (dec.send) Logger.log('お礼の予定：社員番号%s（%s勤務日連続）', code, streak.n); carry.forEach(function (c) { Logger.log('引き継ぎのお礼の予定：社員番号%s（%s日）', code, c.m); }); return; }
     if (dec.send) {
       var test = tests[k], reg = registry[k];
       var text = AC_render(AC_mthanksKey(streak.n, dec.m), today, { n: streak.n }, overrides);   // 文面の日数は実際の連続日数
@@ -2040,8 +2044,7 @@ function AC_morningThanks_() {
       }
     }
     if (dec.store) state.setProperty(skey, JSON.stringify(dec.store)); else if (raw) state.deleteProperty(skey);
-    // 引き継ぎの未送信分：今朝の通常のお礼で済まなかったものを、1回だけ送る（今の連続が途切れていても送る）
-    var carry = (carryAll[code] || []).filter(function (c) { return !(dec.send && streak.start === c.start && dec.m >= c.m); });
+    // 引き継ぎの未送信分を1回だけ送る（今の連続が途切れていても送る）
     carry.forEach(function (c) {
       var test2 = tests[k], reg2 = registry[k];
       var text2 = AC_render(c.m === 15 ? 'mthanksCarry15' : 'mthanksCarry', today, { n: c.m }, overrides);   // 15日は特別な文面
@@ -2050,7 +2053,7 @@ function AC_morningThanks_() {
         else if (reg2) AC_pushTo_(reg2.userId, text2);
         else return;
         sent++;
-        if (logSheet) logSheet.appendRow([new Date(), "'" + code, c.m, c.m, c.start, test2 ? 'テスト' : '送信', today, '引き継ぎの未送信分']);
+        if (logSheet) logSheet.appendRow([new Date(), "'" + code, c.m, c.m, c.start, test2 ? 'テスト' : '送信', today, '引き継ぎの未送信分']);   // 同じ開始日の小さい節目の引き継ぎもこれで済みになる
       } catch (e) { Logger.log('引き継ぎのお礼の送信に失敗：社員番号%s', code); }
     });
   });

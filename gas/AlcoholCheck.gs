@@ -1907,12 +1907,37 @@ function AC_thanksDecision(streak, stored, oldThanked, migrating) {
 //   送信　　　　　　　　　　　　　　：新しい仕組みが実際に送った（送信日＝送った日）
 //   引き継ぎ：送信済み　　　　　　　：切り替え前の仕組みで送ったと確認できた（送信日＝その日）
 //   引き継ぎ：送信状況未確認（再送保留）：送ったか確認できない。再送しない（送信日は空欄）
+//   引き継ぎ：未送信（次回送信）　　：切り替え前に達成したが送っていないと確認できた。今の連続が途切れていても、次の出勤日の朝に1回送る
 //   テスト　　　　　　　　　　　　　：テストモードで管理者へ送ったもの（判定には使わない）
-// 未送信の節目は行を作らない（翌朝のお礼の候補になる）。
+// 「引き継ぎ：未送信（次回送信）」は、同じ社員番号・連続の開始日で、その節目以上の「送信」の行ができた時点で済みとする。
 // 翌朝のお礼は、社員番号ごとの最後の行（テストを除く）の節目・連続の開始日を「前回お礼した節目」として使い、同じ節目を二度送らない。
 var AC_THANKS_LOG_SHEET = 'お礼送信履歴';
 var AC_THANKS_LOG_HEADER = ['記録日時', '社員番号', '連続日数', '節目', '連続の開始日', '区分', '送信日', '備考'];
 var AC_THANKS_LOG_KINDS = /^(送信|引き継ぎ：送信済み|引き継ぎ：送信状況未確認（再送保留）)$/;
+var AC_THANKS_CARRY_KIND = '引き継ぎ：未送信（次回送信）';
+
+/**
+ * 純粋関数：まだ送っていない引き継ぎのお礼（社員番号ごと）。[{ m, start }]
+ * 同じ社員番号・連続の開始日で、その節目以上の「送信」の行があれば済み。
+ */
+function AC_thanksCarryOver(rows, toDate) {
+  var sent = {}, carry = {};
+  var str = function (v) { return toDate && Object.prototype.toString.call(v) === '[object Date]' ? toDate(v) : String(v || '').trim(); };
+  (rows || []).slice(1).forEach(function (r) {
+    var code = AC_cellCode_(r[1]), m = Number(r[3]), kind = String(r[5] || '').trim(), start = str(r[4]);
+    if (!code || !m) return;
+    if (kind === '送信') (sent[code + '|' + start] = sent[code + '|' + start] || []).push(m);
+    if (kind === AC_THANKS_CARRY_KIND) (carry[code] = carry[code] || []).push({ m: m, start: start });
+  });
+  var out = {};
+  Object.keys(carry).forEach(function (code) {
+    carry[code].forEach(function (c) {
+      var done = (sent[code + '|' + c.start] || []).some(function (m) { return m >= c.m; });
+      if (!done) (out[code] = out[code] || []).push(c);
+    });
+  });
+  return out;
+}
 
 /** 「お礼送信履歴」シート（無ければ見出しつきで作る）。読めなければ null */
 function AC_thanksLogSheet_() {
@@ -1971,6 +1996,7 @@ function AC_morningThanks_() {
   var totOk = !!totLatest && totLatest.today === today && !!totR;   // 今朝（7:05）のデータだけを使う。古ければ判定保留
   var logSheet = AC_thanksLogSheet_(), logRows = logSheet ? logSheet.getDataRange().getValues() : [];
   var logIdx = AC_thanksLogIndex(logRows, AC_toDateFn_()), logKeys = AC_thanksLogKeys(logRows, AC_toDateFn_());
+  var carryAll = AC_thanksCarryOver(logRows, AC_toDateFn_());
   d.before.targets.forEach(function (name) {
     var k = AC_normalizeName(name), code = codeMap[k];
     if (!code || paused[k]) return;
@@ -2014,6 +2040,19 @@ function AC_morningThanks_() {
       }
     }
     if (dec.store) state.setProperty(skey, JSON.stringify(dec.store)); else if (raw) state.deleteProperty(skey);
+    // 引き継ぎの未送信分：今朝の通常のお礼で済まなかったものを、1回だけ送る（今の連続が途切れていても送る）
+    var carry = (carryAll[code] || []).filter(function (c) { return !(dec.send && streak.start === c.start && dec.m >= c.m); });
+    carry.forEach(function (c) {
+      var test2 = tests[k], reg2 = registry[k];
+      var text2 = AC_render(c.m === 15 ? 'mthanksCarry15' : 'mthanksCarry', today, { n: c.m }, overrides);   // 15日は特別な文面
+      try {
+        if (test2) AC_pushLine_('【テスト／' + test2.name + 'さん宛て（引き継ぎのお礼）】\n' + text2);
+        else if (reg2) AC_pushTo_(reg2.userId, text2);
+        else return;
+        sent++;
+        if (logSheet) logSheet.appendRow([new Date(), "'" + code, c.m, c.m, c.start, test2 ? 'テスト' : '送信', today, '引き継ぎの未送信分']);
+      } catch (e) { Logger.log('引き継ぎのお礼の送信に失敗：社員番号%s', code); }
+    });
   });
   Logger.log('%s 連続記録のお礼：%s通', today, sent);
   if (!dryRun) { state.setProperty(runKey, new Date().toISOString()); if (migrating) state.setProperty('mthanks:init', today); }
@@ -2547,6 +2586,8 @@ var AC_TEMPLATES = {
   mthanks5: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
   mthanks10: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n今日もよろしくお願いします！'],
   mthanks15: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで{n}勤務日連続となりました！🎉\n\n毎日欠かさず継続していただき、本当にありがとうございます！\n日々の積み重ねが、職場全体の安全意識向上につながっています。\n\nこれからもよろしくお願いします！✨'],
+  mthanksCarry: ['おはようございます！😊\n\nアルコールチェックの入力が、{n}勤務日連続となっていました！✨\nお知らせが遅くなりましたが、継続してのご対応ありがとうございます。\n\n今日もよろしくお願いします！'],
+  mthanksCarry15: ['おはようございます！😊\n\nアルコールチェックの入力が、{n}勤務日連続となっていました！🎉\nお知らせが遅くなりましたが、毎日欠かさず継続していただき、本当にありがとうございます！\n日々の積み重ねが、職場全体の安全意識向上につながっています。\n\nこれからもよろしくお願いします！✨'],
   mthanksN: ['おはようございます！😊\n\nアルコールチェックの入力が、前回の勤務までで{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n今日もよろしくお願いします！'],
   thanks5: ['お疲れ様です！😊\n\nアルコールチェックの入力が、5勤務日連続となりました！\n\n毎日のご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanks10: ['お疲れ様です！😊\n\nアルコールチェックの入力が、10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n引き続きよろしくお願いします！'],
@@ -3490,7 +3531,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_thanksLogIndex: AC_thanksLogIndex, AC_thanksLogKeys: AC_thanksLogKeys, AC_mthanksKey: AC_mthanksKey, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_punchSummary: AC_punchSummary, AC_punchStatus: AC_punchStatus, AC_afterWorkPlan: AC_afterWorkPlan, AC_codeByName: AC_codeByName, AC_totByCode: AC_totByCode, AC_streakUpTo: AC_streakUpTo, AC_milestoneAtMost: AC_milestoneAtMost, AC_thanksDecision: AC_thanksDecision, AC_thanksLogIndex: AC_thanksLogIndex, AC_thanksLogKeys: AC_thanksLogKeys, AC_thanksCarryOver: AC_thanksCarryOver, AC_mthanksKey: AC_mthanksKey, AC_crossEntryCheck: AC_crossEntryCheck, AC_selfReportedCheck: AC_selfReportedCheck, AC_USE_FORM_DONE_TIME: AC_USE_FORM_DONE_TIME, AC_afterWorkAdminMessage: AC_afterWorkAdminMessage, AC_SCHEDULE: AC_SCHEDULE, AC_PUNCH_EXEMPT_CODES: AC_PUNCH_EXEMPT_CODES, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

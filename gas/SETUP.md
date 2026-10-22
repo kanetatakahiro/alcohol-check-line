@@ -108,3 +108,14 @@ LINEの無料プランは月200通。出勤者全員への朝・夕の案内を�
 - GitHub：https://raw.githubusercontent.com/kanetatakahiro/alcohol-check-line/c27bbdbca8da36a06de842495d7f3a3bc824e201/gas/AlcoholCheck.gs
 - Apps Script：左の「プロジェクト履歴」→「バージョン 19」→「コード.gs」の内容
 - 「tmpSetup.gs」は貼り付けの対象外です（触らない）。Webアプリはバージョン19に固定されているため、コードを戻すだけでよく、デプロイの操作は不要です。
+
+## 勤怠連絡フォームの部署別の対象者選択（2026-10-22）
+### 本番反映の手順（承認後）
+1. 本番の「コード.gs」が GitHub main（反映前の版）と同じか指紋で確認する（違えば中止して報告）
+2. 「コード.gs」だけを feature/form-dept の gas/AlcoholCheck.gs（版 2026-10-22a）に置き換えて保存する。tmpSetup.gs・デプロイ・トリガー・スクリプトプロパティは触らない（フォーム送信時と毎朝8:30のトリガーは保存済みの最新コードで動く。Webhookは影響なし）
+3. `alcoholCheckSetupFormDepts` を1回実行（フォームのURLはそのまま。回答の記録・通知の処理は変わらない）
+4. 確認：プレビューで部署別の表示、`alcoholCheckShowSettings`（版 2026-10-22a）、回答シートに新しい列（所属（部署）・対象者（部署名））が増えること。LINEの実送信テストは事前に承認を得てから
+### 元に戻す
+1. `alcoholCheckRemoveFormDepts` を実行（追加した設問とページ区切りを外し、元の1ページの形に戻る。回答の記録は消えない）
+2. 「コード.gs」を反映前の版（GitHub main の gas/AlcoholCheck.gs）に戻して保存
+- バックアップ：Googleドライブの「【バックアップ 2026-10-22 部署別反映前】」で始まるフォームと回答シート

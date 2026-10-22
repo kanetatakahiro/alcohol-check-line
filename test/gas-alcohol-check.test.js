@@ -305,7 +305,8 @@ test('GAS: 気象庁の予報から天気区分を作り、朝の文面に入れ
   assert.equal(AC_weatherFromJma(jma('200', 'くもり', ['0', '0'], ['2', '9']), '2026-10-08').kind, 'cold');
   assert.equal(AC_weatherFromJma(null, '2026-10-08'), null);
   const w = AC_weatherFromJma(jma('300', '雨', ['80', '90'], ['15', '20']), '2026-10-08');
-  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔\n\n今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！（さいたま 最高20℃／最低15℃）\n\n本日も運転前のアルコールチェック[\s\S]*viewform\?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗$/);
+  // 2026-10-20の改訂：気温は気遣いの次の行に付く。雨の文面は日替わり（3種類）
+  assert.match(AC_morningMessage('2026-10-08', w), /^おはようございます！☔\n\n(今日は雨の予報です。|雨の一日になりそうです。)[^\n]*\n（さいたま 最高20℃／最低15℃）\n\n本日も運転前のアルコールチェック[\s\S]*viewform\?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗$/);
   const plain = AC_morningMessage('2026-10-08', null);
   assert.equal(plain, 'おはようございます！\n\n体調に気をつけて、今日も一日頑張りましょう！\n\n本日も運転前のアルコールチェックと、フォームへの入力をお願いします！\n\n▼ アルコールチェック入力フォーム\nhttps://docs.google.com/forms/d/e/1FAIpQLSemLVglUlSIc44wxMzmd8e9g09KRDXGUruMbZ54kuWrT6ZAhA/viewform?usp=dialog\n\n今日も一日、安全運転でよろしくお願いします！🚗');   // 天気が取れないときは天気に触れない
   const snowy = AC_weatherFromJma(jma('400', '雪', ['50', '80'], ['-1', '3']), '2026-10-08');
@@ -431,15 +432,16 @@ test('GAS: シフト表が空欄の日は、TOTの「公休」では埋めない
 test('GAS: 天候・気温の気遣いは朝の案内だけ（それ以外の通知には入れない）', () => {
   const w = (o) => Object.assign({ kind: 'cloudy', max: 20, min: 12, snow: false, wind: false, freeze: false, swing: false }, o);
   const care = o => AC_careLine('morning', '2026-10-08', { weather: o }).text;
-  assert.match(care(w({ kind: 'rain', wind: true })), /^今日は雨の予報です☔/);         // 雨が強風より先
-  assert.match(care(w({ kind: 'cold', snow: true })), /^雪や路面の凍結/);              // 雪・凍結が最優先
-  assert.match(care(w({ kind: 'hot', max: 36 })), /^今日はかなり暑くなりそうです☀️/);  // 猛暑（35℃以上）
-  assert.match(care(w({ kind: 'hot', max: 32 })), /^今日は気温が高くなる予報です/);
-  assert.match(care(w({ kind: 'cold' })), /^今日は冷え込む予報です/);
-  assert.match(care(w({ swing: true })), /^朝晩と日中の気温差/);
-  assert.match(care(w({ wind: true })), /^今日は風が強い予報です/);
-  assert.equal(care(w({ kind: 'sunny' })), '体調に気をつけて、今日も一日頑張りましょう！');
-  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }) }).usedWeather, false);
+  // 2026-10-20の改訂の優先順：警報 → 雷 → 激しい雨 → 暴風 → 強風 → 雪 → 凍結 → 雨 → 猛暑 → 暑い → 寒い → 寒暖差 → にわか雨 → 晴れ → くもり
+  assert.match(care(w({ kind: 'rain', wind: true })), /^(今日は風が強い予報です|風が強まる予報です)/);   // 強風が雨より先
+  assert.match(care(w({ kind: 'cold', snow: true })), /^(雪の予報が出ています|雪や路面の凍結)/);        // 雪が寒さより先
+  assert.match(care(w({ kind: 'hot', max: 36 })), /^(今日はかなり暑くなりそうです|今日は危険な暑さ)/);   // 猛暑（35℃以上）
+  assert.match(care(w({ kind: 'hot', max: 32 })), /^(今日は気温が高くなる予報です|今日は暑くなりそうです)/);
+  assert.match(care(w({ kind: 'cold' })), /^(今日は冷え込む予報です|今朝は冷え込みますね|今日は寒い一日)/);
+  assert.match(care(w({ swing: true })), /^(朝晩と日中の気温差|日中と朝晩の気温差)/);
+  assert.match(care(w({ wind: true })), /^(今日は風が強い予報です|風が強まる予報です)/);
+  assert.match(care(w({ kind: 'sunny' })), /晴れ|天気|お天気/);                          // 晴れの日も一言（10/20から）
+  assert.equal(AC_careLine('morning', '2026-10-08', { weather: w({ kind: 'sunny' }) }).usedWeather, true);
   assert.equal(care(null), '体調に気をつけて、今日も一日頑張りましょう！');                // 天気が取れない日
   for (const k of ['followBefore', 'evening', 'followAfter', 'punch', 'todayNoClockOut', 'todayNoClockIn', 'ot30', 'ot45', 'thanks']) {
     assert.equal(AC_careLine(k, '2026-12-08', { weather: w({ kind: 'rain' }), infection: 'インフルエンザ' }).text, '', k);

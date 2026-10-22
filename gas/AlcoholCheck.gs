@@ -2,7 +2,7 @@
  * アルコールチェック未実施者へのLINE通知（Google Apps Script）
  *
  * 動作（毎日。Apps Scriptの時刻指定は前後15分程度ずれる）：
- *  -  8:30 出勤者全員へ：あいさつ＋天気（気象庁・埼玉県南部）＋運転前のチェック案内
+ *  -  8:30 出勤者全員へ：あいさつ＋天気・気象警報に合わせた気遣い（気象庁・さいたま）＋運転前のチェック案内
  *  - 10:00 出勤前の入力が確認できない人へ：入力のお願い（未実施と決めつけない）
  *  - 18:30 出勤者全員へ：退勤前のチェック案内
  *  - 20:00 退勤前の入力が確認できない人へ：入力のお願い／連続記録の節目（5・10・20…日）の人へ感謝
@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-16a';
+var AC_CODE_VERSION = '2026-10-20a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1503,7 +1503,11 @@ function AC_dispatch_(kind) {
     }
     return;
   }
-  var weather = (kind === 'morning' || kind === 'followBefore' || kind === 'evening') ? AC_weatherToday_(today) : null;
+  // 天気・気象警報は朝の案内だけで使う（1日1回取得して全員で共有）。失敗しても通知は止めない
+  var weather = null;
+  if (kind === 'morning') {
+    try { weather = AC_weatherToday_(today); } catch (e) { Logger.log('天気の準備に失敗（通常のあいさつで送ります）：%s', e && e.message ? e.message : ''); }
+  }
   var infection = AC_infection_(today);   // 継続記録の感謝など天気以外の通知で使う
   var overrides = AC_templateOverrides_();
   if (kind === 'morning' && !dryRun) { try { AC_checkTotSync_(props, today); } catch (e) { Logger.log('TOT確認の失敗'); } }
@@ -1808,58 +1812,172 @@ function alcoholCheckUsage() {
 
 // ---------------- 文面 ----------------
 
-/** 気象庁の予報（埼玉県南部・さいたま）から今日の天気区分を返す。取得できなければnull。 */
+// 天気予報：気象庁の予報（埼玉県 南部・さいたま）https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json
+// 気象警報：気象庁の警報・注意報（2026年5月29日からの新しい形式）https://www.jma.go.jp/bosai/warning/data/r8/110000.json
+//   ※どちらも気象庁ホームページのデータで、正式なAPIではない。形が変わったときは、警報なし・通常のあいさつに戻るだけで通知は止めない。
+var AC_JMA_FORECAST_URL = 'https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json';
+var AC_JMA_WARNING_URL = 'https://www.jma.go.jp/bosai/warning/data/r8/110000.json';
+var AC_WEATHER_AREA = '110010';        // 埼玉県 南部（天気・降水確率・風）
+var AC_TEMP_AREA = '43241';            // さいたま（気温）
+var AC_WARNING_AREA = '1110000';       // さいたま市（警報・注意報）
+var AC_WARNING_STALE_HOURS = 48;       // これより古い発表の「発表中」は信用しない（データ更新が止まったときの誤表示を防ぐ）
+
+/**
+ * 警報・注意報のコード → [表示名, 危険度, 気遣いの種類]。
+ * 表示名は気象庁「警報・注意報の種類」（https://www.jma.go.jp/jma/kishou/know/bosai/warning_kind.html）の正式名どおり
+ * （大雨・氾濫・土砂災害・高潮は「レベル３大雨警報」のように全角数字のレベルが前に付く）。
+ * 表示名が null のコード（2026年5月の改定で新設・変更され、番号と名前の対応を公式資料で確認できていないもの）は、
+ * 名前を断定せず「大雨に関する警報」「大雨に関する注意報」と表示する。
+ * 危険度：5 特別警報／4 危険警報／3 警報／2 注意報。種類：rain・wind・snow・thunder・fog・cold（それ以外は気遣いに使わない）
+ * 表に無いコードは使わずにログへ残す。
+ */
+var AC_WARNING_CODES = {
+  '33': ['レベル５大雨特別警報', 5, 'rain'], '35': ['暴風特別警報', 5, 'wind'], '32': ['暴風雪特別警報', 5, 'snow'], '36': ['大雪特別警報', 5, 'snow'],
+  '03': ['レベル３大雨警報', 3, 'rain'], '05': ['暴風警報', 3, 'wind'], '02': ['暴風雪警報', 3, 'snow'], '06': ['大雪警報', 3, 'snow'],
+  '10': ['レベル２大雨注意報', 2, 'rain'], '15': ['強風注意報', 2, 'wind'], '12': ['大雪注意報', 2, 'snow'], '13': ['風雪注意報', 2, 'snow'],
+  '26': ['着雪注意報', 2, 'snow'], '14': ['雷注意報', 2, 'thunder'], '20': ['濃霧注意報', 2, 'fog'],
+  '23': ['低温注意報', 2, 'cold'], '24': ['霜注意報', 2, 'cold'], '25': ['着氷注意報', 2, 'cold'],
+  // 新設・変更された種類（氾濫・土砂災害・危険警報）：名前は断定しない
+  '34': [null, 5, 'rain'], '39': [null, 5, 'rain'], '43': [null, 4, 'rain'], '44': [null, 4, 'rain'], '49': [null, 4, 'rain'],
+  '04': [null, 3, 'rain'], '09': [null, 3, 'rain'], '18': [null, 2, 'rain'], '29': [null, 2, 'rain'],
+  // さいたま市では気遣いに使わない（波浪・高潮・乾燥・なだれ・融雪・その他）
+  '07': null, '37': null, '16': null, '08': null, '38': null, '48': null, '19': null, '21': null, '22': null, '17': null, '27': null,
+};
+var AC_ALERT_GROUP_ORDER = ['rain', 'wind', 'snow', 'thunder', 'fog', 'cold'];
+
+/**
+ * 今日の天気と気象警報を気象庁から取得する（朝に1回）。両方取れなければnull。
+ * 失敗の理由は必ずログに残す。どちらかが失敗しても例外は投げない。
+ */
 function AC_fetchWeather_(today) {
+  var w = null, alerts = null, info = {};
   try {
-    var res = UrlFetchApp.fetch('https://www.jma.go.jp/bosai/forecast/data/forecast/110000.json',
-      { muteHttpExceptions: true });
-    if (res.getResponseCode() !== 200) return null;
-    return AC_weatherFromJma(JSON.parse(res.getContentText()), today);
+    var res = UrlFetchApp.fetch(AC_JMA_FORECAST_URL, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) Logger.log('天気予報の取得に失敗：HTTP %s', res.getResponseCode());
+    else {
+      w = AC_weatherFromJma(JSON.parse(res.getContentText()), today, info);
+      if (!w) Logger.log('天気予報の読み取りに失敗：%s', info.reason || '不明');
+    }
   } catch (e) {
-    Logger.log('天気の取得に失敗：%s', e && e.message ? e.message : '');
-    return null;
+    Logger.log('天気予報の取得に失敗：%s', e && e.message ? e.message : '不明');
   }
+  try {
+    var wr = UrlFetchApp.fetch(AC_JMA_WARNING_URL, { muteHttpExceptions: true });
+    if (wr.getResponseCode() !== 200) Logger.log('気象警報の取得に失敗：HTTP %s', wr.getResponseCode());
+    else {
+      var winfo = {};
+      alerts = AC_warningsFromJma(JSON.parse(wr.getContentText()), AC_WARNING_AREA, Date.now(), winfo);
+      if (!alerts) Logger.log('気象警報の読み取りに失敗：%s', winfo.reason || '不明');
+      (winfo.notes || []).forEach(function (n) { Logger.log('気象警報：%s', n); });
+    }
+  } catch (e) {
+    Logger.log('気象警報の取得に失敗：%s', e && e.message ? e.message : '不明');
+  }
+  if (!w && !(alerts && alerts.length)) { Logger.log('天気・気象警報が取れないため、通常のあいさつで送ります'); return null; }
+  w = w || { kind: null, text: '', code: '', pop: null, max: null, min: null, snow: false, thunder: false, heavyRain: false,
+    storm: false, wind: false, showers: false, freeze: false, swing: false, forecast: false };
+  w.alerts = alerts || [];
+  w.alertsOk = alerts !== null;
+  Logger.log('天気：%s（%s）／最高 %s／最低 %s／降水確率 %s％／警報・注意報：%s',
+    w.text || '予報なし', w.kind || '-', w.max == null ? 'なし' : w.max, w.min == null ? 'なし' : w.min, w.pop == null ? '-' : w.pop,
+    !w.alertsOk ? '取得できず' : w.alerts.length ? w.alerts.map(function (a) { return a.name; }).join('・') : 'なし');
+  return w;
 }
 
 /**
- * 純粋関数：気象庁JSONから今日の { kind, text, max, min } を作る。
- * kind：rain（雨・雪）／hot（最高30℃以上）／cold（最低5℃以下または最高12℃以下）／sunny（晴れ）／cloudy（その他）
+ * 純粋関数：気象庁の予報JSONから今日の天気を作る。今日の予報が無ければnull（info.reason に理由）。
+ * kind：snow（雪）／rain（雨）／hot（最高30℃以上）／cold（最低5℃以下または最高12℃以下）／sunny（晴れ）／cloudy（くもり等）
+ * 気温は今日の「9時」欄を最高、「0時」欄を最低として読む。朝5時の発表には今日の最低気温が無く、
+ * 0時欄にも最高気温が入るため、最高と同じ値（または最高以上）の最低は「発表なし」として表示しない。
  */
-function AC_weatherFromJma(json, today) {
+function AC_weatherFromJma(json, today, info) {
+  info = info || {};
   var f = json && json[0];
-  if (!f || !f.timeSeries) return null;
+  if (!f || !f.timeSeries) { info.reason = 'データの形が想定と違います（timeSeriesなし）'; return null; }
   var area = function (ts, code) {
     return ts && (ts.areas || []).filter(function (a) { return a.area && a.area.code === code; })[0];
   };
-  var w = f.timeSeries[0], wa = area(w, '110010');
-  if (!wa) return null;
+  var w = f.timeSeries[0], wa = area(w, AC_WEATHER_AREA);
+  if (!wa) { info.reason = '埼玉県南部の予報が見つかりません'; return null; }
   var idx = -1;
   (w.timeDefines || []).forEach(function (t, i) { if (idx === -1 && String(t).slice(0, 10) === today) idx = i; });
-  if (idx === -1) idx = 0;
+  if (idx === -1) { info.reason = '今日（' + today + '）の予報がありません'; return null; }   // 別の日の予報は使わない
   var code = String((wa.weatherCodes || [])[idx] || '');
-  var text = String((wa.weathers || [])[idx] || '').replace(/\s+/g, ' ');
-  var pops = [], p = f.timeSeries[1], pa = area(p, '110010');
+  var text = String((wa.weathers || [])[idx] || '').replace(/\s+/g, ' ').trim();
+  var winds = String((wa.winds || [])[idx] || '');
+  var pops = [], p = f.timeSeries[1], pa = area(p, AC_WEATHER_AREA);
   if (pa) (p.timeDefines || []).forEach(function (t, i) {
-    if (String(t).slice(0, 10) === today && pa.pops[i] !== '') pops.push(Number(pa.pops[i]));
+    var v = (pa.pops || [])[i];
+    if (String(t).slice(0, 10) === today && v !== '' && v != null && !isNaN(Number(v))) pops.push(Number(v));
   });
-  var temps = [], tt = f.timeSeries[2], ta = area(tt, '43241');
+  var max = null, minCand = null, tt = f.timeSeries[2], ta = area(tt, AC_TEMP_AREA);
   if (ta) (tt.timeDefines || []).forEach(function (t, i) {
-    if (String(t).slice(0, 10) === today && ta.temps[i] !== '') temps.push(Number(ta.temps[i]));
+    var v = (ta.temps || [])[i];
+    if (String(t).slice(0, 10) !== today || v === '' || v == null || isNaN(Number(v))) return;
+    var hour = String(t).slice(11, 13);
+    if (hour === '09') max = Number(v);
+    else if (hour === '00') minCand = Number(v);
   });
-  var max = temps.length ? Math.max.apply(null, temps) : null;
-  var min = temps.length > 1 ? Math.min.apply(null, temps) : null;
-  var pop = pops.length ? Math.max.apply(null, pops) : 0;
+  var min = minCand !== null && max !== null && minCand < max ? minCand : null;
+  var pop = pops.length ? Math.max.apply(null, pops) : null;
+  var first = text.split(' ')[0];
+  var snow = /^4/.test(code) || /雪/.test(text);
+  var rain = !snow && (/^3/.test(code) || /雨/.test(first) || (pop !== null && pop >= 50));
   var kind = 'cloudy';
-  if (/^[34]/.test(code) || /雨|雪/.test(text.split(' ')[0]) || pop >= 50) kind = 'rain';
+  if (snow) kind = 'snow';
+  else if (rain) kind = 'rain';
   else if (max !== null && max >= 30) kind = 'hot';
   else if ((min !== null && min <= 5) || (max !== null && max <= 12)) kind = 'cold';
   else if (/^1/.test(code)) kind = 'sunny';
-  var winds = String((wa.winds || [])[idx] || '');
-  return { kind: kind, text: text, max: max, min: min,
-    snow: /^4/.test(code) || /雪/.test(text.split(' ')[0]),
-    wind: /強く|非常に強く/.test(winds) || /強風/.test(text),
+  var windsPlain = winds.replace(/やや強く/g, '').replace(/非常に強く/g, '');
+  return { kind: kind, text: text, code: code, pop: pop, max: max, min: min,
+    snow: snow,
+    thunder: /雷/.test(text),
+    heavyRain: /激しく|大雨/.test(text),
+    storm: /台風|暴風/.test(text) || /非常に強く/.test(winds),
+    wind: /強く/.test(windsPlain) || /強風/.test(text),
+    showers: !snow && !rain && /雨/.test(text),
     freeze: min !== null && min <= 0,
-    swing: max !== null && min !== null && max - min >= 10 };
+    swing: max !== null && min !== null && max - min >= 10,
+    forecast: true };
+}
+
+/**
+ * 純粋関数：気象庁の警報・注意報JSON（新形式）から、指定の区域で発表中のものを返す（危険度の高い順）。
+ * 「解除」「発表警報・注意報はなし」は数えない。発表から AC_WARNING_STALE_HOURS 時間を過ぎたものは使わない。
+ * データの形が想定と違うときは null（info.reason に理由）。info.notes に参考情報（表に無いコードなど）。
+ */
+function AC_warningsFromJma(json, areaCode, nowMs, info) {
+  info = info || {};
+  info.notes = info.notes || [];
+  var list = Array.isArray(json) ? json : json ? [json] : [];
+  var found = false, seen = {}, out = [];
+  list.forEach(function (o) {
+    var items = o && o.warning && o.warning.class20Items;
+    if (!Array.isArray(items)) return;
+    found = true;
+    var reported = Date.parse(o.reportDatetime || '');
+    var stale = !isNaN(reported) && nowMs && nowMs - reported > AC_WARNING_STALE_HOURS * 3600 * 1000;
+    items.forEach(function (it) {
+      if (!it || String(it.areaCode) !== areaCode) return;
+      (it.kinds || []).forEach(function (k) {
+        var c = k && k.code != null ? String(k.code) : '';
+        var st = String(k && k.status || '');
+        if (!c || st === '解除' || st.indexOf('なし') !== -1) return;
+        if (stale) { info.notes.push('古い発表のため使いません（コード' + c + '・' + o.reportDatetime + '）'); return; }
+        if (!(c in AC_WARNING_CODES)) { info.notes.push('表に無いコードのため使いません（コード' + c + '・' + st + '）'); return; }
+        var def = AC_WARNING_CODES[c];
+        if (!def || seen[c]) return;
+        seen[c] = true;
+        out.push({ code: c, name: def[0] || (def[1] >= 3 ? '大雨に関する警報' : '大雨に関する注意報'), level: def[1], group: def[2], status: st });
+      });
+    });
+  });
+  if (!found) { info.reason = 'データの形が想定と違います（class20Itemsなし）'; return null; }
+  out.sort(function (a, b) {
+    return (b.level - a.level) || (AC_ALERT_GROUP_ORDER.indexOf(a.group) - AC_ALERT_GROUP_ORDER.indexOf(b.group));
+  });
+  return out;
 }
 
 /** 純粋関数：日付から文面の言い回しを選ぶ（毎日同じ文にならないように） */
@@ -1901,41 +2019,108 @@ var AC_TEMPLATES = {
 };
 
 /**
- * 気遣いの一文（朝8:30の案内だけで使う）。優先順：雪・凍結 → 雨 → 強風 → 猛暑（最高35℃以上）→ 暑い（30℃以上）→ 寒い → 寒暖差 → 通常。
- * 天気が取れない日は「通常」（天気には触れない文）。
+ * 気遣いの一文（朝8:30の案内だけで使う）。天候の説明だけでなく、安全や体調への気遣いを添える。
+ * 優先順：気象警報・注意報 → 雷 → 激しい雨 → 台風・暴風 → 強風 → 雪 → 凍結 → 雨 → 猛暑 → 暑い → 寒い → 寒暖差 → にわか雨 → 晴れ → くもり。
+ * 天気が取れない日は「通常」（天気には触れない）。各キーは「LINE文面」シートで上書きでき、「||」区切りで日替わり。
+ * 差し込み：{alert} 発表中の警報・注意報の名前（例：レベル３大雨警報・雷注意報）。気温は文面の後ろに自動で付く。
  */
 var AC_CARE = {
-  snow: ['雪や路面の凍結が予想されます❄️ 運転の際は十分お気をつけください！'],
-  rain: ['今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！'],
-  wind: ['今日は風が強い予報です。車のドアの開閉や運転時にはお気をつけください！'],
-  hotExtreme: ['今日はかなり暑くなりそうです☀️ こまめな水分補給と休憩を心がけてください！'],
-  hot: ['今日は気温が高くなる予報です。水分補給を忘れずにお願いします😊'],
-  cold: ['今日は冷え込む予報です。暖かくしてお過ごしください！'],
-  swing: ['朝晩と日中の気温差が大きいようです。体調管理にお気をつけください😊'],
+  alertRain: ['さいたま市に{alert}が出ています。道路の冠水や視界不良のおそれがありますので、無理をせず安全第一で運転してください！',
+    'さいたま市に{alert}が発表されています。急な強い雨や冠水した道路に注意して、時間にゆとりを持って行動してください！'],
+  alertWind: ['さいたま市に{alert}が出ています。飛来物や横風、車のドアの開け閉めに十分ご注意ください！',
+    'さいたま市に{alert}が発表されています。横風でハンドルを取られないよう、スピードを控えめに運転してください！'],
+  alertSnow: ['さいたま市に{alert}が出ています。路面の凍結やスリップに十分注意して、ゆとりを持って運転してください！',
+    'さいたま市に{alert}が発表されています。いつもより早めのブレーキと、車間距離を多めにとることを心がけてください！'],
+  alertThunder: ['さいたま市に{alert}が出ています。急な強い雨や落雷に注意して、空模様の変化に気をつけてください！',
+    'さいたま市に{alert}が発表されています。天候が急に変わることもありますので、安全第一で行動してください！'],
+  alertFog: ['さいたま市に{alert}が出ています。見通しが悪くなるおそれがありますので、ライトを点けて車間距離を多めにとってください！'],
+  alertCold: ['さいたま市に{alert}が出ています。路面の凍結や体の冷えに注意して、暖かくしてお出かけください！'],
+  thunder: ['今日は雷を伴う予報です。急な強い雨や天候の変化に注意して、安全第一で行動してください！',
+    '雷の予報が出ています。空模様が急に変わることもありますので、運転は慎重にお願いします！'],
+  heavyRain: ['今日は激しい雨が降るおそれがあります。視界が悪くなりやすいので、スピードを控えめに安全運転でお願いします！',
+    '強い雨の予報です。水たまりやスリップに注意して、時間にゆとりを持って行動してください！'],
+  storm: ['今日は風が非常に強まる予報です。飛来物や横風に十分注意して、無理な運転は控えてください！',
+    '暴風の予報が出ています。車のドアの開け閉めや飛来物に十分ご注意ください！'],
+  wind: ['今日は風が強い予報です。車のドアの開閉や運転時にはお気をつけください！',
+    '風が強まる予報です。飛来物や、車のドアの開け閉めにご注意ください！'],
+  snow: ['雪の予報が出ています。路面が滑りやすくなりますので、いつもより早めのブレーキを心がけてください！',
+    '雪や路面の凍結が予想されます。スリップに十分お気をつけて、ゆとりを持って運転してください！'],
+  freeze: ['今朝は冷え込みが厳しく、路面が凍結しているおそれがあります。橋の上や日陰では特に、スリップにお気をつけください！',
+    '朝晩は路面の凍結に注意が必要な寒さです。暖かくして、いつも以上に慎重な運転をお願いします！'],
+  rain: ['今日は雨の予報です。視界が悪くなりやすいので、運転にはお気をつけください！',
+    '今日は雨の予報です。路面が滑りやすくなりますので、早めのブレーキと車間距離を心がけてください！',
+    '雨の一日になりそうです。足元やスリップにお気をつけて、安全運転でお願いします！'],
+  hotExtreme: ['今日はかなり暑くなりそうです。熱中症に気をつけて、こまめな水分補給と休憩を心がけてください！',
+    '今日は危険な暑さになりそうです。無理をせず、水分と塩分をこまめにとってくださいね！'],
+  hot: ['今日は気温が高くなる予報です。水分補給を忘れずにお願いします😊',
+    '今日は暑くなりそうです。こまめに水分をとって、体調に気をつけてお過ごしください！'],
+  cold: ['今日は冷え込む予報です。暖かくしてお過ごしください！',
+    '今朝は冷え込みますね。暖かくしてお出かけください！',
+    '今日は寒い一日になりそうです。体を冷やさないよう、暖かくしてお過ごしください！'],
+  swing: ['朝晩と日中の気温差が大きいようです。体調管理にお気をつけください😊',
+    '日中と朝晩の気温差が大きくなりそうです。脱ぎ着しやすい服装で、体調に気をつけてください！'],
+  showers: ['ところにより雨の予報です。念のため傘があると安心です。路面の変化にもお気をつけください！',
+    '雨の降る時間もありそうです。急な雨で路面が滑りやすくなることもあるので、運転にお気をつけください！'],
+  sunny: ['今日は気持ちの良い天気になりそうですね！',
+    '今日は晴れの予報です。気持ちよく過ごせる一日になりますように😊',
+    'お天気に恵まれそうですね！日差しがまぶしい時間は、運転にお気をつけください。'],
+  cloudy: ['今日は雲の多い一日になりそうです。体調に気をつけてお過ごしください😊',
+    '今日はくもりの予報です。無理をせず、今日も一日安全第一でいきましょう！'],
   normal: ['体調に気をつけて、今日も一日頑張りましょう！'],
 };
+
+/** 気遣いの種類 → あいさつの後ろの絵文字 */
+var AC_CARE_ICON = {
+  alertRain: '⚠️', alertWind: '⚠️', alertSnow: '⚠️', alertThunder: '⚡', alertFog: '⚠️', alertCold: '⚠️',
+  thunder: '⚡', heavyRain: '☔', storm: '🌀', wind: '🍃', snow: '❄️', freeze: '❄️', rain: '☔',
+  hotExtreme: '☀️', hot: '☀️', cold: '🧣', swing: '🌤', showers: '☂️', sunny: '☀️', cloudy: '☁️',
+};
+
+/** 純粋関数：天気・警報から気遣いの種類（AC_CARE のキー）を選ぶ。天気が無ければ 'normal' */
+function AC_careKey(w) {
+  if (!w) return 'normal';
+  var alerts = w.alerts || [];
+  if (alerts.length) return 'alert' + alerts[0].group.charAt(0).toUpperCase() + alerts[0].group.slice(1);
+  if (w.forecast === false) return 'normal';
+  var big = function (v) { return v !== null && v !== undefined; };
+  if (w.thunder) return 'thunder';
+  if (w.heavyRain) return 'heavyRain';
+  if (w.storm) return 'storm';
+  if (w.wind) return 'wind';
+  if (w.snow) return 'snow';
+  if (w.freeze) return 'freeze';
+  if (w.kind === 'rain') return 'rain';
+  if (big(w.max) && w.max >= 35) return 'hotExtreme';
+  if (w.kind === 'hot' || (big(w.max) && w.max >= 30)) return 'hot';
+  if (w.kind === 'cold') return 'cold';
+  if (w.swing) return 'swing';
+  if (w.showers) return 'showers';
+  if (w.kind === 'sunny') return 'sunny';
+  if (w.kind === 'cloudy') return 'cloudy';
+  return 'normal';
+}
+
+/** 純粋関数：発表中の警報・注意報の名前（危険度の高い順に最大3つ） */
+function AC_alertNames(w) {
+  var seen = {}, names = [];
+  ((w && w.alerts) || []).forEach(function (a) { if (a.name && !seen[a.name]) { seen[a.name] = true; names.push(a.name); } });
+  return names.slice(0, 3).join('・');
+}
 
 var AC_ALCOHOL_KINDS = { morning: 1, followBefore: 1, evening: 1, followAfter: 1 };
 
 /**
  * 純粋関数：その日の気遣いの一文（朝の案内だけ。それ以外の通知は空）。
  * ctx：{ weather, careUsed（その人へ今日すでに気遣いを入れたか） }
- * 戻り値：{ text, usedWeather, usedInfection }
+ * 戻り値：{ text, usedWeather, usedInfection, key }
  */
 function AC_careLine(purpose, today, ctx, overrides) {
   ctx = ctx || {};
-  var w = ctx.weather, pick = function (k) { return AC_pickTpl_(k, today, overrides, AC_CARE); };
-  var res = function (text, uw) { return { text: text, usedWeather: !!uw, usedInfection: false }; };
+  var res = function (text, uw, key) { return { text: text, usedWeather: !!uw, usedInfection: false, key: key || '' }; };
   if (purpose !== 'morning' || ctx.careUsed) return res('');
-  if (w) {
-    if (w.snow || w.freeze) return res(pick('snow'), true);
-    if (w.kind === 'rain') return res(pick('rain'), true);
-    if (w.wind) return res(pick('wind'), true);
-    if (w.kind === 'hot') return res(pick(w.max !== null && w.max !== undefined && w.max >= 35 ? 'hotExtreme' : 'hot'), true);
-    if (w.kind === 'cold') return res(pick('cold'), true);
-    if (w.swing) return res(pick('swing'), true);
-  }
-  return res(pick('normal'));   // ふだんの天気・天気が取れない日（天気には触れない）
+  var key = AC_careKey(ctx.weather);
+  var text = AC_pickTpl_(key, today, overrides, AC_CARE, { alert: AC_alertNames(ctx.weather) });
+  return res(text, key !== 'normal', key);
 }
 
 /** 純粋関数：テンプレートに差し込み（空の{care}で空行が続いたら詰める） */
@@ -1956,21 +2141,25 @@ function AC_messageFor(kind, today, weather, ctx, overrides) {
   return AC_composeMessage(kind, today, AC_assign_(ctx || {}, { weather: weather }), overrides).text;
 }
 
-/** 純粋関数：文面と、天気・感染症の話をしたか */
+/** 純粋関数：文面と、天気・感染症の話をしたか。気温は取得できた値だけを、気遣いの次の行に付ける */
 function AC_composeMessage(kind, today, ctx, overrides) {
   ctx = ctx || {};
   var care = AC_careLine(kind, today, ctx, overrides);
-  var icon = '';
-  if (kind === 'morning' && care.usedWeather && ctx.weather) {
-    icon = { rain: '☔', hot: '☀️', cold: '❄️', sunny: '☀️', cloudy: '🌤' }[ctx.weather.kind] || '';
-    if (ctx.weather.snow) icon = '❄️';
+  var w = ctx.weather, icon = '', careText = care.text;
+  if (kind === 'morning' && care.usedWeather && w) {
+    icon = AC_CARE_ICON[care.key] || '';
+    var temp = AC_tempLabel(w);
+    if (temp) careText = careText + '\n' + temp;
   }
-  var temp = kind === 'morning' && care.usedWeather && ctx.weather && ctx.weather.max !== null && ctx.weather.max !== undefined
-    ? '（さいたま 最高' + ctx.weather.max + '℃' + (ctx.weather.min !== null && ctx.weather.min !== undefined ? '／最低' + ctx.weather.min + '℃' : '') + '）' : '';
-  var careText = care.text;
-  if (temp) { var cl = careText.split('\n'); cl[0] = cl[0] + temp; careText = cl.join('\n'); }   // 気温は1行目の後ろに
   var text = AC_render(kind, today, { care: careText, icon: icon }, overrides);
-  return { text: text, usedWeather: care.usedWeather, usedInfection: care.usedInfection };
+  return { text: text, usedWeather: care.usedWeather, usedInfection: care.usedInfection, key: care.key };
+}
+
+/** 純粋関数：「（さいたま 最高26℃／最低15℃）」。最高が無ければ空、最低が無ければ最高だけ */
+function AC_tempLabel(w) {
+  var ok = function (v) { return v !== null && v !== undefined && v !== '' && !isNaN(Number(v)); };
+  if (!w || !ok(w.max)) return '';
+  return '（さいたま 最高' + Number(w.max) + '℃' + (ok(w.min) ? '／最低' + Number(w.min) + '℃' : '') + '）';
 }
 
 /** 朝の案内（天気に合わせた一言。天気が取れないときは天気に触れない） */
@@ -1993,6 +2182,38 @@ function AC_overtimeMessage(min, level, today, overrides, ctx) {
   var h = (Math.floor(min / 6) / 10).toFixed(1);
   var key = level >= 45 ? 'ot45' : 'ot30';
   return AC_render(key, today || '', { hours: h, care: AC_careLine(key, today || '', ctx, overrides).text }, overrides);
+}
+
+/**
+ * 以前の版の既定の気遣い文（いまは使っていない）。「LINE文面」シートの文面欄にこれらがそのまま残っていても使わず、
+ * 新しい既定文を使う（管理本部が自分で書いた文章はそのまま使う）。空白・改行の違いは無視して比べる。
+ */
+var AC_OLD_CARE_DEFAULTS = [
+  "今日は雨の予報です☔ 路面が滑りやすくなりますので、運転にはお気をつけください！",
+  "雪や路面の凍結が予想されます❄️ 運転の際は十分お気をつけください！",
+  "今日はかなり暑くなりそうです☀️ こまめな水分補給と休憩を心がけてください！",
+  "今日は天気が良さそうですね！",
+  "今日は晴れの予報です。気持ちよく過ごせそうですね！",
+  "今日はくもりの予報です。",
+  "今日は雲の多い一日になりそうです。",
+  "今日は雨の予報です☔\n路面が滑りやすくなりますので、車両移動の際はお気をつけください。",
+  "今日は雨が降りそうです☔\n視界や路面に注意して、移動の際はお気をつけください。",
+  "路面が滑りやすくなる可能性がありますので、運転の際は十分お気をつけください。",
+  "雪や路面の凍結が心配な予報です。運転の際は十分お気をつけください。",
+  "風が強い予報ですので、車のドアの開閉などにもお気をつけください。",
+  "今日は気温が高くなる予報です。こまめな水分補給をお願いいたします。",
+  "今日は暑くなりそうです。こまめな水分補給と休憩をお願いいたします。",
+  "今日は朝から冷え込んでいますね。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。",
+  "今日は冷え込む予報です。\n寒い中、いつもお仕事ありがとうございます！暖かくしてお過ごしください。",
+  "朝晩と日中で気温差があるようです。体調管理にお気をつけください。"
+];
+
+/** 純粋関数：天気の気遣いの上書きから、以前の既定文と同じものを除く（全部除かれたら空＝新しい既定文を使う） */
+function AC_dropOldCareDefaults(list) {
+  var norm = function (t) { return String(t || '').replace(/[\s　]+/g, ''); };
+  var old = {};
+  AC_OLD_CARE_DEFAULTS.forEach(function (t) { old[norm(t)] = true; });
+  return (list || []).filter(function (t) { return !old[norm(t)]; });
 }
 
 /** 「LINE文面」シートの上書き（空欄は既定文）。無ければ既定文でシートを作る */
@@ -2022,10 +2243,23 @@ function AC_templateOverrides_() {
     Object.keys(AC_TEMPLATES).forEach(function (k) { if (!have[k]) add.push([k, 'テンプレート', '', AC_TEMPLATES[k].join('||')]); });
     Object.keys(AC_CARE).forEach(function (k) { if (!have[k]) add.push([k, '気遣いの一文', '', AC_CARE[k].join('||')]); });
     if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 4).setValues(add);
-    sh.getDataRange().getValues().slice(1).forEach(function (r) {
-      var v = String(r[2] || '').trim();
-      if (r[0] && v) out[String(r[0]).trim()] = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);
+    var rowsNow = sh.getDataRange().getValues();
+    rowsNow.slice(1).forEach(function (r) {
+      var k = String(r[0] || '').trim(), v = String(r[2] || '').trim();
+      if (!k || !v) return;
+      var list = v.split('||').map(function (x) { return x.trim(); }).filter(Boolean);
+      if (AC_CARE[k]) list = AC_dropOldCareDefaults(list);   // 天気の気遣いだけ：以前の既定文の残りは使わない
+      if (list.length) out[k] = list;
     });
+    // 参考欄（D列）の天気の気遣いを最新の既定文にそろえる（編集の参考用。通知の内容には影響しない）
+    try {
+      rowsNow.forEach(function (r, i) {
+        var k = String(r[0] || '').trim();
+        if (i === 0 || !AC_CARE[k]) return;
+        var ref = AC_CARE[k].join('||');
+        if (String(r[3] || '') !== ref) sh.getRange(i + 1, 4).setValue(ref);
+      });
+    } catch (e2) { Logger.log('LINE文面シートの参考欄の更新に失敗（通知には影響なし）'); }
   } catch (e) { Logger.log('LINE文面シートの読み込みに失敗（既定文を使用）'); }
   AC_TPL_CACHE = out;
   return out;
@@ -2037,6 +2271,50 @@ function AC_infection_(today) {
   var name = String(p.getProperty('INFECTION_NAME') || '').trim(), until = p.getProperty('INFECTION_UNTIL');
   if (!name || !until || today > until) return '';
   return name;
+}
+
+/**
+ * 手動確認用：天気連動のあいさつを、LINEへ送らずに実行ログで確認する。
+ *  1. 今日の実際の天気予報・気象警報を取得し、明日の朝に送られる内容に近い朝の案内を表示（保存はしない）
+ *  2. 各天候（晴れ・くもり・雨・雪・猛暑・寒い・雷・強風・台風・警報など）の見本の文面を表示
+ * LINE送信・トリガー・スクリプトプロパティの変更は一切しない。
+ */
+function alcoholCheckWeatherPreview() {
+  var today = AC_today_(), overrides = AC_templateOverrides_();
+  var w = AC_fetchWeather_(today);
+  Logger.log('【今日の天気から作った朝の案内】\n%s', AC_composeMessage('morning', today, { weather: w }, overrides).text);
+  AC_weatherSamples().forEach(function (s) {
+    Logger.log('【見本：%s】\n%s', s.label, AC_composeMessage('morning', today, { weather: s.weather }, overrides).text);
+  });
+}
+
+/** 純粋関数：見本用の天気（架空の予報。確認用で、実際の通知には使わない） */
+function AC_weatherSamples() {
+  var base = function (o) {
+    return AC_assign_({ kind: 'cloudy', text: '', code: '', pop: 0, max: 22, min: 14, snow: false, thunder: false, heavyRain: false,
+      storm: false, wind: false, showers: false, freeze: false, swing: false, forecast: true, alerts: [], alertsOk: true }, o);
+  };
+  var alert = function (code) { var d = AC_WARNING_CODES[code]; return { code: code, name: d[0], level: d[1], group: d[2], status: '発表' }; };
+  return [
+    { label: '晴れ', weather: base({ kind: 'sunny', text: '晴れ', max: 24, min: 14 }) },
+    { label: 'くもり（最低気温の発表なし）', weather: base({ kind: 'cloudy', text: 'くもり', max: 21, min: null }) },
+    { label: 'くもり所により雨', weather: base({ kind: 'cloudy', text: 'くもり 所により 雨', showers: true, max: 26, min: null }) },
+    { label: '雨', weather: base({ kind: 'rain', text: '雨', pop: 80, max: 19, min: 15 }) },
+    { label: '雷', weather: base({ kind: 'rain', text: 'くもり 所により 雨 で 雷を伴う', thunder: true, max: 27, min: 21 }) },
+    { label: '激しい雨', weather: base({ kind: 'rain', text: '雨 所により 激しく 降る', heavyRain: true, max: 23, min: 19 }) },
+    { label: '台風・暴風', weather: base({ kind: 'rain', text: '雨 で 暴風を伴う', storm: true, max: 25, min: 22 }) },
+    { label: '強風', weather: base({ kind: 'sunny', text: '晴れ', wind: true, max: 18, min: 9 }) },
+    { label: '雪', weather: base({ kind: 'snow', text: 'くもり 夜 雪', snow: true, max: 4, min: 0, freeze: true }) },
+    { label: '凍結（晴れ・最低気温0℃以下）', weather: base({ kind: 'cold', text: '晴れ', max: 9, min: -2, freeze: true, swing: true }) },
+    { label: '猛暑', weather: base({ kind: 'hot', text: '晴れ', max: 36, min: 26 }) },
+    { label: '暑い', weather: base({ kind: 'hot', text: '晴れ 時々 くもり', max: 31, min: 23 }) },
+    { label: '寒い', weather: base({ kind: 'cold', text: 'くもり', max: 11, min: 3 }) },
+    { label: '寒暖差', weather: base({ kind: 'sunny', text: '晴れ', max: 25, min: 12, swing: true }) },
+    { label: '大雨警報＋雷注意報', weather: base({ kind: 'rain', text: '雨 で 雷を伴う', thunder: true, max: 24, min: 20, alerts: [alert('03'), alert('14')] }) },
+    { label: '暴風警報', weather: base({ kind: 'rain', text: '雨', storm: true, max: 25, min: 22, alerts: [alert('05')] }) },
+    { label: '大雪警報', weather: base({ kind: 'snow', text: '雪', snow: true, max: 2, min: -1, freeze: true, alerts: [alert('06')] }) },
+    { label: '天気が取れない日', weather: null },
+  ];
 }
 
 /** 今日の天気（1日1回だけ気象庁から取得して共通利用） */
@@ -2663,7 +2941,7 @@ if (typeof module !== 'undefined') {
     AC_parseEmployeeCode: AC_parseEmployeeCode, AC_buildRegistry: AC_buildRegistry, AC_planRegistration: AC_planRegistration, AC_rosterNames: AC_rosterNames, AC_mergeRoster: AC_mergeRoster, AC_nameKey: AC_nameKey, AC_isValidDate: AC_isValidDate, AC_isRetired: AC_isRetired, AC_namesForCode: AC_namesForCode,
     AC_planNotifications: AC_planNotifications, AC_messageFor: AC_messageFor, AC_morningMessage: AC_morningMessage,
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
-    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_findAlerts: AC_findAlerts,
+    AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,

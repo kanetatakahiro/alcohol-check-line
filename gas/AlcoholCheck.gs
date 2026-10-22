@@ -1439,6 +1439,23 @@ function alcoholCheckShowSettings() {
   Logger.log('※トリガーの時刻・間隔は、エディタ左の「トリガー」画面で確認できます。記録（状態）は実行したアカウントのものです。');
 }
 
+/**
+ * 手動実行（元に戻すとき）：部署別の選択をやめ、元の1ページの形に戻す。
+ * 追加した「所属（部署）」「対象者（部署名）」とページ区切りを外す。従来の「対象者」（全員の一覧）と回答の記録はそのまま。
+ */
+function alcoholCheckRemoveFormDepts() {
+  var id = PropertiesService.getScriptProperties().getProperty('ATTENDANCE_FORM_ID');
+  if (!id) throw new Error('スクリプトプロパティ ATTENDANCE_FORM_ID を設定してください');
+  var form = FormApp.openById(id), removed = 0;
+  form.getItems().forEach(function (it) {
+    var t = it.getTitle(), ty = it.getType();
+    var add = (ty === FormApp.ItemType.LIST && (t === AC_FORM_DEPT_Q || t.indexOf(AC_FORM_Q.who + '（') === 0))
+      || (ty === FormApp.ItemType.PAGE_BREAK && (t === AC_FORM_PAGE_COMMON || t === AC_FORM_PAGE_ALL || t.indexOf('対象者を選ぶ（') === 0));
+    if (add) { form.deleteItem(it); removed++; }
+  });
+  Logger.log('部署別の選択を外しました（%s項目）。「対象者」（全員の一覧）で選ぶ元の形です', removed);
+}
+
 /** 純粋関数：TOTの勤務予定を {tot, date, pattern} に（pattern は「10:00-19:00」か休暇名。有休→有給） */
 function AC_totScheduleItems(R) {
   var codeByKey = AC_totCodeByKey_(R.employees);

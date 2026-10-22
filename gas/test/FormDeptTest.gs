@@ -146,3 +146,14 @@ function actSubmitSamples() {
   });
   Logger.log('方式：%s', mode);
 }
+
+/** 7. 元に戻す処理の確認（コピーで：外す → 元の形か確認 → もう一度部署別にする） */
+function actRemoveAndRestore() {
+  ACT_form_();
+  alcoholCheckRemoveFormDepts();
+  var s = ACT_shape_();
+  Logger.log('外した後：%s', s.map(function (o) { return o.title + (o.n != null ? '（' + o.n + '件）' : ''); }).join(' ／ '));
+  Logger.log('元の形（ページ区切りなし・対象者は全員の一覧）：%s', !s.some(function (o) { return o.type === 'PAGE_BREAK'; }) && s.some(function (o) { return o.title === '対象者' && o.n > 0; }) ? 'はい' : 'いいえ（要確認）');
+  alcoholCheckSetupFormDepts();
+  Logger.log('もう一度部署別にしました（項目数 %s）', ACT_shape_().length);
+}

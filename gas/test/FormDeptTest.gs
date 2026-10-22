@@ -109,3 +109,40 @@ function actCleanup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   Logger.log('テスト用プロジェクトのトリガーを削除しました');
 }
+
+/**
+ * 6. コピーのフォームにテスト回答を送る（送信時トリガーが動き、通知先を記録する。LINEへは送らない）
+ *    フォームが回答を受け付けていない（未公開）ときは、同じ処理を直接呼んで確かめる
+ */
+function actSubmitSamples() {
+  var form = ACT_form_();
+  var p = PropertiesService.getScriptProperties();
+  p.deleteProperty('act:sends');
+  var L = {}, T = {};
+  form.getItems().forEach(function (it) { T[it.getTitle()] = it; });
+  form.getItems(FormApp.ItemType.LIST).forEach(function (it) { L[it.getTitle()] = it.asListItem(); });
+  var first = function (t) { return L[t].getChoices()[0].getValue(); };
+  var cases = [
+    { name: 'A 管理本部から選択（遅刻）', dept: '管理本部', who: [['対象者（管理本部）', first('対象者（管理本部）')]], kind: '遅刻' },
+    { name: 'B 法人カーケアから選択（欠勤）', dept: '法人カーケア', who: [['対象者（法人カーケア）', first('対象者（法人カーケア）')]], kind: '欠勤' },
+    { name: 'C リスタイル上里から選択（早退）', dept: 'リスタイル上里', who: [['対象者（リスタイル上里）', first('対象者（リスタイル上里）')]], kind: '早退' },
+    { name: 'D 全員の一覧からリスタイル川口の人を選択（打刻の修正）', dept: AC_FORM_ALL_CHOICE, who: [['対象者', first('対象者（リスタイル川口）')]], kind: '打刻の修正' },
+    { name: 'E 対象者が2人（誤入力の想定）', dept: 'リスタイル上里', who: [['対象者（リスタイル上里）', first('対象者（リスタイル上里）')], ['対象者', first('対象者（管理本部）')]], kind: '遅刻' },
+  ];
+  var mode = '';
+  cases.forEach(function (c) {
+    var r = form.createResponse();
+    r.withItemResponse(T['入力者（あなたのお名前）'].asTextItem().createResponse('テスト確認（' + c.name + '）'));
+    r.withItemResponse(L[AC_FORM_DEPT_Q].createResponse(c.dept));
+    c.who.forEach(function (w) { r.withItemResponse(L[w[0]].createResponse(w[1])); });
+    r.withItemResponse(T['区分'].asMultipleChoiceItem().createResponse(c.kind));
+    r.withItemResponse(T['日付（開始日）'].asDateItem().createResponse(new Date()));
+    r.withItemResponse(T['理由・連絡事項'].asParagraphTextItem().createResponse('テスト（LINEへは送らない）'));
+    var before = JSON.parse(p.getProperty('act:sends') || '[]').length;
+    try { r.submit(); mode = mode || '送信（トリガー経由）'; Utilities.sleep(8000); }
+    catch (e) { mode = '直接呼び出し（' + e.message + '）'; alcoholCheckOnAttendanceForm({ response: r }); }
+    var after = JSON.parse(p.getProperty('act:sends') || '[]');
+    Logger.log('■%s → %s', c.name, after.slice(before).map(function (s) { return s.to; }).join(' ＋ ') || '（記録なし：トリガー待ち）');
+  });
+  Logger.log('方式：%s', mode);
+}

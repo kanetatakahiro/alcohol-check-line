@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-20a';
+var AC_CODE_VERSION = '2026-10-22a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -625,6 +625,53 @@ function AC_formChoices(masterValues) {
 /** 純粋関数：選択肢から社員番号を取り出す */
 function AC_codeFromChoice(label) { var m = /（([^（）]+)）\s*$/.exec(String(label || '')); return m ? m[1].trim() : ''; }
 
+// ---------------- 部署別の対象者選択（2026-10-22） ----------------
+// 1ページ目で「所属（部署）」を選ぶと、その部署の在籍者だけの「対象者（部署名）」のページへ進む。
+// 従来の「対象者」（全員の一覧）は残し、「一覧にいない・わからない」を選んだときのページで使う（過去の回答の列もそのまま）。
+// 部署は従業員マスタの「所属・拠点」。選択肢は毎朝の案内のとき（8:30）に従業員マスタから更新する。
+// LINEの送り先（部門グループ）は、従来どおり選ばれた社員番号の従業員マスタの所属で決める（フォームで選んだ部署には依存しない）。
+var AC_FORM_DEPT_Q = '所属（部署）';
+var AC_FORM_ALL_CHOICE = '一覧にいない・わからない（全員から選ぶ）';
+var AC_FORM_PAGE_ALL = '対象者を選ぶ（全員）';
+var AC_FORM_PAGE_COMMON = '連絡の内容';
+var AC_FORM_NOBODY = '※現在この部署の在籍者はいません。前のページに戻って「一覧にいない・わからない」を選んでください';   // 括弧で終わらせない（社員番号と読み違えないため）
+function AC_formDeptWho(dept) { return '対象者（' + dept + '）'; }
+function AC_formDeptPage(dept) { return '対象者を選ぶ（' + dept + '）'; }
+
+/** 純粋関数：部署ごとの対象者の選択肢（在籍者のみ・社員番号順）。order は従業員マスタに出てくる順。所属が空の人は全員の一覧だけに出る */
+function AC_formChoicesByDept(masterValues) {
+  var byDept = {}, order = [], rows = [];
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var m = masterValues[i], code = AC_cellCode_(m[AC_COL.code]), name = String(m[AC_COL.name] || '').trim();
+    var dept = String(m[AC_COL.dept] || '').trim();
+    if (!code || !name || !dept || String(m[AC_COL.status]).trim() === '退職') continue;
+    if (!byDept[dept]) { byDept[dept] = []; order.push(dept); }
+    rows.push({ dept: dept, code: code, label: name + '（' + code + '）' });
+  }
+  rows.sort(function (a, b) { return (Number(a.code) || 0) - (Number(b.code) || 0) || (a.code < b.code ? -1 : 1); });
+  rows.forEach(function (r) { byDept[r.dept].push(r.label); });
+  return { order: order, byDept: byDept };
+}
+
+/** 純粋関数：「対象者」または「対象者（部署名）」の設問か */
+function AC_isWhoTitle(title) { var t = String(title || ''); return t === AC_FORM_Q.who || t.indexOf(AC_FORM_Q.who + '（') === 0; }
+
+/**
+ * 純粋関数：回答（[{title, value}]）から対象者を1人に決める。
+ * 対象者の設問は部署ごとに分かれているが、回答されるのは通ったページの1つだけ。
+ * 違う人が2つ以上入っていたら conflict（誤った通知を防ぐため、グループへは送らない）。
+ */
+function AC_whoFromResponses(pairs) {
+  var seen = {}, list = [];
+  (pairs || []).forEach(function (p) {
+    if (!AC_isWhoTitle(p.title)) return;
+    var v = String(p.value == null ? '' : p.value).trim();
+    if (!v || seen[v]) return;
+    seen[v] = true; list.push(v);
+  });
+  return { who: list.length === 1 ? list[0] : '', conflict: list.length > 1, values: list };
+}
+
 /**
  * 純粋関数：フォームの回答から、やること（お知らせ停止の行・管理者への文面）。
  * 終了日が空なら1日だけ。終了日が開始日より前なら入れ替える。
@@ -718,21 +765,114 @@ function AC_refreshFormChoices_(form) {
     if (!id) return;
     form = FormApp.openById(id);
   }
-  var item = form.getItems(FormApp.ItemType.LIST).filter(function (it) { return it.getTitle() === AC_FORM_Q.who; })[0];
-  if (!item) return;
-  var choices = AC_formChoices(AC_masterSheet_().getDataRange().getValues());
-  if (choices.length) item.asListItem().setChoiceValues(choices);
+  var lists = form.getItems(FormApp.ItemType.LIST);
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  var item = lists.filter(function (it) { return it.getTitle() === AC_FORM_Q.who; })[0];
+  if (item) {
+    var choices = AC_formChoices(mv);
+    if (choices.length) item.asListItem().setChoiceValues(choices);
+  }
+  // 部署別の「対象者（部署名）」（部署別の設定をしたフォームだけ。所属の設問の選択肢＝ページの移動先は変えない）
+  try {
+    var plan = AC_formChoicesByDept(mv), known = {};
+    lists.forEach(function (it) {
+      var t = it.getTitle();
+      if (t.indexOf(AC_FORM_Q.who + '（') !== 0) return;
+      var dept = t.slice(AC_FORM_Q.who.length + 1, -1);
+      known[dept] = true;
+      var c = plan.byDept[dept];
+      it.asListItem().setChoiceValues(c && c.length ? c : [AC_FORM_NOBODY]);
+    });
+    if (Object.keys(known).length) {
+      var missing = plan.order.filter(function (d) { return !known[d]; });
+      if (missing.length) Logger.log('フォームに部署のページがありません（全員の一覧からは選べます）：%s。alcoholCheckSetupFormDepts を実行すると追加されます', missing.join('、'));
+    }
+  } catch (e) { Logger.log('部署別の選択肢の更新に失敗：%s', e && e.message); }
+}
+
+/**
+ * 手動実行：勤怠連絡フォームを部署別の選択にする（何度実行しても同じ形になる。設問・回答は消さない）。
+ * 1ページ目「所属（部署）」→ 部署ごとの「対象者（部署名）」のページ → 共通の「連絡の内容」のページ。
+ * 「一覧にいない・わからない」を選ぶと、従来の「対象者」（全員の一覧）のページへ。
+ * 新しい部署ができたときは、もう一度実行するとその部署のページが追加される。
+ */
+function alcoholCheckSetupFormDepts() {
+  var id = PropertiesService.getScriptProperties().getProperty('ATTENDANCE_FORM_ID');
+  if (!id) throw new Error('スクリプトプロパティ ATTENDANCE_FORM_ID を設定してください');
+  var form = FormApp.openById(id);
+  var plan = AC_formChoicesByDept(AC_masterSheet_().getDataRange().getValues());
+  if (!plan.order.length) throw new Error('従業員マスタの「所属・拠点」が読めません。中止しました（フォームは変更していません）');
+  var LIST = FormApp.ItemType.LIST, PAGE = FormApp.ItemType.PAGE_BREAK;
+  // 設問はすべて「Item」（共通の型）で扱い、必要なときだけ asListItem / asPageBreakItem にする
+  var find = function (type, title) { return form.getItems(type).filter(function (it) { return it.getTitle() === title; })[0] || null; };
+  var byTitle = function (re) { return form.getItems().filter(function (it) { return re.test(it.getTitle()); })[0] || null; };
+  var ensurePage = function (title) {
+    if (!find(PAGE, title)) form.addPageBreakItem().setTitle(title);
+    return find(PAGE, title);
+  };
+  var ensureList = function (title, init) {
+    if (!find(LIST, title)) init(form.addListItem().setTitle(title));
+    return find(LIST, title);
+  };
+  var to = function (item, before) { var i = item.getIndex(), b = before.getIndex(); if (i !== b - 1) form.moveItem(i, i < b ? b - 1 : b); };
+  var who = find(LIST, AC_FORM_Q.who), kind = byTitle(/^区分$/);
+  if (!who || !kind) throw new Error('「対象者」または「区分」の設問が見つかりません。中止しました（フォームは変更していません）');
+  var help = who.getHelpText() || '連絡する人を選んでください';
+  // 1. 所属（部署）の設問：承認者（無ければ入力者）の次
+  var dept = ensureList(AC_FORM_DEPT_Q, function (li) {
+    li.setRequired(true).setChoiceValues([AC_FORM_ALL_CHOICE])
+      .setHelpText('連絡する人（お休みする人など）の所属を選んでください。見つからないときは「' + AC_FORM_ALL_CHOICE + '」を選んでください');
+  });
+  var anchor = byTitle(/^承認者/) || byTitle(/^入力者/);
+  if (anchor) { var ai = anchor.getIndex(), di = dept.getIndex(); if (di !== ai + 1) form.moveItem(di, di > ai ? ai + 1 : ai); }
+  // 2. 共通のページ（区分の前）→ 3. 全員のページ（従来の「対象者」）をその前に
+  var common = ensurePage(AC_FORM_PAGE_COMMON);
+  to(common, kind);
+  var allPage = ensurePage(AC_FORM_PAGE_ALL);
+  to(allPage, common);
+  to(who, common);
+  // 4. 部署ごとのページ：全員のページの前（従業員マスタに出てくる順）
+  var pages = {};
+  plan.order.forEach(function (d) {
+    var pb = ensurePage(AC_formDeptPage(d));
+    var li = ensureList(AC_formDeptWho(d), function (x) { x.setChoiceValues(plan.byDept[d]); });
+    li.asListItem().setRequired(true);
+    li.setHelpText(help);
+    to(pb, allPage);
+    to(li, allPage);
+    pages[d] = pb.asPageBreakItem();
+  });
+  // 5. 部署のページを終えたら共通のページへ（ページ区切りの移動先は「その前のページを終えた後」に効く）
+  var commonPb = common.asPageBreakItem(), allPb = allPage.asPageBreakItem();
+  plan.order.forEach(function (d, k) {
+    var next = k + 1 < plan.order.length ? pages[plan.order[k + 1]] : allPb;
+    next.setGoToPage(commonPb);
+  });
+  commonPb.setGoToPage(FormApp.PageNavigationType.CONTINUE);
+  // 6. 所属の選択肢 → 各ページへ
+  var dl = dept.asListItem();
+  dl.setChoices(plan.order.map(function (d) { return dl.createChoice(d, pages[d]); }).concat([dl.createChoice(AC_FORM_ALL_CHOICE, allPb)]));
+  AC_refreshFormChoices_(form);
+  Logger.log('部署別の選択を設定しました：%s（＋全員の一覧）', plan.order.map(function (d) { return d + ' ' + plan.byDept[d].length + '名'; }).join('、'));
 }
 
 /** フォーム送信時（インストール型トリガー） */
 function alcoholCheckOnAttendanceForm(e) {
   try {
-    var ans = {}, tz = AC_TZ;
+    var ans = {}, tz = AC_TZ, pairs = [];
     e.response.getItemResponses().forEach(function (r) {
       var t = r.getItem().getTitle(), v = r.getResponse();
       Object.keys(AC_FORM_Q).forEach(function (k) { if (AC_FORM_Q[k] === t) ans[k] = String(v || '').trim(); });
       if (/^承認者/.test(t) && String(v || '').trim()) ans.approver = String(v).trim();   // 文言が少し変わっても読む
+      pairs.push({ title: t, value: v });
     });
+    // 対象者：「対象者」（全員）または「対象者（部署名）」のうち、回答のあった1つ
+    var whoPick = AC_whoFromResponses(pairs);
+    if (whoPick.conflict) {
+      AC_pushLine_('【勤怠連絡フォーム】対象者が2人以上入っていたため、グループへのお知らせを止めました🙇‍♀️\n（' + whoPick.values.join('／') + '）\nフォームの回答をご確認ください。');
+      return;
+    }
+    ans.who = whoPick.who;
     // 本運用の開始日（スクリプトプロパティ FORM_LIVE_FROM、既定 2026-10-20）より前はテスト扱い
     var liveFrom = PropertiesService.getScriptProperties().getProperty('FORM_LIVE_FROM') || '2026-10-20';
     var isTest = AC_today_() < liveFrom;
@@ -2946,5 +3086,5 @@ if (typeof module !== 'undefined') {
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
-    AC_CODE_VERSION: AC_CODE_VERSION };
+    AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };
 }

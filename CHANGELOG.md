@@ -1,5 +1,13 @@
 # 変更履歴
 
+## 2026-10-26 社員管理AI：署名検証つきの分離構成に変更（ブランチ feature/employee-admin・本番未導入）
+- 方針変更：返信トークン方式（直結経路）は不採用として削除。LINE署名検証済みのイベントだけで申請・承認・取消を受け付ける
+- 構成：社員管理AI専用のLINE公式アカウント → Cloudflare Workers（新規 workers/line-webhook：LINE署名を確認し、合言葉の署名・5分・nonceつきで転送）→ 社員管理AI専用のApps Script（新規 gas/EmployeeAdminHost.gs＋gas/EmployeeAdmin.gs）。既存の公式アカウント・Webhook・Apps Script・VPS・DNSは変更しない
+- gas/AlcoholCheck.gs は main と同一に戻した（既存プロジェクトへの変更なし）
+- 従業員マスタ・お知らせ停止への行追加は appendRow（既存プロジェクトと同時に書いても上書きしない）
+- テスト：npm test 129件すべて成功（既存Apps Scriptと専用プロジェクト・Workersを同じ従業員マスタで同時に動かす結合テストを含む）
+- 資料：gas/EMPLOYEE_ADMIN.md（方式の比較・導入手順・切り戻し・既存Webhookを切り替える場合の参考手順）
+
 ## 2026-10-26 社員管理AI：Webhookを切り替えない先行導入方式（ブランチ feature/employee-admin・本番未導入）
 - 直結経路（今の LINE→Apps Script）で社員管理を扱う方式を追加（EA_DIRECT=true のときだけ）。Apps Script はLINE署名を読めないため「返信トークン確認」（先に返信し、LINEが受け付けたときだけ記録）で本物を確認。偽のイベントでは申請・承認・取消を一切記録しない
 - 送信者のグループメンバー確認・webhookEventId の重複防止・承認コード1回限りは両方式共通

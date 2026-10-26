@@ -1,7 +1,30 @@
 # 社員管理AI（第1段階：入社・退社・取消）
 
-状態：開発ブランチ `feature/employee-admin` で完成・テスト済み。**本番未導入**（本番反映・自動反映は別途承認）。
-先行導入は「方式A：Webhookを切り替えない直結方式」で行い、VPS中継（方式B）は後日の強化として残す。
+状態：開発ブランチ `feature/employee-admin` で完成・テスト済み。**本番未導入**（導入は別途承認）。
+
+## 構成（既存システムと分離）
+```
+勤怠管理グループ（LINE）
+ ├─ 既存の公式アカウント「REBIRTH 管理本部」 → 既存Webhook → 既存の Apps Script「勤怠・アルコールチェック管理」   ← 変更しない
+ └─ 社員管理AI用の公式アカウント（新規・招待）
+       → Cloudflare Workers（workers/line-webhook）… LINE署名を確認。違えば401
+       → 社員管理AI専用の Apps Script（EmployeeAdmin.gs＋EmployeeAdminHost.gs）… 転送の署名・5分・nonceを確認
+       → 従業員マスタ（既存と同じファイル）・お知らせ停止シート
+```
+- 既存の公式アカウント・Webhook・Apps Script（gas/AlcoholCheck.gs は main と同一）・VPS・DNS は変更しない
+- 既存の公式アカウントは、社員管理のメッセージ（【入社】等）には今までどおり反応しない（部門登録以外のグループ発言は無視する作り）
+
+## 署名検証方式の比較（2026-10-26 選定）
+| | ①専用LINE＋Cloudflare Workers（採用） | ②既存LINEのWebhookをWorkersへ切替 | ③既存LINEのWebhookをVPS中継へ切替 |
+|---|---|---|---|
+| 既存への影響 | なし（既存のWebhook・Apps Scriptは変更なし） | 既存のLINE受信（社員番号登録・部門登録）がすべてWorkers経由に。既存Apps Scriptの変更が必要 | ②と同じ＋11/1打刻記録の動くVPSに常駐プロセスを追加 |
+| 必要な準備 | Cloudflareアカウント（無料）、社員管理AI用LINE公式アカウント（無料） | Cloudflareアカウント | DNS（サブドメイン）、証明書、nginx、systemd |
+| 導入までの時間 | 最短（DNS待ちなし） | 短いが切替・確認が必要 | DNS担当者の対応待ち |
+| 切り戻し | 社員管理AI用LINEのWebhookを止める／`employeeAdminStop` | Webhook URLを元のApps Scriptに戻す | 同左 |
+| 費用 | 0円（Workers無料枠1日10万件、LINEコミュニケーションプラン無料） | 0円 | 0円（既存VPS） |
+
+採用理由：既存の受信経路に一切触れずに署名検証を入れられ、DNS・証明書・VPSの作業が不要なため最短。
+②③の受け口（Workers・`src/line-relay.js`）は同じ転送形式なので、将来既存LINEも署名検証したい場合はそのまま使える（その場合の手順は「参考：既存Webhookを切り替える場合」）。
 
 ## できること
 | 操作（勤怠管理グループで送る） | 動き |
@@ -14,39 +37,42 @@
 
 - 反映日：入社＝入社日、退社＝退職日の翌日（D列＝退職、N列＝退職日を**文字**で）
 - 入社：15列の行を追加（A列社員番号・M列TOTコード・O列入社日は文字。I・J列はチェックボックス）。入社前に本人がLINE登録していれば、その行に書き込む
-- 退社：最終出社日が退職日より前なら、承認時に「お知らせ停止」へ最終出社日の翌日〜退職日の行を追加（G列＝社員管理AI、H列＝申請番号）
+- 退社：最終出社日が退職日より前なら、承認時に「お知らせ停止」へ最終出社日の翌日〜退職日の行を追加（G列＝社員管理AI、H列＝申請番号）。既存の停止判定がそのまま読む
 - 照合：社員番号の再利用不可（退職者含む）、在籍者とのTOTコード重複不可、過去日付は7日前まで（警告）、退社は社員番号と氏名の一致、二重申請は警告
 - 別表記：第1段階はC列（既存の読み取り先）に書き、「別表記」シート（社員番号キー・複数可の将来の正本）にも記録
 - 記録：`社員管理_申請`（状態）、`社員管理_変更履歴`（変更前後）、`社員管理_操作ログ`（誰が何をしたか）
 
-## 受信経路と本物確認
-| | 方式A：直結（先行導入） | 方式B：VPS中継（後日） |
-|---|---|---|
-| 経路 | 今のまま LINE → Apps Script | LINE → VPS中継 → Apps Script |
-| 本物の確認 | **返信トークン確認**：先に返信し、LINEが受け付けた（＝LINEが発行した本物の返信トークン）ときだけ記録。偽のイベントは返信が失敗し、シートには何も書かない | LINE署名（X-Line-Signature）を中継で確認＋転送の署名・5分・nonce |
-| 必要な変更 | 本番Apps Scriptのみ | DNS・証明書・VPS常駐・Webhook切り替え |
-| スイッチ | `EA_DIRECT=true` | `EA_FORWARD_SECRET`＋Webhook切り替え |
-
-- Apps Script は受信時のヘッダーを読めないため、方式Aでは「LINE署名の検証」そのものはできない。代わりに返信トークンで本物を確かめる（偽造には LINE が発行した使い捨ての返信トークンが必要で、外部からは入手できない）
-- どちらの方式でも：勤怠管理グループのメッセージだけを扱う／送信者が今もグループのメンバーかを毎回 LINE に問い合わせる／webhookEventId で二重処理しない／承認コードは1回限り
-- 送信者が分からない（パソコン版LINE等）場合は受け付けない
-
-## 既存システムへの影響
-- `AlcoholCheck.gs` の変更：doPost で ①`line-verified` の分岐 ②各イベントを先に `EA_handleDirect_` に渡す（`EA_DIRECT` 未設定なら即 false）③設定表示に EA_ の項目と `employeeAdminDaily` を追加 ④版 2026-10-26ea
-- 社員管理以外のイベント（1対1の社員番号登録・部門登録・普段の会話・別グループ）は、シートも読まずにそのまま `AC_handleEvent_` へ。TOT中継（tot-raw）・打刻記録（VPS・cron）は経路も処理も変更なし
-- 従業員マスタ O1（入社日）とお知らせ停止 G1・H1（作成元・管理ID）の見出しを追加。既存処理は14列・6列までしか読まず、`AC_markRetired_`・名簿取り込みもO列を消さない
-- 停止：`employeeAdminStop`（設定とトリガーを削除）で即時に元の動きへ
+## 安全対策
+- **署名検証**：Workers が `X-Line-Signature`（本文のHMAC-SHA256）をチャネルシークレットで確認。署名なし・不一致・改ざんは401で、Apps Scriptへ届かない
+- **転送の改ざん防止**：Workers→Apps Script は LINEの本文そのものに合言葉のHMAC＋時刻（5分以内）＋使い捨て番号。合わない・古い・使い回し・署名の無い直接の送信は `NG` で何もしない
+- **権限**：勤怠管理グループ（`EA_ADMIN_GROUP_ID`）のメッセージだけ。送信者が今もメンバーかを毎回LINEに問い合わせる。送信者が分からない（パソコン版LINE等）場合は受け付けない
+- **重複防止**：webhookEventId で一度だけ処理（LINEの再送・Apps Scriptの一時失敗後の再送でも1回）。承認コードは1回限り
+- **段階的な有効化**：`EA_MODE` 未設定＝何もしない／`record`＝記録のみ／`on`＝利用。`EA_AUTO_APPLY=true` で初めて従業員マスタへ反映
+- **同じシートへの同時書き込み**：行の追加は appendRow（既存プロジェクトの社員番号登録と同時でも上書きしない）
+- **秘密情報**：チャネルシークレット・合言葉はWorkersのシークレットとApps Scriptのスクリプトプロパティだけに置く（GitHub・ログに出さない）。Workersのログ保存は無効
 
 ## テスト（すべて架空データ）
-- `npm test`：127件すべて成功（純粋関数23・模擬Apps Script＋模擬Webhook結合17・VPS中継5・既存82）
-- テスト用Apps Script「【テスト】社員管理AI（架空データ）」で `gas/test/EmployeeAdminTest.gs` の `eatRun`：46件すべて成功（直結方式・偽の返信トークン・承認と同時の反映を含む）
+- `npm test`：129件すべて成功
+  - 社員管理の部品23、結合14（既存Apps Script＝main のまま＋専用プロジェクト＋Workersを同じ従業員マスタで同時に動かす）、Workers 5、VPS中継5、既存82
+  - 既存への影響：既存の公式LINEは社員管理のメッセージに反応しない／社員番号登録・部門登録・ToT中継（tot-raw）はそのまま／gas/AlcoholCheck.gs は main から変更なし／専用プロジェクトに複製した定義は既存と一字一句同じ
+- テスト用Apps Script「【テスト】社員管理AI（架空データ）」（専用プロジェクトと同じ構成）で `eatRun`
 
-## 本番の先行導入手順（方式A・承認後）
-1. 本番の「コード.gs」がGitHub main（edd2e57）と同じか指紋で確認し、バックアップ
-2. 「コード.gs」を本ブランチの `gas/AlcoholCheck.gs` に差し替え、`EmployeeAdmin.gs` を追加（テスト用ファイルは入れない）
-3. デプロイを管理 → 既存のウェブアプリを「新しいバージョン」に更新（URLは変わらない）
-4. `employeeAdminSetup` を実行（シート作成、O1・G1・H1の見出し）。`alcoholCheckShowSettings` でトリガー7件・設定に変化がないことを確認
-5. スクリプトプロパティ `EA_DIRECT=true`・`EA_MODE=on` → 勤怠管理グループで「入社」「退社」を送り雛形の返信を確認（従業員マスタは変わらない）
-6. `EA_AUTO_APPLY=true` と `employeeAdminSetupTriggers`（毎朝5時台）で自動反映を開始
+## 本番導入の手順（すべて承認後）
+**事前準備（安藤さん）**
+1. Cloudflare の無料アカウントを作成
+2. LINE Official Account Manager で社員管理AI用の公式アカウントを作成（既存と同じプロバイダー）→ Messaging API を有効化。応答メッセージ・あいさつメッセージはオフ、グループ参加を許可
 
-戻し方：`employeeAdminStop` を実行（即時停止）。コードも戻す場合は、デプロイを管理で前のバージョン（19）を選ぶ。
+**導入（約30分・既存には触れない）**
+3. 社員管理AI専用の Apps Script プロジェクトを作成し、`EmployeeAdmin.gs`・`EmployeeAdminHost.gs` を入れる（テスト用ファイルは入れない）。スクリプトプロパティ：`EMPLOYEE_MASTER_ID`・`EA_LINE_CHANNEL_TOKEN`・`EA_FORWARD_SECRET`（新しく作る）
+4. ウェブアプリとしてデプロイ（実行ユーザー：自分、アクセス：全員）
+5. `employeeAdminSetup` を実行（従業員マスタ O1「入社日」、お知らせ停止 G1・H1、社員管理用シート4枚を追加。既存のデータには触れない）
+6. Cloudflare Workers に `workers/line-webhook` をデプロイし、シークレット3つを登録
+7. 社員管理AI用LINEの Webhook URL を Workers のURLにして「検証」→ 成功を確認。Webhookの再送を有効化
+8. 社員管理AI用LINEを勤怠管理グループに招待 → 操作ログに記録されたグループIDを `EA_ADMIN_GROUP_ID` に設定
+9. `EA_MODE=on` → グループで「入社」「退社」を送り雛形の返信を確認（従業員マスタは変わらない）
+10. `EA_AUTO_APPLY=true` と `employeeAdminSetupTriggers`（毎朝5時台）で自動反映を開始
+
+**切り戻し**：`employeeAdminStop`（設定とトリガーを削除し即時停止）。さらに止めるなら社員管理AI用LINEをグループから退出させる。既存システムは最初から変わっていないため、既存側の切り戻しは不要。
+
+## 参考：既存Webhookを切り替える場合（今回は不要）
+既存の公式アカウントも署名検証の受け口に通す場合：既存Apps Scriptに転送受け付け（`line-verified` → 社員管理以外は今までどおり `AC_handleEvent_`）を追加 → Workers（転送先＝既存Apps Script）をデプロイして「検証」で成功を確認 → 業務時間外にWebhook URLを切替（LINEの切替は即時でURLが1つのため受信は途切れない）→ 社員番号登録・部門登録を確認。切り戻しはWebhook URLを元のApps ScriptのURLに戻すだけ（即時）。

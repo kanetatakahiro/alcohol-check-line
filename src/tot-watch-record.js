@@ -7,7 +7,8 @@
 // 使い方（VPS）：
 //   node --env-file=.env src/tot-watch-record.js            記録する
 //   node --env-file=.env src/tot-watch-record.js --dry-run  取得して件数だけ表示する（保存しない）
-//   node src/tot-watch-record.js --check 2026-11-01         指定日の点検結果を表示する（ToTには接続しない）
+//   node src/tot-watch-record.js --check                    毎営業日の確認：前日・当日の結果、最後の記録、空き容量（ToTには接続しない）
+//   node src/tot-watch-record.js --check 2026-11-01         指定日の点検結果を詳しく表示する
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -322,14 +323,35 @@ export async function runRecord({ env = process.env, fetchImpl = fetch, now = ()
   } finally { release(); }
 }
 
+/**
+ * 毎営業日の確認用（ToTには接続しない・読み取りのみ）：前日と当日の点検結果、最後の記録、空き容量を1画面で表示する。
+ * 当日は「今の時刻までに予定されていた回」だけを数える。
+ */
+export function dailyReport(dir, now = new Date()) {
+  const today = japanDate(now), m = japanMinutes(now);
+  const upTo = SLOTS.filter(s => Number(s.slice(0, 2)) * 60 + Number(s.slice(3)) + 10 <= m).pop() || null;
+  const manifest = readManifest(dir);
+  const fmt = st => `${st.date}：${st.healthy ? '正常' : '要確認'}（成功 ${st.ok.length}/${st.expected}`
+    + (st.partial.length ? `・一部失敗 ${st.partial.join(',')}` : '') + (st.failed.length ? `・失敗 ${st.failed.join(',')}` : '')
+    + (st.missing.length ? `・実行なし ${st.missing.join(',')}` : '') + (st.broken.length ? `・ファイル不一致 ${st.broken.join(',')}` : '') + '）';
+  const lines = [fmt(checkDay(dir, addDays(today, -1), manifest))];
+  lines.push(upTo ? fmt(checkDay(dir, today, manifest, { upTo })) : `${today}：まだ予定の回なし`);
+  const last = manifest.filter(e => !e.broken).at(-1);
+  lines.push(`最後の記録：${last ? `${last.today} ${last.slot}（${last.ok ? '成功' : '失敗'}）` : 'なし'}`);
+  try {
+    const f = fs.statfsSync(dir);
+    lines.push(`空き容量：${Math.round((f.bavail * f.bsize) / 1024 / 1024)}MB`);
+  } catch { lines.push('空き容量：確認できません（保存先なし）'); }
+  return lines.join('\n');
+}
+
 export function showCheck(dir, date) {
-  const st = checkDay(dir, date);
-  return JSON.stringify(st);
+  return date ? JSON.stringify(checkDay(dir, date)) : dailyReport(dir);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const dir = process.env.WATCH_DATA_DIR || path.join(os.homedir(), 'watch-data');
-  if (args[0] === '--check') console.log(showCheck(dir, args[1] || japanDate(new Date())));
+  if (args[0] === '--check') console.log(showCheck(dir, args[1]));
   else runRecord({ dryRun: args.includes('--dry-run') }).catch(e => { console.error(e.message); process.exitCode = 1; });
 }

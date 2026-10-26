@@ -133,21 +133,42 @@ LINEの無料プランは月200通。出勤者全員への朝・夕の案内を�
 - Apps Script・トリガー・LINE通知・フォームは変更なし（コードは回答シートを列番号で読んでいない）
 
 ## 打刻の記録（勤怠見守りの先行開発・VPSのみ）【本番未導入・承認待ち】
-VPSで既存の取り込み（7:05・22:30）とは別に、打刻の記録だけを行う。Apps Script・LINE・スプレッドシートは変更しない。
+VPSで既存の取り込み（7:05・22:30）とは別に、打刻の記録だけを行う。Apps Script・LINE・スプレッドシートは変更しない。作業は10:00〜17:30（ToTの利用禁止時間帯を避ける）。
 
-### 導入手順（承認後・10:00〜17:30に作業）
-1. VPSにログインし、`cd ~/alcohol-check-line && git status` で変更がないことを確認する
-2. `git fetch && git checkout <承認されたコミット> -- src/tot-watch-record.js`（既存のファイルは変えない）
-3. 件数だけ表示（保存しない）：`node --env-file=.env src/tot-watch-record.js --dry-run` → `"ok":true` と件数が出ることを確認
-4. 1回だけ保存：`node --env-file=.env src/tot-watch-record.js` → `ls -l ~/watch-data/raw` にファイルが1つ、権限が `-rw-------` であることを確認
-5. `node src/tot-watch-record.js --check $(date +%F)` で点検結果を確認
-6. cronに2行を追加（既存の2行は残す）：
-   - `2 8,10-16 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1`
-   - `35 22 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1`
-   - 追加後 `crontab -l` で既存の `tot-relay.js` の2行と合わせて4行あることを確認
-7. 試験運転：翌日 `node src/tot-watch-record.js --check <前日>` で `"healthy":true` を確認。Apps Scriptの実行数で7:05・22:30の取り込みも正常なことを確認
+### cronの一覧（導入後）
+| 行 | 内容 | 区分 |
+|---|---|---|
+| `5 7 * * * … src/tot-relay.js …` | 7:05の取り込み | 既存（変更しない） |
+| `30 22 * * * … src/tot-relay.js …` | 22:30の取り込み | 既存（変更しない） |
+| `2 8,10-16 * * * … src/tot-watch-record.js >> ~/tot-watch.log 2>&1` | 8:02・10:02〜16:02の記録 | 新規 |
+| `35 22 * * * … src/tot-watch-record.js >> ~/tot-watch.log 2>&1` | 22:35の記録・点検・まとめ | 新規 |
 
-### 元に戻す
-1. `crontab -e` で `tot-watch-record.js` の2行だけを消す（既存の2行は残す）→ 記録が止まる
-2. 必要なら `rm src/tot-watch-record.js`、記録を消す場合は `rm -r ~/watch-data`（記録を消すとその期間の月間判定は保留になる）
-- 既存の処理（7:05・22:30・Apps Script）には影響しないため、それ以外の復旧作業は不要
+### 導入前チェック（読み取りのみ）
+1. `crontab -l` → 既存の `tot-relay.js` の2行だけであること
+2. `cd ~/alcohol-check-line && git status --short && git log -1 --format='%h %ad' --date=short` → 変更なし
+3. `sha256sum src/tot-relay.js src/tot-client.js src/reconcile.js` → 導入後に同じ値であることを確かめるため控える
+4. `df -h ~ && ls -ld ~ && umask && ls -ld ~/watch-data 2>/dev/null || echo 未作成` → 空き容量、ホームの権限、保存先が未作成であること
+5. `timedatectl | grep -E 'Time zone|synchronized'` → Asia/Tokyo・時刻同期 yes
+6. `node -v` → v22以上
+7. コントロールパネル：本契約に移行済み（「お試し期間中」の表示なし）・稼働中・IP 133.167.110.249
+
+### 導入手順（承認後）
+1. `crontab -l > ~/crontab-backup-$(date +%Y%m%d).txt`（今のcronを控える）
+2. `git fetch origin feature/watch-record && git show <承認されたコミット>:src/tot-watch-record.js > src/tot-watch-record.js`（新しいファイルを1つ置くだけ。既存のファイル・ブランチは変えない）
+3. `sha256sum src/tot-relay.js src/tot-client.js src/reconcile.js` → 導入前と同じこと
+4. `node --env-file=.env src/tot-watch-record.js --dry-run` → `"ok":true` と件数（保存しない）
+5. `node --env-file=.env src/tot-watch-record.js` → `ls -l ~/watch-data/raw` にファイル1つ・`-rw-------`、`ls -ld ~/watch-data` が `drwx------`
+6. cronに2行を追加：`(crontab -l; echo "2 8,10-16 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1"; echo "35 22 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1") | crontab -`
+7. `crontab -l` → 4行（既存2行＋新規2行）
+8. 翌日の確認：`node src/tot-watch-record.js --check` → 前日が「正常（成功 9/9）」。Apps Scriptの実行数で7:05・22:30も正常
+- 注意：手順2で置いたファイルは、後でブランチを main に統合して `git pull` するときに「上書きされる未管理のファイル」として止まる。統合のときは、内容が同じことを確かめてから消して pull する
+
+### 毎営業日の確認（受け口の監視ができるまでの暫定）
+- VPSにログインし `node ~/alcohol-check-line/src/tot-watch-record.js --check` を実行（ToTには接続しない・読み取りのみ・約1分）
+- 表示：前日と当日の「正常／要確認」（成功・一部失敗・失敗・実行なし・ファイル不一致の回）、最後の記録、空き容量
+- 「要確認」のとき：`tail -n 20 ~/tot-watch.log` で原因（ToT接続エラー・禁止時間帯など）を見る。記録が欠けた回は判定が保留になるだけで、誤った通知の原因にはならない
+
+### 元に戻す（記録データは消さない）
+1. `crontab -l | grep -v 'tot-watch-record.js' | crontab -`（新規の2行だけを外す）。または手順1の控えで `crontab ~/crontab-backup-YYYYMMDD.txt`
+2. 停止の確認：`crontab -l` に `tot-watch-record.js` が無い／`pgrep -f tot-watch-record || echo 実行中なし`／次の予定時刻の後に `tail -n 3 ~/tot-watch.log` と `--check` の「最後の記録」が増えていない
+- `~/watch-data` と `src/tot-watch-record.js` は残す（記録を消す必要はない）。既存の処理（7:05・22:30・Apps Script）には影響しないため、ほかの復旧作業は不要

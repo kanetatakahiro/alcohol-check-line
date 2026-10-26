@@ -7,7 +7,7 @@ import zlib from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import {
   SLOTS, minutesToForbidden, canRetryRun, slotFor, watchPlan, slim, getWithRetry, runRecord,
-  checkDay, readManifest, replayFirstSeen, pruneOld, ensureDirs, acquireLock,
+  checkDay, readManifest, replayFirstSeen, pruneOld, ensureDirs, acquireLock, dailyReport,
 } from '../src/tot-watch-record.js';
 
 // 架空データのみ。日本時間の時刻を Date にする
@@ -237,4 +237,19 @@ test('取り込み（後で使う）: 最初に確認した日時・後から差
 test('既存: tot-relay.js・tot-client.js・Apps Scriptのコード・cron設定は main から変わっていない', () => {
   const diff = execFileSync('git', ['diff', '--name-only', 'main', '--', 'src/tot-relay.js', 'src/tot-client.js', 'gas/AlcoholCheck.gs', 'gas/test/', 'deploy/'], { encoding: 'utf8' });
   assert.equal(diff.trim(), '');
+});
+
+test('毎営業日の確認: 前日・当日の結果、最後の記録、空き容量を1画面で表示（今の時刻までの回だけ数える）', async () => {
+  const dir = tmpDir();
+  const { fetchImpl } = fakeTot();
+  for (const h of ['08:02', '10:02', '11:02', '12:02', '13:02', '14:02', '15:02', '16:02', '22:35']) {
+    await runRecord({ env: { TOT_ACCESS_TOKEN: 't' }, fetchImpl, now: () => jst(`2026-11-01T${h}:00`), wait: noWait, log: () => {}, dir });
+  }
+  await runRecord({ env: { TOT_ACCESS_TOKEN: 't' }, fetchImpl, now: () => jst('2026-11-02T08:02:00'), wait: noWait, log: () => {}, dir });
+  const r = dailyReport(dir, jst('2026-11-02T11:30:00'));
+  assert.match(r, /2026-11-01：正常（成功 9\/9）/);
+  assert.match(r, /2026-11-02：要確認（成功 1\/3・実行なし 10:02,11:02）/);
+  assert.match(r, /最後の記録：2026-11-02 08:02（成功）/);
+  assert.match(r, /空き容量：\d+MB/);
+  assert.match(dailyReport(dir, jst('2026-11-02T07:00:00')), /2026-11-02：まだ予定の回なし/);
 });

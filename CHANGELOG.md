@@ -1,5 +1,12 @@
 # 変更履歴
 
+## 2026-10-26 社員管理AI：Webhookを切り替えない先行導入方式（ブランチ feature/employee-admin・本番未導入）
+- 直結経路（今の LINE→Apps Script）で社員管理を扱う方式を追加（EA_DIRECT=true のときだけ）。Apps Script はLINE署名を読めないため「返信トークン確認」（先に返信し、LINEが受け付けたときだけ記録）で本物を確認。偽のイベントでは申請・承認・取消を一切記録しない
+- 送信者のグループメンバー確認・webhookEventId の重複防止・承認コード1回限りは両方式共通
+- 承認時、反映日が今日以前で自動反映が有効なら、その場で従業員マスタへ反映してグループへ報告
+- 導入・停止用：employeeAdminSetup（シート・見出し）、employeeAdminSetupTriggers（毎朝5時台）、employeeAdminStop（即時停止）。設定表示に EA_ の項目と employeeAdminDaily を追加
+- テスト：npm test 127件、テスト用Apps Scriptの eatRun 46件すべて成功（架空データ）
+
 ## 2026-10-26 社員管理AI 第1段階（入社・退社・取消）完成（ブランチ feature/employee-admin・本番未導入）
 - 新規 gas/EmployeeAdmin.gs：勤怠管理グループでの申請（一言雛形・【入社】【退社】【取消】）、照合、承認（グループメンバー確認・6桁コード・72時間・1回限り）、予約、効力日の反映（毎朝・EA_AUTO_APPLY=true のときだけ）、完了報告、取消、変更履歴・操作ログ・申請シート、別表記シート、お知らせ停止 G/H 列
 - 安全対策：VPS中継（新規 src/line-relay.js）で LINE 署名を確認し、合言葉の署名・5分・nonce つきで転送（doPost の type 'line-verified'）。署名確認できない直結経路では社員管理は動かない。webhookEventId の重複防止

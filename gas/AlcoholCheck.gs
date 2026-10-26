@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-22a';
+var AC_CODE_VERSION = '2026-10-26ea';   // 社員管理AI（line-verified 受け口）を追加。本番未反映
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -2633,6 +2633,8 @@ function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
     if (body.type === 'tot-raw') return ContentService.createTextOutput(AC_handleTotRaw_(body));
+    // VPSの署名確認つき中継から届いたLINEのイベント（社員管理AI。EmployeeAdmin.gs が無い・未設定なら何もしない）
+    if (body.type === 'line-verified') return ContentService.createTextOutput(typeof EA_handleForward_ === 'function' ? EA_handleForward_(body) : 'NG');
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');

@@ -197,22 +197,36 @@ test('同じ社員番号の申請が審査中・予約中なら警告', () => {
   assert.ok(v.warnings.some((w) => /EA-20261109-001/.test(w)));
 });
 
-test('VPS中継からの転送：正しい署名だけ通す（時刻ずれ・再送・改ざんは拒否）', () => {
+test('VPS中継からの転送：正しい署名だけ通す（時刻ずれ・再送・改ざん・合言葉なしは拒否）', () => {
   const secret = 'test-secret-not-real';
   const hmac = (s, t) => createHmac('sha256', s).update(t).digest('hex');
-  const events = [{ type: 'message', webhookEventId: 'E1' }];
-  const now = 1_800_000_000;
-  const body = { type: 'line-verified', ts: now, nonce: 'n1', events, sig: hmac(secret, `${now}.n1.${JSON.stringify(events)}`) };
-  assert.equal(ea.EA_verifyForward(body, secret, now + 10, {}, hmac).ok, true);
-  assert.equal(ea.EA_verifyForward(body, secret, now + 301, {}, hmac).ok, false);
-  assert.equal(ea.EA_verifyForward(body, secret, now, { n1: true }, hmac).ok, false);
-  assert.equal(ea.EA_verifyForward({ ...body, events: [{ type: 'message', webhookEventId: 'E2' }] }, secret, now, {}, hmac).ok, false);
-  assert.equal(ea.EA_verifyForward(body, '', now, {}, hmac).ok, false);
-  assert.equal(ea.EA_verifyForward({ ...body, type: 'tot-raw' }, secret, now, {}, hmac).ok, false);
+  const payload = JSON.stringify({ destination: 'Uxx', events: [{ type: 'message', webhookEventId: 'E1' }] });
+  const now = 1_800_000_000, nonce = '0123456789abcdef0123';
+  const body = { type: 'line-verified', ts: now, nonce, payload, sig: hmac(secret, `${now}.${nonce}.${payload}`) };
+  const none = () => false;
+  assert.equal(ea.EA_verifyForward(body, secret, now + 10, none, hmac).ok, true);
+  assert.equal(ea.EA_verifyForward(body, secret, now + 301, none, hmac).ok, false);
+  assert.equal(ea.EA_verifyForward(body, secret, now, (n) => n === nonce, hmac).ok, false);
+  assert.equal(ea.EA_verifyForward({ ...body, payload: payload.replace('E1', 'E2') }, secret, now, none, hmac).ok, false);
+  assert.equal(ea.EA_verifyForward({ ...body, sig: hmac('other', `${now}.${nonce}.${payload}`) }, secret, now, none, hmac).ok, false);
+  assert.equal(ea.EA_verifyForward(body, '', now, none, hmac).ok, false);
+  assert.equal(ea.EA_verifyForward({ ...body, type: 'tot-raw' }, secret, now, none, hmac).ok, false);
 });
 
-test('webhookEventId の重複は1回だけ処理', () => {
+test('webhookEventId の重複は1回だけ処理（同じ転送内・別の転送どちらも）', () => {
   const seen = {};
-  assert.equal(ea.EA_dedupeEvents([{ webhookEventId: 'A' }, { webhookEventId: 'A' }, { webhookEventId: 'B' }], seen).length, 2);
-  assert.equal(ea.EA_dedupeEvents([{ webhookEventId: 'B' }], seen).length, 0);
+  const isSeen = (id) => !!seen[id], mark = (id) => { seen[id] = true; };
+  assert.equal(ea.EA_dedupeEvents([{ webhookEventId: 'A' }, { webhookEventId: 'A' }, { webhookEventId: 'B' }], isSeen, mark).length, 2);
+  assert.equal(ea.EA_dedupeEvents([{ webhookEventId: 'B' }], isSeen, mark).length, 0);
+});
+
+test('退職者のTOTコードを再利用した入社は可、在籍者と重複（0付きも同一視）は反映時にも止める', () => {
+  const p = ea.EA_parseMessage(HIRE.replace('600', '0501'));
+  assert.equal(ea.EA_validate(p, MASTER, TODAY, []).ok, false);
+  assert.equal(ea.EA_planMasterChange(p, MASTER).ok, false);
+});
+
+test('社員番号は4〜6桁（LINE登録の社員番号と同じ）', () => {
+  assert.ok(ea.EA_parseMessage(HIRE.replace('９０１００', '123')).errors.some((e) => /4〜6桁/.test(e)));
+  assert.ok(ea.EA_parseMessage(HIRE.replace('９０１００', '1234567')).errors.some((e) => /4〜6桁/.test(e)));
 });

@@ -1,0 +1,17 @@
+# 【本番導入時・承認後】/etc/systemd/system/line-relay.service として置く（ユーザー名・パスは環境に合わせる）
+# 既存の cron（tot-relay.js 7:05／22:30）とは別の常駐プロセス。止めても既存の処理には影響しない。
+[Unit]
+Description=LINE Webhook 署名確認つき中継（社員管理AI）
+After=network-online.target
+
+[Service]
+User=alcohol
+WorkingDirectory=/home/alcohol/alcohol-check-line
+ExecStart=/usr/bin/node --env-file=/home/alcohol/alcohol-check-line/line-relay.env src/line-relay.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

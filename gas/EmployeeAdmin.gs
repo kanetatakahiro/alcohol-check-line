@@ -1,17 +1,29 @@
 /**
- * 社員管理AI（第1段階：入社・退社・取消）— 純粋関数のみ（開発ブランチ feature/employee-admin）
+ * 社員管理AI（第1段階：入社・退社・取消）
  *
- * ここにあるのは「判定・計算」だけで、スプレッドシート・LINE・外部通信には一切触れない。
- * 本番のApps Scriptには未導入（導入は別途承認後）。テストは test/employee-admin.test.js（すべて架空データ）。
+ * 流れ：勤怠管理グループに申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
+ *       → 予約 → 効力日（入社＝入社日、退社＝退職日の翌日）の朝に従業員マスタへ反映 → グループへ完了報告。反映前なら取消できる。
  *
- * 流れ：勤怠管理グループに申請 → 形式チェック・マスタ照合 → グループ内の誰かが承認（承認コード・72時間有効）
- *       → 予約 → 効力日に従業員マスタへ反映 → 完了報告。反映前なら取消できる。
+ * 安全のしくみ
+ *  - LINEからの受信は、VPSの中継（src/line-relay.js）が LINE の署名（X-Line-Signature）を確かめたものだけを扱う。
+ *    中継→Apps Script の転送は合言葉付きの署名（HMAC）・5分以内・使い捨ての番号（nonce）で確かめる。
+ *    署名を確かめられない受信（今の LINE→Apps Script 直結の経路）では、社員管理の操作は一切行わない。
+ *  - 承認・申請・取消は、勤怠管理グループ（「LINEグループ」シートで「勤怠管理」として登録済み）のメンバーだけ。
+ *    LINEの「グループメンバーのプロフィール取得」で、送信者が今もメンバーかを毎回確かめる。
+ *  - 同じLINEイベント（webhookEventId）は一度だけ処理する。
  *
- * 日付はすべて日本時間の 'YYYY-MM-DD' 文字列で扱う。従業員マスタのO列（入社日）・N列（退職日）へは
- * 必ず「文字」で書く（日付型で入ると AC_isRetired が退職扱いにしてしまうため）。
+ * 切り替え（スクリプトプロパティ）
+ *  - EA_MODE：未設定・off＝何もしない（既存の動きのまま）／record＝記録のみ（返信・承認・反映なし）／on＝利用開始
+ *  - EA_AUTO_APPLY：'true' のときだけ、毎朝の処理で従業員マスタへ反映する
+ *  - EA_FORWARD_SECRET：VPS中継と同じ合言葉（転送の署名用）
+ *  本番では、どれも未設定（＝off）のままなら今までと何も変わらない。
+ *
+ * 日付はすべて日本時間の 'YYYY-MM-DD'。従業員マスタのO列（入社日）・N列（退職日）へは「文字」で書く
+ * （日付型で入ると AC_isRetired が退職扱いにしてしまうため）。
+ * 別表記：第1段階ではC列（既存の読み取り先）に書き、あわせて「別表記」シート（社員番号をキーに複数管理する将来の正本）にも記録する。
  */
 
-var EA_VERSION = '2026-10-26-dev1';
+var EA_VERSION = '2026-10-26-dev2';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
 var EA_FORWARD_WINDOW_SEC = 300;     // VPS中継からの転送の有効時間（5分）
@@ -20,6 +32,9 @@ var EA_PAUSE_SOURCE = '社員管理AI';  // お知らせ停止シートG列「�
 /** マスタ列（AC_COL と同じ並び＋O列 入社日） */
 var EA_COL = { code: 0, name: 1, alias: 2, status: 3, dept: 4, userId: 5, lineName: 6, lineAt: 7, lineOk: 8,
   alcohol: 9, note: 10, category: 11, totCode: 12, retiredOn: 13, hiredOn: 14 };
+var EA_MASTER_WIDTH = 15;
+var EA_MASTER_COL_NAMES = ['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時',
+  'LINE確認済み', 'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日', '入社日'];
 
 var EA_CATEGORY_ALIAS = { '社員': '正社員', '正社員': '正社員', 'アルバイト': 'パート', 'パート': 'パート',
   '契約': '契約社員', '契約社員': '契約社員', '嘱託': '嘱託' };
@@ -30,7 +45,9 @@ var EA_TEMPLATES = {
   '取消': '【取消】\n申請番号：',
 };
 
-// ---------- 共通の小物 ----------
+// ======================================================================
+// 純粋関数（Node.js のテスト対象。シート・LINE・外部通信には触れない）
+// ======================================================================
 
 function EA_z2h_(s) {
   return String(s == null ? '' : s).replace(/[０-９Ａ-Ｚａ-ｚ]/g, function (c) {
@@ -53,8 +70,7 @@ function EA_isoDate(s) {
 
 function EA_addDays(iso, n) {
   var p = iso.split('-');
-  var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2] + n));
-  return d.toISOString().slice(0, 10);
+  return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2] + n)).toISOString().slice(0, 10);
 }
 
 function EA_daysBetween(a, b) {   // b - a（日数）
@@ -63,15 +79,22 @@ function EA_daysBetween(a, b) {   // b - a（日数）
 }
 
 function EA_cellCode(v) { return EA_z2h_(v).replace(/^'/, '').trim(); }
+/** TOTコードの比較用（「0083」と「83」を同じに扱う。AC_totKey と同じ） */
+function EA_totKey(v) { var t = EA_cellCode(v); return /^\d+$/.test(t) ? t.replace(/^0+(?=\d)/, '') : t; }
 
-// ---------- ① 申請文の読み取り ----------
+var EA_FIELD_KEYS = {
+  '社員番号': 'code', '氏名': 'name', '入社日': 'hiredOn', '所属・拠点': 'dept', '所属': 'dept', '拠点': 'dept',
+  '社員区分': 'category', '雇用区分': 'category', 'TOTコード': 'totCode', 'ToTコード': 'totCode',
+  'シフト表の書き方': 'alias', '別表記': 'alias', 'アルコールチェック': 'alcohol', '退職日': 'retiredOn',
+  '最終出社日': 'lastDay', '申請番号': 'id',
+};
 
 /**
  * グループのメッセージを読み取る。
- *  - 「入社」「退社」「取消」だけ → { type:'template', kind, text }（雛形を返信用に返す）
+ *  - 「入社」「退社」「取消」だけ → { type:'template', kind, text }
  *  - 【入社】【退社】【取消】で始まる → { type:'request', kind, fields, errors }
- *  - 「承認 EA-… 123456」「却下 EA-…」 → { type:'decision', … }
- *  - それ以外 → null（何もしない。既存の部門登録などに渡す）
+ *  - 「承認 EA-… 123456」「却下 EA-…」 → { type:'decision', action, id, code }
+ *  - それ以外 → null（社員管理では扱わない。既存の部門登録などはそのまま）
  */
 function EA_parseMessage(text) {
   var t = String(text == null ? '' : text).replace(/\r\n?/g, '\n').trim();
@@ -85,54 +108,44 @@ function EA_parseMessage(text) {
   var h = /^【\s*(入社|退社|退職|取消)\s*】/.exec(t);
   if (!h) return null;
   var kind = h[1] === '退職' ? '退社' : h[1];
-  var fields = {}, errors = [];
+  var f = {}, errors = [];
   t.slice(h[0].length).split('\n').forEach(function (line) {
     var m = /^\s*([^：:]+?)\s*[：:]\s*(.*)$/.exec(line);
     if (!m) return;
     var key = EA_norm(m[1]).replace(/（.*?）|\(.*?\)/g, '');
     var val = m[2].replace(/（わかれば）|（氏名と違う場合のみ）|（退職日と同じなら空欄）/g, '').trim();
-    fields[EA_FIELD_KEYS[key] || key] = val;
+    f[EA_FIELD_KEYS[key] || key] = val;
   });
-  var req = { kind: kind, fields: {} };
-  var f = fields;
+  var fields;
   if (kind === '入社') {
-    req.fields = {
-      code: EA_cellCode(f.code), name: String(f.name || '').trim().replace(/\s+/g, ' '),
-      hiredOn: EA_isoDate(f.hiredOn), hiredOnRaw: f.hiredOn || '',
-      dept: String(f.dept || '').trim(), category: EA_CATEGORY_ALIAS[EA_norm(f.category)] || '',
-      categoryRaw: f.category || '', totCode: EA_cellCode(f.totCode), alias: String(f.alias || '').trim(),
+    fields = {
+      code: EA_cellCode(f.code), name: String(f.name || '').trim().replace(/[\s　]+/g, ' '),
+      hiredOn: EA_isoDate(f.hiredOn), dept: String(f.dept || '').trim(),
+      category: EA_CATEGORY_ALIAS[EA_norm(f.category)] || '', totCode: EA_cellCode(f.totCode),
+      alias: String(f.alias || '').trim(),
       alcohol: { '対象': true, 'はい': true, '対象外': false, 'いいえ': false }[EA_norm(f.alcohol)],
     };
-    if (req.fields.alcohol === undefined) errors.push('アルコールチェックは「対象」か「対象外」で入力してください');
-    if (!req.fields.code) errors.push('社員番号がありません');
-    if (!req.fields.name) errors.push('氏名がありません');
-    if (!req.fields.hiredOn) errors.push('入社日が読めません（例：2026-11-05）');
-    if (!req.fields.dept) errors.push('所属・拠点がありません');
-    if (!req.fields.category) errors.push('社員区分が読めません（正社員／パート／契約社員／嘱託）');
+    if (!fields.code) errors.push('社員番号がありません');
+    if (!fields.name) errors.push('氏名がありません');
+    if (!fields.hiredOn) errors.push('入社日が読めません（例：2026-11-05）');
+    if (!fields.dept) errors.push('所属・拠点がありません');
+    if (!fields.category) errors.push('社員区分が読めません（正社員／パート／契約社員／嘱託）');
+    if (fields.alcohol === undefined) errors.push('アルコールチェックは「対象」か「対象外」で入力してください');
   } else if (kind === '退社') {
     var ret = EA_isoDate(f.retiredOn), last = f.lastDay ? EA_isoDate(f.lastDay) : '';
-    req.fields = { code: EA_cellCode(f.code), name: String(f.name || '').trim(), retiredOn: ret, lastDay: last || ret };
-    if (!req.fields.code) errors.push('社員番号がありません');
-    if (!req.fields.name) errors.push('氏名（確認用）がありません');
+    fields = { code: EA_cellCode(f.code), name: String(f.name || '').trim(), retiredOn: ret, lastDay: last || ret };
+    if (!fields.code) errors.push('社員番号がありません');
+    if (!fields.name) errors.push('氏名（確認用）がありません');
     if (!ret) errors.push('退職日が読めません（例：2026-11-30）');
     if (f.lastDay && !last) errors.push('最終出社日が読めません');
   } else {
-    req.fields = { id: EA_z2h_(f.id || '').trim() };
-    if (!/^EA-\d{8}-\d{3}$/.test(req.fields.id)) errors.push('申請番号が読めません（例：EA-20261105-001）');
+    fields = { id: EA_z2h_(f.id || '').trim() };
+    if (!/^EA-\d{8}-\d{3}$/.test(fields.id)) errors.push('申請番号が読めません（例：EA-20261105-001）');
   }
-  if (req.fields.code && !/^\d{3,8}$/.test(req.fields.code)) errors.push('社員番号は数字で入力してください');
-  if (req.fields.totCode && !/^\d{1,10}$/.test(req.fields.totCode)) errors.push('TOTコードは数字で入力してください');
-  return { type: 'request', kind: kind, fields: req.fields, errors: errors };
+  if (fields.code && !/^\d{4,6}$/.test(fields.code)) errors.push('社員番号は4〜6桁の数字で入力してください');
+  if (fields.totCode && !/^\d{1,10}$/.test(fields.totCode)) errors.push('TOTコードは数字で入力してください');
+  return { type: 'request', kind: kind, fields: fields, errors: errors };
 }
-
-var EA_FIELD_KEYS = {
-  '社員番号': 'code', '氏名': 'name', '入社日': 'hiredOn', '所属・拠点': 'dept', '所属': 'dept', '拠点': 'dept',
-  '社員区分': 'category', '雇用区分': 'category', 'TOTコード': 'totCode', 'ToTコード': 'totCode',
-  'シフト表の書き方': 'alias', '別表記': 'alias', 'アルコールチェック': 'alcohol', '退職日': 'retiredOn',
-  '最終出社日': 'lastDay', '申請番号': 'id',
-};
-
-// ---------- ② マスタとの照合 ----------
 
 function EA_findByCode_(master, code) {
   for (var i = 1; i < (master || []).length; i++) if (EA_cellCode(master[i][EA_COL.code]) === code) return i;
@@ -146,9 +159,10 @@ function EA_isLinePlaceholder_(r) {
 
 /**
  * 申請内容をマスタと照らし合わせる。errors があれば受け付けない。warnings は確認のうえ承認できる。
+ * baseDate：日付の新しさを判定する基準日（申請時は今日、承認時は申請日）。
  * pending：審査中・予約中の申請（[{id, kind, fields, state}]）— 同じ社員の二重申請を見つける。
  */
-function EA_validate(parsed, master, today, pending) {
+function EA_validate(parsed, master, baseDate, pending) {
   var errors = (parsed.errors || []).slice(), warnings = [];
   var f = parsed.fields || {};
   var depts = {};
@@ -156,9 +170,9 @@ function EA_validate(parsed, master, today, pending) {
 
   function checkDate(iso, label) {
     if (!iso) return;
-    var diff = EA_daysBetween(today, iso);
+    var diff = EA_daysBetween(baseDate, iso);
     if (diff < -EA_PAST_DAYS_LIMIT) errors.push(label + 'が' + EA_PAST_DAYS_LIMIT + '日より前です（管理本部で直接修正してください）');
-    else if (diff < 0) warnings.push(label + 'が過去の日付です（' + iso + '）。承認すると次の反映時刻に反映します');
+    else if (diff < 0) warnings.push(label + 'が過去の日付です（' + iso + '）。承認後、次の反映処理で反映します');
   }
 
   if (parsed.kind === '入社') {
@@ -168,12 +182,13 @@ function EA_validate(parsed, master, today, pending) {
     checkDate(f.hiredOn, '入社日');
     if (f.dept && !depts[f.dept]) warnings.push('所属・拠点「' + f.dept + '」は今のマスタにない名前です（新しい拠点なら問題ありません）');
     if (f.totCode) {
-      (master || []).slice(1).forEach(function (r) {
-        if (EA_cellCode(r[EA_COL.totCode]) === f.totCode && r[EA_COL.status] !== '退職') errors.push('TOTコード ' + f.totCode + ' は在籍中の別の人に登録されています');
+      var hit = (master || []).slice(1).some(function (r) {
+        return EA_totKey(r[EA_COL.totCode]) === EA_totKey(f.totCode) && r[EA_COL.status] !== '退職';
       });
+      if (hit) errors.push('TOTコード ' + f.totCode + ' は在籍中の別の人に登録されています');
     } else warnings.push('TOTコードが空です。打刻のお知らせはTOTコード登録後に始まります');
-    var sameName = (master || []).slice(1).filter(function (r) { return f.name && EA_norm(r[EA_COL.name]) === EA_norm(f.name) && r[EA_COL.status] !== '退職'; });
-    if (sameName.length) warnings.push('同じ氏名の在籍者がいます（社員番号で区別します）');
+    var sameName = (master || []).slice(1).some(function (r) { return f.name && EA_norm(r[EA_COL.name]) === EA_norm(f.name) && r[EA_COL.status] !== '退職'; });
+    if (sameName) warnings.push('同じ氏名の在籍者がいます（社員番号で区別します）');
   } else if (parsed.kind === '退社') {
     var j = f.code ? EA_findByCode_(master, f.code) : -1;
     if (f.code && j < 0) errors.push('社員番号 ' + f.code + ' はマスタにありません');
@@ -194,8 +209,6 @@ function EA_validate(parsed, master, today, pending) {
   return { ok: errors.length === 0, errors: errors, warnings: warnings };
 }
 
-// ---------- ③ 申請番号・承認コード・状態 ----------
-
 /** 申請番号：EA-YYYYMMDD-連番3桁（その日の既存番号から次を決める） */
 function EA_newRequestId(today, existingIds) {
   var prefix = 'EA-' + today.replace(/-/g, '') + '-', max = 0;
@@ -203,7 +216,7 @@ function EA_newRequestId(today, existingIds) {
   return prefix + ('00' + (max + 1)).slice(-3);
 }
 
-/** 承認コード（6桁）。乱数は呼び出し側（GASは Utilities.getUuid 等）から渡す */
+/** 承認コード（6桁）。乱数は呼び出し側から渡す */
 function EA_approvalCode(randomInt) { return ('00000' + (Math.abs(Math.floor(randomInt)) % 1000000)).slice(-6); }
 
 function EA_isExpired(createdAtMs, nowMs) { return nowMs - createdAtMs > EA_APPROVAL_HOURS * 3600 * 1000; }
@@ -211,24 +224,24 @@ function EA_isExpired(createdAtMs, nowMs) { return nowMs - createdAtMs > EA_APPR
 /**
  * 状態遷移。申請中 →(承認)→ 予約 →(反映)→ 反映済
  *          申請中 →(却下／期限切れ／取消)→ 却下・期限切れ・取消
- *          予約   →(取消)→ 取消（反映前なら元の状態に何も残らない）
+ *          予約   →(取消)→ 取消、(反映できない)→ エラー
  * 反映済の取消は第1段階では受け付けない（訂正は第2段階）。
  */
 var EA_TRANSITIONS = {
   '申請中': { approve: '予約', reject: '却下', expire: '期限切れ', cancel: '取消' },
-  '予約': { apply: '反映済', cancel: '取消' },
+  '予約': { apply: '反映済', cancel: '取消', fail: 'エラー' },
 };
 
 function EA_transition(state, action) {
   var next = (EA_TRANSITIONS[state] || {})[action];
   if (next) return { ok: true, state: next };
-  var why = state === '反映済' && action === 'cancel' ? '反映済みの申請は取消できません（管理本部で直接修正するか、第2段階の「訂正」を使います）'
+  var why = state === '反映済' && action === 'cancel' ? '反映済みの申請は取消できません（管理本部で従業員マスタを直接修正してください）'
     : '「' + state + '」の申請には、その操作はできません';
   return { ok: false, state: state, error: why };
 }
 
 /**
- * 承認の判定。グループ外の人・期限切れ・コード違い・使用済みを弾く。
+ * 承認・却下の判定。署名未確認・グループ外・期限切れ・コード違い・使用済みを弾く（本人の承認は可）。
  * req: {state, createdAtMs, approvalCode}, decision: {action, code}, ctx: {isGroupMember, nowMs, verified}
  */
 function EA_judgeDecision(req, decision, ctx) {
@@ -240,8 +253,6 @@ function EA_judgeDecision(req, decision, ctx) {
   var t = EA_transition(req.state, decision.action);
   return t.ok ? { ok: true, state: t.state } : { ok: false, error: t.error };
 }
-
-// ---------- ④ 反映内容の計算 ----------
 
 /** その申請がマスタへ反映される日（入社＝入社日、退社＝退職日の翌日） */
 function EA_effectiveDate(parsed) {
@@ -255,32 +266,35 @@ function EA_dueRequests(requests, today) {
 
 /**
  * マスタへの書き込み内容を計算する（書き込みはしない）。
- * 戻り値 { ok, append?: 15列の行, updates?: [{row(1始まり), col(1始まり), value, text?}], error? }
+ * 戻り値 { ok, append?: 15列の行, textCols?: [列番号], updates?: [{row, col, value, text?}], error? }（行・列は1始まり）
  * text:true の値は、書き込み側でセルを「書式なしテキスト」にしてから入れる。
  */
 function EA_planMasterChange(parsed, master) {
   var f = parsed.fields;
   var i = EA_findByCode_(master, f.code);
   if (parsed.kind === '入社') {
-    if (i > 0 && !EA_isLinePlaceholder_(master[i])) return { ok: false, error: '社員番号がすでにあります' };
+    if (i > 0 && !EA_isLinePlaceholder_(master[i])) return { ok: false, error: '社員番号 ' + f.code + ' がすでにあります' };
+    var dup = (master || []).slice(1).some(function (r, k) {
+      return k + 1 !== i && f.totCode && EA_totKey(r[EA_COL.totCode]) === EA_totKey(f.totCode) && r[EA_COL.status] !== '退職';
+    });
+    if (dup) return { ok: false, error: 'TOTコード ' + f.totCode + ' が在籍中の別の人に登録されています' };
     var vals = {};
     vals[EA_COL.name] = f.name; vals[EA_COL.alias] = f.alias || ''; vals[EA_COL.status] = '在籍'; vals[EA_COL.dept] = f.dept;
     vals[EA_COL.alcohol] = !!f.alcohol; vals[EA_COL.category] = f.category; vals[EA_COL.totCode] = f.totCode || '';
     vals[EA_COL.hiredOn] = f.hiredOn;
+    var isText = function (c) { return c === EA_COL.hiredOn || c === EA_COL.totCode; };
     if (i > 0) {   // 先にLINE登録された行へ書き込む（LINE ID等はそのまま）
-      var ups = Object.keys(vals).map(function (c) {
-        return { row: i + 1, col: +c + 1, value: vals[c], text: +c === EA_COL.hiredOn || +c === EA_COL.totCode };
-      });
+      var ups = Object.keys(vals).map(function (c) { return { row: i + 1, col: +c + 1, value: vals[c], text: isText(+c) }; });
       ups.push({ row: i + 1, col: EA_COL.note + 1, value: '' });
       return { ok: true, updates: ups };
     }
-    var row = []; for (var k = 0; k <= EA_COL.hiredOn; k++) row.push('');
+    var row = []; for (var k = 0; k < EA_MASTER_WIDTH; k++) row.push('');
     row[EA_COL.code] = f.code; Object.keys(vals).forEach(function (c) { row[+c] = vals[c]; });
     row[EA_COL.lineOk] = false;
     return { ok: true, append: row, textCols: [EA_COL.code + 1, EA_COL.totCode + 1, EA_COL.hiredOn + 1] };
   }
   if (parsed.kind === '退社') {
-    if (i < 0) return { ok: false, error: '社員番号がマスタにありません' };
+    if (i < 0) return { ok: false, error: '社員番号 ' + f.code + ' がマスタにありません' };
     if (master[i][EA_COL.status] === '退職') return { ok: false, error: 'すでに退職になっています' };
     return { ok: true, updates: [
       { row: i + 1, col: EA_COL.status + 1, value: '退職' },
@@ -293,7 +307,7 @@ function EA_planMasterChange(parsed, master) {
 /**
  * 最終出社日の翌日〜退職日まで、お知らせを止める行（お知らせ停止シート 8列）。
  * 退職日＝最終出社日なら不要（退職日の翌日にマスタで退職になる）。
- * 開始日・終了日は日付型で書く必要がある（AC_toDateFn_ は日付型だけを変換する）ため、{date:'YYYY-MM-DD'} で返す。
+ * 開始日・終了日は日付型で書く必要がある（AC_toDateFn_ は日付型だけを変換する）ため {date:'YYYY-MM-DD'} で返す。
  */
 function EA_planPauseRow(parsed, master, requestId) {
   var f = parsed.fields;
@@ -303,30 +317,30 @@ function EA_planPauseRow(parsed, master, requestId) {
     '退職前の休み（最終出社日 ' + f.lastDay + '）', '全部', EA_PAUSE_SOURCE, requestId];
 }
 
-/** 取消時に消すお知らせ停止の行（G列=社員管理AI かつ H列=申請番号 のものだけ。手入力の行には触れない） */
+/** 取消時に消すお知らせ停止の行番号（G列=社員管理AI かつ H列=申請番号 のものだけ。手入力の行には触れない） */
 function EA_pauseRowsToRemove(pauseValues, requestId) {
   var out = [];
   for (var i = 1; i < (pauseValues || []).length; i++) {
-    if (pauseValues[i][6] === EA_PAUSE_SOURCE && pauseValues[i][7] === requestId) out.push(i + 1);
+    if (pauseValues[i][6] === EA_PAUSE_SOURCE && String(pauseValues[i][7]) === requestId) out.push(i + 1);
   }
   return out;
 }
 
-// ---------- ⑤ 安全対策（VPS中継からの転送の確認・重複防止） ----------
-
 /**
  * VPSの署名確認済み中継から届いた転送を確かめる。
- * body: { type:'line-verified', ts:秒, nonce, events:[…], sig }。sig = HMAC-SHA256(secret, ts + '.' + nonce + '.' + JSON.stringify(events)) の16進
+ * body: { type:'line-verified', ts:秒, nonce, payload:'LINEから届いた本文そのまま', sig }
+ * sig = HMAC-SHA256(secret, ts + '.' + nonce + '.' + payload) の16進
  * hmacHex(secret, text) は呼び出し側が渡す（GAS：Utilities.computeHmacSha256Signature、Node：crypto）。
- * seenNonces：使用済みnonceの集合（CacheService等）。
+ * nonceSeen(nonce)：使用済みなら true。
  */
-function EA_verifyForward(body, secret, nowSec, seenNonces, hmacHex) {
+function EA_verifyForward(body, secret, nowSec, nonceSeen, hmacHex) {
   if (!body || body.type !== 'line-verified') return { ok: false, error: 'type' };
-  if (!secret) return { ok: false, error: 'secret未設定' };
+  if (!secret) return { ok: false, error: '合言葉が未設定' };
   if (typeof body.ts !== 'number' || Math.abs(nowSec - body.ts) > EA_FORWARD_WINDOW_SEC) return { ok: false, error: '時刻ずれ' };
-  if (!body.nonce || seenNonces[body.nonce]) return { ok: false, error: '再送・重複' };
-  var expect = hmacHex(secret, body.ts + '.' + body.nonce + '.' + JSON.stringify(body.events || []));
-  if (!EA_safeEqual_(expect, String(body.sig || ''))) return { ok: false, error: '署名不一致' };
+  if (typeof body.payload !== 'string' || !/^[0-9a-f-]{16,64}$/i.test(String(body.nonce || ''))) return { ok: false, error: '形式' };
+  if (nonceSeen(body.nonce)) return { ok: false, error: '再送・重複' };
+  var expect = hmacHex(secret, body.ts + '.' + body.nonce + '.' + body.payload);
+  if (!EA_safeEqual_(expect, String(body.sig || '').toLowerCase())) return { ok: false, error: '署名不一致' };
   return { ok: true };
 }
 
@@ -336,15 +350,424 @@ function EA_safeEqual_(a, b) {
   return x === 0;
 }
 
-/** LINEの webhookEventId で、同じイベントを二度処理しない。未処理のものだけ返す */
-function EA_dedupeEvents(events, seenIds) {
+/** LINEの webhookEventId で、同じイベントを二度処理しない。未処理のものだけ返す（isSeen/markSeen は呼び出し側の記録） */
+function EA_dedupeEvents(events, isSeen, markSeen) {
+  var local = {};
   return (events || []).filter(function (ev) {
     var id = ev && ev.webhookEventId;
     if (!id) return true;
-    if (seenIds[id]) return false;
-    seenIds[id] = true;
+    if (local[id] || isSeen(id)) return false;
+    local[id] = true; markSeen(id);
     return true;
   });
+}
+
+/** 申請の内容を、グループへの返信用の文にする */
+function EA_describe(kind, f, masterName) {
+  if (kind === '入社') {
+    return ['社員番号：' + f.code, '氏名：' + f.name, '入社日：' + f.hiredOn, '所属・拠点：' + f.dept + '／' + f.category,
+      'TOTコード：' + (f.totCode || '（未登録）'), f.alias ? 'シフト表の書き方：' + f.alias : '',
+      'アルコールチェック：' + (f.alcohol ? '対象' : '対象外')].filter(Boolean).join('\n');
+  }
+  var lines = ['社員番号：' + f.code, '氏名：' + (masterName || f.name), '退職日：' + f.retiredOn];
+  lines.push(f.lastDay && f.lastDay < f.retiredOn
+    ? '最終出社日：' + f.lastDay + '（' + EA_addDays(f.lastDay, 1) + '〜' + f.retiredOn + ' はお知らせを止めます）'
+    : '最終出社日：' + f.retiredOn);
+  return lines.join('\n');
+}
+
+// ======================================================================
+// シート・LINEとのやり取り（Apps Script 上でのみ動く）
+// ======================================================================
+
+var EA_SHEET_REQ = '社員管理_申請';
+var EA_REQ_HEADER = ['申請番号', '状態', '種類', '社員番号', '氏名', '効力日', '申請内容', '申請者ID', '申請者名', '申請日時',
+  '承認コード', '承認・処理者ID', '承認・処理者名', '承認・処理日時', '反映日時', '警告・エラー', '更新日時'];
+var EA_R = { id: 0, state: 1, kind: 2, code: 3, name: 4, effective: 5, fields: 6, byId: 7, byName: 8, at: 9,
+  approvalCode: 10, actId: 11, actName: 12, actAt: 13, appliedAt: 14, note: 15, updatedAt: 16 };
+var EA_SHEET_HIST = '社員管理_変更履歴';
+var EA_HIST_HEADER = ['日時', '申請番号', '種類', '社員番号', 'シート', '行', '項目', '変更前', '変更後'];
+var EA_SHEET_LOG = '社員管理_操作ログ';
+var EA_LOG_HEADER = ['日時', '操作', '申請番号', '社員番号', 'LINEユーザーID', '表示名', '結果', '詳細'];
+var EA_SHEET_ALIAS = '別表記';
+var EA_ALIAS_HEADER = ['社員番号', '別表記', '登録日', '作成元', '申請番号'];
+var EA_PAUSE_EXTRA_HEADER = ['作成元', '管理ID'];
+
+function EA_props_() { return PropertiesService.getScriptProperties(); }
+function EA_mode_() { var m = String(EA_props_().getProperty('EA_MODE') || 'off').trim(); return m === 'on' || m === 'record' ? m : 'off'; }
+function EA_ss_() { return AC_masterSheet_().getParent(); }
+
+function EA_sheet_(name, header) {
+  var ss = EA_ss_(), sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function EA_appendRow_(sh, row) { sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]); }
+
+function EA_log_(op, id, code, uid, name, result, detail) {
+  try { EA_appendRow_(EA_sheet_(EA_SHEET_LOG, EA_LOG_HEADER), [new Date(), op, id || '', code ? "'" + code : '', uid || '', name || '', result || '', detail || '']); }
+  catch (e) { Logger.log('社員管理の操作ログを書けませんでした'); }
+}
+
+function EA_hmacHex_(secret, text) {
+  return Utilities.computeHmacSha256Signature(text, secret, Utilities.Charset.UTF_8).map(function (b) {
+    return ('0' + (b & 0xff).toString(16)).slice(-2);
+  }).join('');
+}
+
+function EA_rand_() { return parseInt(Utilities.getUuid().replace(/-/g, '').slice(0, 8), 16); }
+
+function EA_ms_(v) { return Object.prototype.toString.call(v) === '[object Date]' ? v.getTime() : (Date.parse(v) || 0); }
+
+function EA_dateObj_(iso) { return Utilities.parseDate(iso, AC_TZ, 'yyyy-MM-dd'); }
+
+/** 勤怠管理グループのグループID（「LINEグループ」シートで「勤怠管理」として有効なもの） */
+function EA_adminGroups_() { return AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || []; }
+
+// ---- LINE（テスト時は EA_lineClient_ に模擬を入れる。本物はトークンが無ければ何もしない） ----
+var EA_lineClient_ = null;
+function EA_line_() { return EA_lineClient_ || EA_REAL_LINE_; }
+var EA_REAL_LINE_ = {
+  reply: function (replyToken, messages) {
+    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    if (!t || !replyToken) return false;
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
+      method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + t },
+      payload: JSON.stringify({ replyToken: replyToken, messages: messages }), muteHttpExceptions: true,
+    });
+    return res.getResponseCode() === 200;
+  },
+  push: function (to, messages) {
+    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    if (!t || !to) return false;
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'post', contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + t, 'X-Line-Retry-Key': Utilities.getUuid() },
+      payload: JSON.stringify({ to: to, messages: messages }), muteHttpExceptions: true,
+    });
+    return res.getResponseCode() === 200;
+  },
+  /** 送信者が今もグループのメンバーなら {displayName}、確認できなければ null（安全側） */
+  memberProfile: function (groupId, userId) {
+    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    if (!t || !groupId || !userId) return null;
+    var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(groupId) + '/member/' + encodeURIComponent(userId), {
+      headers: { Authorization: 'Bearer ' + t }, muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() !== 200) return null;
+    try { return { displayName: String(JSON.parse(res.getContentText()).displayName || '') }; } catch (e) { return { displayName: '' }; }
+  },
+};
+
+function EA_text_(text, quick) {
+  var m = { type: 'text', text: String(text).slice(0, 4900) };
+  if (quick && quick.length) {
+    m.quickReply = { items: quick.map(function (q) { return { type: 'action', action: { type: 'message', label: q.label, text: q.text } }; }) };
+  }
+  return m;
+}
+
+function EA_reply_(ev, text, quick) {
+  try { EA_line_().reply(ev.replyToken, [EA_text_(text, quick)]); } catch (e) { Logger.log('社員管理の返信に失敗'); }
+}
+
+// ---- 入口：VPS中継からの転送（doPost から呼ぶ） ----
+function EA_handleForward_(body) {
+  var cache = CacheService.getScriptCache();
+  var v = EA_verifyForward(body, EA_props_().getProperty('EA_FORWARD_SECRET'), Math.floor(Date.now() / 1000),
+    function (n) { return !!cache.get('ea:nonce:' + n); }, EA_hmacHex_);
+  if (!v.ok) { Logger.log('中継からの転送を受け付けませんでした：%s', v.error); return 'NG'; }
+  cache.put('ea:nonce:' + body.nonce, '1', 900);
+  var payload;
+  try { payload = JSON.parse(body.payload); } catch (e) { return 'NG'; }
+  var events = EA_dedupeEvents(payload.events || [],
+    function (id) { return !!cache.get('ea:ev:' + id); },
+    function (id) { cache.put('ea:ev:' + id, '1', 21600); });
+  events.forEach(function (ev) {
+    try {
+      if (!EA_handleEvent_(ev, { verified: true })) AC_handleEvent_(ev);   // 社員管理以外は今までどおりの処理へ
+    } catch (err) {
+      Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
+      AC_adminNotice_('webhook', '【エラー】公式LINEに届いたメッセージの処理で問題がありました🙇‍♀️\n（' + (err && err.message ? err.message : '不明なエラー') + '）');
+    }
+  });
+  return 'OK';
+}
+
+/** 社員管理で扱ったら true（既存の処理には渡さない）。扱わないものは false。 */
+function EA_handleEvent_(ev, ctx) {
+  var mode = EA_mode_();
+  if (mode === 'off' || !ctx || !ctx.verified) return false;
+  var src = ev && ev.source;
+  if (!src || src.type !== 'group' || ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return false;
+  var parsed = EA_parseMessage(ev.message.text);
+  if (!parsed) return false;
+  if (EA_adminGroups_().indexOf(src.groupId) === -1) return false;   // 勤怠管理グループ以外では反応しない
+  var uid = src.userId || '';
+  if (mode === 'record') {
+    var info = parsed.type === 'request' ? parsed.kind + '／形式エラー' + (parsed.errors || []).length + '件' : parsed.type + '／' + (parsed.kind || parsed.action);
+    EA_log_('記録のみ', parsed.id || '', parsed.fields && parsed.fields.code, uid, '', '記録', info);
+    return true;
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { EA_dispatch_(ev, parsed, uid, src.groupId, ctx); } finally { lock.releaseLock(); }
+  return true;
+}
+
+function EA_dispatch_(ev, p, uid, gid, ctx) {
+  if (p.type === 'template') {
+    var t = p.text;
+    if (p.kind === '取消') {
+      var open = EA_loadRequests_().list.filter(function (r) { return r.state === '申請中' || r.state === '予約'; });
+      t += '\n\n取消できる申請：' + (open.length ? '\n' + open.map(function (r) {
+        return r.id + '（' + r.kind + '・' + r.fields.code + '・' + r.state + '）';
+      }).join('\n') : 'ありません');
+    }
+    EA_reply_(ev, '下の形式で送ってください。\n\n' + t);
+    return;
+  }
+  if (!uid) {   // パソコン版LINEなどでは送信者が分からない
+    EA_log_('拒否', p.id || '', p.fields && p.fields.code, '', '', 'NG', '送信者不明');
+    EA_reply_(ev, '【社員管理】送信した方を確認できないため受け付けできませんでした。スマートフォンのLINEから送ってください。');
+    return;
+  }
+  var member = EA_line_().memberProfile(gid, uid);
+  if (!member) {
+    EA_log_('拒否', p.id || '', p.fields && p.fields.code, uid, '', 'NG', 'グループメンバー確認不可');
+    EA_reply_(ev, '【社員管理】勤怠管理グループのメンバーであることを確認できなかったため、受け付けできませんでした。');
+    return;
+  }
+  var who = { uid: uid, name: member.displayName };
+  if (p.type === 'decision') return EA_decide_(ev, p, who, ctx);
+  if (p.kind === '取消') return EA_cancel_(ev, p, who);
+  return EA_submit_(ev, p, who);
+}
+
+function EA_loadRequests_() {
+  var sh = EA_sheet_(EA_SHEET_REQ, EA_REQ_HEADER), v = sh.getDataRange().getValues(), out = [];
+  for (var i = 1; i < v.length; i++) {
+    var r = v[i];
+    if (!String(r[EA_R.id]).trim()) continue;
+    var f = {};
+    try { f = JSON.parse(r[EA_R.fields] || '{}'); } catch (e) { f = {}; }
+    var ac = String(r[EA_R.approvalCode] == null ? '' : r[EA_R.approvalCode]).trim();
+    out.push({ row: i + 1, id: String(r[EA_R.id]).trim(), state: String(r[EA_R.state]).trim(), kind: String(r[EA_R.kind]).trim(),
+      fields: f, createdAtMs: EA_ms_(r[EA_R.at]), approvalCode: ac ? ('000000' + ac).slice(-6) : '' });
+  }
+  return { sheet: sh, list: out };
+}
+
+function EA_setReq_(sh, row, ch) {
+  var now = new Date();
+  if (ch.state) sh.getRange(row, EA_R.state + 1).setValue(ch.state);
+  if (ch.actor) sh.getRange(row, EA_R.actId + 1, 1, 3).setValues([[ch.actor.uid, ch.actor.name, now]]);
+  if (ch.applied) sh.getRange(row, EA_R.appliedAt + 1).setValue(now);
+  if (ch.note != null) sh.getRange(row, EA_R.note + 1).setValue(ch.note);
+  sh.getRange(row, EA_R.updatedAt + 1).setValue(now);
+}
+
+function EA_pendingOf_(list, exceptId) {
+  return list.filter(function (r) { return r.id !== exceptId && (r.state === '申請中' || r.state === '予約'); });
+}
+
+function EA_masterValues_() {
+  var ms = AC_masterSheet_();
+  var last = Math.max(ms.getLastRow(), 1);
+  return ms.getRange(1, 1, last, Math.max(ms.getLastColumn(), EA_MASTER_WIDTH)).getValues();
+}
+
+function EA_submit_(ev, p, who) {
+  var today = AC_today_();
+  var mv = EA_masterValues_(), R = EA_loadRequests_();
+  var v = EA_validate(p, mv, today, EA_pendingOf_(R.list, ''));
+  if (!v.ok) {
+    EA_log_('申請エラー', '', p.fields.code, who.uid, who.name, 'NG', v.errors.join('／'));
+    EA_reply_(ev, '【社員管理】' + p.kind + 'の申請を受け付けできませんでした。\n・' + v.errors.join('\n・') + '\n\n直して、もう一度送ってください。');
+    return;
+  }
+  var id = EA_newRequestId(today, R.list.map(function (r) { return r.id; }));
+  var code = EA_approvalCode(EA_rand_());
+  var i = EA_findByCode_(mv, p.fields.code), masterName = i > 0 ? String(mv[i][EA_COL.name]) : '';
+  var eff = EA_effectiveDate(p);
+  EA_appendRow_(R.sheet, [id, '申請中', p.kind, "'" + p.fields.code, p.kind === '入社' ? p.fields.name : masterName, "'" + eff,
+    JSON.stringify(p.fields), who.uid, who.name, new Date(), "'" + code, '', '', '', '', v.warnings.join('／'), new Date()]);
+  EA_log_('申請', id, p.fields.code, who.uid, who.name, 'OK', v.warnings.length ? '警告' + v.warnings.length + '件' : '');
+  var msg = '【社員管理】' + p.kind + 'の申請を受け付けました（' + id + '）\n' + EA_describe(p.kind, p.fields, masterName)
+    + '\n従業員マスタへの反映：' + eff + (p.kind === '退社' ? '（退職日の翌日）' : '')
+    + (v.warnings.length ? '\n\n⚠ 確認してください\n・' + v.warnings.join('\n・') : '')
+    + '\n\n内容が正しければ、勤怠管理グループのどなたかが下の「承認」を押してください（' + EA_APPROVAL_HOURS + '時間以内）。'
+    + '\n（ボタンが出ないときは「承認 ' + id + ' ' + code + '」と送ってください）';
+  EA_reply_(ev, msg, [{ label: '承認', text: '承認 ' + id + ' ' + code }, { label: '却下', text: '却下 ' + id }]);
+}
+
+function EA_decide_(ev, p, who, ctx) {
+  var R = EA_loadRequests_(), now = new Date();
+  var req = R.list.filter(function (r) { return r.id === p.id; })[0];
+  var j = EA_judgeDecision(req, p, { verified: !!ctx.verified, isGroupMember: true, nowMs: now.getTime() });
+  if (!j.ok) {
+    if (j.expire) EA_setReq_(R.sheet, req.row, { state: '期限切れ', note: '承認期限切れ' });
+    EA_log_(p.action === 'approve' ? '承認' : '却下', p.id, req && req.fields.code, who.uid, who.name, 'NG', j.error);
+    EA_reply_(ev, '【社員管理】' + p.id + '：' + j.error);
+    return;
+  }
+  if (p.action === 'reject') {
+    EA_setReq_(R.sheet, req.row, { state: '却下', actor: who });
+    EA_log_('却下', p.id, req.fields.code, who.uid, who.name, 'OK', '');
+    EA_reply_(ev, '【社員管理】' + p.id + '（' + req.kind + '・' + req.fields.code + '）を却下しました。従業員マスタは変わりません。');
+    return;
+  }
+  // 承認：申請後にマスタが変わっていないか、申請日を基準に確かめ直す
+  var mv = EA_masterValues_();
+  var submitted = Utilities.formatDate(new Date(req.createdAtMs), AC_TZ, 'yyyy-MM-dd');
+  var v = EA_validate({ kind: req.kind, fields: req.fields, errors: [] }, mv, submitted, []);
+  if (!v.ok) {
+    EA_log_('承認', p.id, req.fields.code, who.uid, who.name, 'NG', v.errors.join('／'));
+    EA_reply_(ev, '【社員管理】' + p.id + 'は承認できませんでした（申請後に従業員マスタが変わっています）。\n・' + v.errors.join('\n・')
+      + '\n\n必要なら「取消」してから申請し直してください。');
+    return;
+  }
+  var pause = EA_planPauseRow({ kind: req.kind, fields: req.fields }, mv, req.id);
+  if (pause) EA_writePause_(pause);
+  EA_setReq_(R.sheet, req.row, { state: '予約', actor: who });
+  EA_log_('承認', p.id, req.fields.code, who.uid, who.name, 'OK', pause ? 'お知らせ停止を追加' : '');
+  var eff = EA_effectiveDate(req), today = AC_today_();
+  EA_reply_(ev, '【社員管理】' + p.id + '（' + req.kind + '・' + req.fields.code + '）を承認しました。\n'
+    + (eff <= today ? '次の反映処理（毎朝5時台）で従業員マスタに反映します。' : eff + ' の朝（5時台）に従業員マスタへ反映します。')
+    + (pause ? '\n' + pause[2].date + '〜' + pause[3].date + ' はお知らせを止めます。' : '')
+    + (req.kind === '退社' ? '\nToT（Touch On Time）の退職登録もお願いします。' : '')
+    + '\n反映前なら「【取消】申請番号：' + p.id + '」で取り消せます。');
+}
+
+function EA_cancel_(ev, p, who) {
+  var R = EA_loadRequests_();
+  var req = R.list.filter(function (r) { return r.id === p.fields.id; })[0];
+  if (!req) { EA_reply_(ev, '【社員管理】' + p.fields.id + 'の申請は見つかりません。'); return; }
+  var t = EA_transition(req.state, 'cancel');
+  if (!t.ok) {
+    EA_log_('取消', req.id, req.fields.code, who.uid, who.name, 'NG', t.error);
+    EA_reply_(ev, '【社員管理】' + req.id + '：' + t.error);
+    return;
+  }
+  var removed = EA_removePause_(req.id);
+  EA_setReq_(R.sheet, req.row, { state: '取消', actor: who });
+  EA_log_('取消', req.id, req.fields.code, who.uid, who.name, 'OK', removed ? 'お知らせ停止' + removed + '行を削除' : '');
+  EA_reply_(ev, '【社員管理】' + req.id + '（' + req.kind + '・' + req.fields.code + '）を取り消しました。従業員マスタは変わりません。'
+    + (removed ? '\nこの申請で止めていたお知らせも元に戻しました。' : ''));
+}
+
+// ---- お知らせ停止シート（G列 作成元・H列 管理ID） ----
+function EA_pauseSheet_() {
+  AC_pauseRows_();   // 無ければ既存と同じ形で作る
+  var sh = EA_ss_().getSheetByName(AC_PAUSE_SHEET);
+  var head = sh.getRange(1, 7, 1, 2).getValues()[0];
+  if (String(head[0]) === EA_PAUSE_EXTRA_HEADER[0] && String(head[1]) === EA_PAUSE_EXTRA_HEADER[1]) return sh;
+  if (String(head[0]).trim() || String(head[1]).trim()) throw new Error('お知らせ停止シートのG・H列が別の用途で使われています');
+  sh.getRange(1, 7, 1, 2).setValues([EA_PAUSE_EXTRA_HEADER]).setFontWeight('bold');
+  return sh;
+}
+
+function EA_writePause_(row) {
+  var sh = EA_pauseSheet_();
+  var vals = row.map(function (x) { return x && x.date ? EA_dateObj_(x.date) : x; });
+  vals[0] = "'" + vals[0];
+  EA_appendRow_(sh, vals);
+}
+
+function EA_removePause_(requestId) {
+  var sh = EA_ss_().getSheetByName(AC_PAUSE_SHEET);
+  if (!sh) return 0;
+  var rows = EA_pauseRowsToRemove(sh.getDataRange().getValues(), requestId);
+  rows.sort(function (a, b) { return b - a; }).forEach(function (r) { sh.deleteRow(r); });
+  return rows.length;
+}
+
+// ---- 毎朝の処理（期限切れ・反映・完了報告） ----
+
+/** 毎朝5時台のトリガー用（トリガーの作成は本番承認後）。EA_MODE=on のときだけ動き、反映は EA_AUTO_APPLY=true のときだけ */
+function employeeAdminDaily() {
+  if (EA_mode_() !== 'on') return;
+  EA_runDaily_(EA_props_().getProperty('EA_AUTO_APPLY') === 'true');
+}
+
+function EA_runDaily_(apply) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  var lines = [];
+  try {
+    var today = AC_today_(), nowMs = Date.now(), R = EA_loadRequests_();
+    R.list.forEach(function (r) {
+      if (r.state === '申請中' && EA_isExpired(r.createdAtMs, nowMs)) {
+        EA_setReq_(R.sheet, r.row, { state: '期限切れ', note: '承認期限切れ' });
+        EA_log_('期限切れ', r.id, r.fields.code, '', '', 'OK', '');
+        lines.push('⌛ ' + r.id + '（' + r.kind + '・' + r.fields.code + '）は承認されないまま期限切れになりました');
+      }
+    });
+    if (apply) {
+      EA_dueRequests(R.list, today).forEach(function (r) {
+        var res = EA_applyOne_(r, R.sheet);
+        lines.push(res.ok ? '✅ ' + r.id + '（' + r.kind + '・' + r.fields.code + '）を従業員マスタに反映しました'
+          : '⚠ ' + r.id + '（' + r.kind + '・' + r.fields.code + '）は反映できませんでした：' + res.error);
+      });
+    }
+  } finally { lock.releaseLock(); }
+  if (lines.length) {
+    var text = '【社員管理】' + AC_today_() + ' の処理結果\n' + lines.join('\n');
+    EA_adminGroups_().forEach(function (g) { try { EA_line_().push(g, [EA_text_(text)]); } catch (e) { Logger.log('社員管理の報告に失敗'); } });
+  }
+  return lines;
+}
+
+function EA_ensureHiredHeader_(ms) {
+  var h = ms.getRange(1, EA_COL.hiredOn + 1).getValue();
+  if (String(h) === EA_MASTER_COL_NAMES[EA_COL.hiredOn]) return;
+  if (String(h).trim()) throw new Error('従業員マスタのO列が別の用途で使われています');
+  ms.getRange(1, EA_COL.hiredOn + 1).setValue(EA_MASTER_COL_NAMES[EA_COL.hiredOn]).setFontWeight('bold');
+}
+
+function EA_hist_(id, kind, code, sheet, row, col, before, after) {
+  EA_appendRow_(EA_sheet_(EA_SHEET_HIST, EA_HIST_HEADER), [new Date(), id, kind, "'" + code, sheet, row,
+    EA_MASTER_COL_NAMES[col - 1] || String(col), before === '' || before == null ? '' : "'" + String(before), after === '' || after == null ? '' : "'" + String(after)]);
+}
+
+function EA_applyOne_(req, reqSheet) {
+  try {
+    var ms = AC_masterSheet_();
+    EA_ensureHiredHeader_(ms);
+    var mv = EA_masterValues_();
+    var plan = EA_planMasterChange({ kind: req.kind, fields: req.fields }, mv);
+    if (!plan.ok) throw new Error(plan.error);
+    var sheetName = ms.getName();
+    (plan.updates || []).forEach(function (u) {
+      var cell = ms.getRange(u.row, u.col), before = mv[u.row - 1][u.col - 1];
+      if (u.text) cell.setNumberFormat('@');
+      cell.setValue(u.text ? String(u.value) : u.value);
+      EA_hist_(req.id, req.kind, req.fields.code, sheetName, u.row, u.col, before, u.value);
+    });
+    if (plan.append) {
+      var r = ms.getLastRow() + 1;
+      plan.textCols.forEach(function (c) { ms.getRange(r, c).setNumberFormat('@'); });
+      AC_checkboxes_(ms, r, 1);
+      ms.getRange(r, 1, 1, plan.append.length).setValues([plan.append]);
+      EA_hist_(req.id, req.kind, req.fields.code, sheetName, r, 1, '', '（行を追加）');
+    }
+    if (req.kind === '入社' && req.fields.alias) {
+      EA_appendRow_(EA_sheet_(EA_SHEET_ALIAS, EA_ALIAS_HEADER), ["'" + req.fields.code, req.fields.alias, new Date(), EA_PAUSE_SOURCE, req.id]);
+    }
+    EA_setReq_(reqSheet, req.row, { state: '反映済', applied: true });
+    EA_log_('反映', req.id, req.fields.code, '', '', 'OK', '');
+    return { ok: true };
+  } catch (e) {
+    var msg = e && e.message ? e.message : '不明なエラー';
+    EA_setReq_(reqSheet, req.row, { state: 'エラー', note: msg });
+    EA_log_('反映', req.id, req.fields.code, '', '', 'NG', msg);
+    return { ok: false, error: msg };
+  }
 }
 
 if (typeof module !== 'undefined') {
@@ -353,5 +776,5 @@ if (typeof module !== 'undefined') {
     EA_transition: EA_transition, EA_judgeDecision: EA_judgeDecision, EA_effectiveDate: EA_effectiveDate,
     EA_dueRequests: EA_dueRequests, EA_planMasterChange: EA_planMasterChange, EA_planPauseRow: EA_planPauseRow,
     EA_pauseRowsToRemove: EA_pauseRowsToRemove, EA_verifyForward: EA_verifyForward, EA_dedupeEvents: EA_dedupeEvents,
-    EA_TEMPLATES: EA_TEMPLATES, EA_COL: EA_COL };
+    EA_describe: EA_describe, EA_TEMPLATES: EA_TEMPLATES, EA_COL: EA_COL, EA_VERSION: EA_VERSION };
 }

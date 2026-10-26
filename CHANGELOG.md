@@ -1,9 +1,13 @@
 # 変更履歴
 
-## 2026-10-26 社員管理AI 第1段階（入社・退社・取消）開発開始（ブランチ feature/employee-admin・本番未導入）
-- 新規 gas/EmployeeAdmin.gs（純粋関数のみ。スプレッドシート・LINE・外部通信には触れない）と test/employee-admin.test.js（架空データ21件）
-- 内容：一言雛形（入社／退社／取消）、申請文の読み取り（全角数字・スラッシュ日付・区分の言い換え）、マスタ照合（社員番号の再利用禁止・在籍者とのTOTコード重複・過去日付は7日前まで警告・氏名照合）、入社前LINE登録行への書き込み、反映日（入社日／退職日の翌日）、O列入社日・N列退職日は文字で書く計画、最終出社日の翌日〜退職日のお知らせ停止行（G列作成元・H列管理ID）、取消時はAI作成の同一申請番号の行だけ削除、申請番号・承認コード・72時間期限・状態遷移、VPS中継転送の署名確認（5分・nonce）、webhookEventIdの重複防止
-- 既存の gas/AlcoholCheck.gs・main・feature/watch-record・本番GAS・VPS・LINE・スプレッドシートは変更なし
+## 2026-10-26 社員管理AI 第1段階（入社・退社・取消）完成（ブランチ feature/employee-admin・本番未導入）
+- 新規 gas/EmployeeAdmin.gs：勤怠管理グループでの申請（一言雛形・【入社】【退社】【取消】）、照合、承認（グループメンバー確認・6桁コード・72時間・1回限り）、予約、効力日の反映（毎朝・EA_AUTO_APPLY=true のときだけ）、完了報告、取消、変更履歴・操作ログ・申請シート、別表記シート、お知らせ停止 G/H 列
+- 安全対策：VPS中継（新規 src/line-relay.js）で LINE 署名を確認し、合言葉の署名・5分・nonce つきで転送（doPost の type 'line-verified'）。署名確認できない直結経路では社員管理は動かない。webhookEventId の重複防止
+- gas/AlcoholCheck.gs：doPost に 'line-verified' の分岐を追加、版 2026-10-26ea。既存の経路・処理は変更なし
+- 切り替え：EA_MODE（未設定=何もしない／record／on）。本番は未設定のままなら影響なし
+- テスト：純粋関数・模擬Apps Script結合・中継・既存の回帰（npm test）、テスト用Apps Script用の検査 gas/test/EmployeeAdminTest.gs。すべて架空データ
+- 資料：gas/EMPLOYEE_ADMIN.md、deploy/line-relay/（本番導入時用・未適用）
+- main・feature/watch-record・本番GAS・従業員マスタ・LINE・VPS・DNS・Webhookは変更なし
 
 ## 2026-10-23 勤怠変更連絡フォーム回答管理（スプレッドシートのみ・コード変更なし）
 - フォームの既存の回答先を「勤怠変更連絡フォーム回答管理」に名前変更。タブ「フォーム回答（原本）」（内容は変更なし）と「勤怠変更一覧」（数式で自動作成・見出し固定・フィルタ・新しい順）

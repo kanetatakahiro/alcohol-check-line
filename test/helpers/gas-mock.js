@@ -142,6 +142,8 @@ export function createGas({ files, now }) {
           else code = 404;
         } else if (prof) {
           text = JSON.stringify({ displayName: line.profiles[decodeURIComponent(prof[1])] || '試験ユーザー' });
+        } else if (/\/message\/reply$/.test(url) && rec.body && /^forged/.test(String(rec.body.replyToken))) {
+          code = 400; text = '{"message":"Invalid reply token"}';   // LINEが発行していない返信トークン
         } else if (!/api\.line\.me\/v2\/bot\/message\/(reply|push)$/.test(url)) {
           throw new Error(`想定外の通信先: ${url}`);
         }

@@ -12,7 +12,7 @@ const ADMIN1 = U(1), ADMIN2 = U(2), OUTSIDER = U(9), EMP1 = U(3);
 const HEAD14 = ['社員番号', '氏名', '別表記（シフト表の書き方が違う場合）', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時',
   'LINE確認済み', 'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日'];
 
-function setup({ mode = 'on' } = {}) {
+function setup({ mode = 'on', direct = false } = {}) {
   const g = createGas({ files: ['AlcoholCheck.gs', 'EmployeeAdmin.gs'], now: '2026-11-10T10:00:00+09:00' });
   const ss = g.newSpreadsheet('【テスト】従業員マスタ（架空）');
   const m = ss.insertSheet('従業員マスタ');
@@ -28,7 +28,7 @@ function setup({ mode = 'on' } = {}) {
   pause.appendRow(['社員番号', '氏名（参考）', '開始日', '終了日', 'メモ', '止めるお知らせ（全部／勤怠のみ）']);
   pause.appendRow(["'90002", '試験 二郎', '2026-11-12', '2026-11-12', '手入力の休み', '全部']);
   g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: ss.getId(), LINE_CHANNEL_ACCESS_TOKEN: 'fake-token-for-test',
-    LINE_ADMIN_USER_ID: U(7), EA_FORWARD_SECRET: SECRET, EA_MODE: mode });
+    LINE_ADMIN_USER_ID: U(7), EA_FORWARD_SECRET: SECRET, EA_MODE: mode, ...(direct ? { EA_DIRECT: 'true' } : {}) });
   g.line.members[ADMIN_G] = { [ADMIN1]: '管理A', [ADMIN2]: '管理B' };
   let seq = 0;
   const ev = (text, { userId = ADMIN1, groupId = ADMIN_G, id } = {}) => ({
@@ -45,11 +45,20 @@ function setup({ mode = 'on' } = {}) {
     const sent = g.fetches.slice(before).filter((f) => /message\/(reply|push)$/.test(f.url));
     return { out, body, sent, text: sent.map((f) => f.body.messages[0].text).join('\n---\n'), quick: sent[0] && sent[0].body.messages[0].quickReply };
   };
+  /** 今の直結経路（LINE→Apps Script、署名なし）で送る。forged:true なら LINE が発行していない返信トークン */
+  const sendRaw = (text, opt = {}) => {
+    const before = g.fetches.length;
+    const e = ev(text, opt);
+    if (opt.forged) e.replyToken = 'forged-' + e.replyToken;
+    const out = post({ destination: 'Uxxx', events: [e] });
+    const sent = g.fetches.slice(before).filter((f) => /message\/(reply|push)$/.test(f.url));
+    return { out, event: e, sent, text: sent.map((f) => f.body.messages[0].text).join('\n---\n'), quick: sent[0] && sent[0].body.messages[0].quickReply };
+  };
   const sheet = (n) => ss.getSheetByName(n);
   const reqs = () => (sheet('社員管理_申請') ? sheet('社員管理_申請').dump().slice(1) : []);
   const master = () => m.dump();
   const approveText = (r) => r.quick.items[0].action.text;
-  return { g, ss, m, ev, post, send, sheet, reqs, master, approveText };
+  return { g, ss, m, ev, post, send, sendRaw, sheet, reqs, master, approveText };
 }
 
 const HIRE = '【入社】\n社員番号：90100\n氏名：試験 花子\n入社日：2026-11-15\n所属・拠点：部署A\n社員区分：社員\nTOTコード：600\nシフト表の書き方：はなこ\nアルコールチェック：対象';
@@ -279,4 +288,94 @@ test('結合：テスト用プロジェクトの検査は、LINEのトークン�
   g.scriptProps.deleteProperty('LINE_CHANNEL_ACCESS_TOKEN');
   g.scriptProps.setProperty('EMPLOYEE_MASTER_ID', '1a8gBGm-adBHybREOOSLEjL9j4OHVwA0X_EdylHIZODU');
   assert.throws(() => g.ctx.eatRun(), /中止/);
+});
+
+// ---------- Webhookを切り替えない先行導入方式（直結経路＋返信トークン確認） ----------
+
+test('直結：入社の申請→承認→反映が、Webhookを切り替えずに動く', () => {
+  const t = setup({ direct: true });
+  assert.match(t.sendRaw('入社').text, /【入社】/);
+  const a = t.sendRaw(HIRE);
+  assert.match(a.text, /受け付けました（EA-20261110-001）/);
+  assert.equal(t.reqs()[0][1], '申請中');
+  assert.match(t.sendRaw(t.approveText(a), { userId: OUTSIDER }).text, /メンバーであることを確認できなかった/);
+  t.sendRaw(t.approveText(a), { userId: ADMIN2 });
+  assert.equal(t.reqs()[0][1], '予約');
+  t.g.clock.now = new Date('2026-11-15T05:10:00+09:00').getTime();
+  assert.match(t.g.ctx.EA_runDaily_(true)[0], /反映しました/);
+  assert.equal(t.master()[4][0], '90100');
+  assert.equal(t.master()[4][14], '2026-11-15');
+});
+
+test('直結：LINEが発行していない返信トークン（偽のイベント）では、申請・承認・取消を一切記録しない', () => {
+  const t = setup({ direct: true });
+  const f = t.sendRaw(HIRE, { forged: true });
+  assert.equal(t.reqs().length, 0);
+  assert.equal(t.sheet('社員管理_操作ログ'), null);
+  const a = t.sendRaw(RETIRE);
+  // 承認コードを知っていても、偽のイベントでは承認できない
+  t.sendRaw(t.approveText(a), { forged: true });
+  assert.equal(t.reqs()[0][1], '申請中');
+  assert.equal(t.sheet('お知らせ停止').dump().length, 2);
+  t.sendRaw(t.approveText(a));
+  assert.equal(t.reqs()[0][1], '予約');
+  assert.equal(t.sheet('お知らせ停止').dump().length, 3);
+  t.sendRaw('【取消】\n申請番号：EA-20261110-001', { forged: true });
+  assert.equal(t.reqs()[0][1], '予約');
+  assert.equal(t.sheet('お知らせ停止').dump().length, 3);
+  assert.match(t.sendRaw('【取消】\n申請番号：EA-20261110-001').text, /取り消しました/);
+  assert.equal(t.reqs()[0][1], '取消');
+  assert.equal(t.sheet('お知らせ停止').dump().length, 2);
+  assert.equal(f.sent.length, 1);               // 返信を試みただけ（LINEが拒否）
+});
+
+test('直結：同じイベント（webhookEventId）は1回だけ', () => {
+  const t = setup({ direct: true });
+  t.post({ events: [t.ev(HIRE, { id: 'SAME' })] });
+  t.post({ events: [t.ev(HIRE, { id: 'SAME' })] });
+  assert.equal(t.reqs().length, 1);
+});
+
+test('直結（回帰）：1対1の社員番号登録・部門登録・普段の会話・別グループ・ToT中継は今までどおり', () => {
+  const t = setup({ direct: true });
+  t.sendRaw('90002', { groupId: null, userId: U(4) });
+  assert.equal(t.master()[2][5], U(4));
+  assert.match(t.sendRaw('部門登録 部署B', { groupId: DEPT_G }).text, /「部署B」のグループとして登録しました/);
+  assert.equal(t.sendRaw('おはようございます').sent.length, 0);
+  assert.equal(t.sendRaw(HIRE, { groupId: DEPT_G }).sent.length, 0);
+  assert.equal(t.reqs().length, 0);
+  assert.equal(t.post({ type: 'tot-raw', secret: 'x' }), 'NG');
+});
+
+test('直結：EA_DIRECT が無い・EA_MODE が off なら、社員管理は動かない', () => {
+  const t1 = setup();                         // EA_DIRECT なし
+  assert.equal(t1.sendRaw(HIRE).sent.length, 0);
+  assert.equal(t1.reqs().length, 0);
+  const t2 = setup({ direct: true, mode: 'off' });
+  assert.equal(t2.sendRaw(HIRE).sent.length, 0);
+  assert.equal(t2.reqs().length, 0);
+});
+
+test('直結：1回の受信に社員管理と既存のイベントが混ざっていても、それぞれ処理される', () => {
+  const t = setup({ direct: true });
+  t.post({ events: [t.ev(HIRE), t.ev('90002', { groupId: null, userId: U(4) }), t.ev('部門登録 部署B', { groupId: DEPT_G })] });
+  assert.equal(t.reqs().length, 1);
+  assert.equal(t.master()[2][5], U(4));
+  assert.equal(t.sheet('LINEグループ').dump()[2][1], '部署B');
+});
+
+test('自動反映が有効なら、反映日を過ぎた承認はその場で反映し、グループへ報告する', () => {
+  const t = setup({ direct: true });
+  t.g.scriptProps.setProperty('EA_AUTO_APPLY', 'true');
+  const a = t.sendRaw(RETIRE.replace('退職日：2026-11-30', '退職日：2026-11-09').replace('最終出社日：2026-11-20', '最終出社日：2026-11-06'));
+  const b = t.sendRaw(t.approveText(a));
+  assert.match(b.text, /このあとすぐ従業員マスタに反映します/);
+  assert.match(b.text, /反映しました/);                       // 報告（push）
+  assert.equal(t.master()[1][3], '退職');
+  assert.equal(t.master()[1][13], '2026-11-09');
+  assert.equal(t.reqs()[0][1], '反映済');
+  // 入社日が未来なら、その場では反映しない
+  const c = t.sendRaw(HIRE);
+  assert.match(t.sendRaw(t.approveText(c)).text, /2026-11-15 の朝/);
+  assert.equal(t.master().length, 4);
 });

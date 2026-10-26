@@ -1391,11 +1391,14 @@ var AC_SETTINGS_SHOWN = {
   TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
   AGREEMENT_START_MONTH: '未設定＝4月',
   FORM_LIVE_FROM: '未設定＝2026-10-20',
+  EA_MODE: '未設定＝社員管理AIは動かない（record＝記録のみ／on＝利用）',
+  EA_DIRECT: '未設定＝直結経路では社員管理AIを扱わない（"true" で扱う）',
+  EA_AUTO_APPLY: '未設定＝従業員マスタへ自動反映しない（"true" で反映）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
-  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
+  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'EA_FORWARD_SECRET'];
 var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
-  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm'];
+  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'employeeAdminDaily'];
 
 /**
  * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
@@ -2635,7 +2638,11 @@ function doPost(e) {
     if (body.type === 'tot-raw') return ContentService.createTextOutput(AC_handleTotRaw_(body));
     // VPSの署名確認つき中継から届いたLINEのイベント（社員管理AI。EmployeeAdmin.gs が無い・未設定なら何もしない）
     if (body.type === 'line-verified') return ContentService.createTextOutput(typeof EA_handleForward_ === 'function' ? EA_handleForward_(body) : 'NG');
-    (body.events || []).forEach(AC_handleEvent_);
+    (body.events || []).forEach(function (ev) {
+      // 社員管理AI（EmployeeAdmin.gs）：EA_DIRECT='true' のときだけ、勤怠管理グループの【入社】【退社】等を扱う。それ以外は今までどおり
+      if (typeof EA_handleDirect_ === 'function' && EA_handleDirect_(ev)) return;
+      AC_handleEvent_(ev);
+    });
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
     AC_adminNotice_('webhook', '【エラー】公式LINEに届いたメッセージの処理で問題がありました🙇‍♀️\n（' + (err && err.message ? err.message : '不明なエラー') + '）');

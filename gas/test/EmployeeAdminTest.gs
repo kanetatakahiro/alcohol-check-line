@@ -25,7 +25,7 @@ AC_reply_ = function (token, text) { EAT_SENT.push({ type: 'reply', text: text }
 function EAT_fakeLine_() {
   var members = {}; members[EAT_ADMIN_G] = {}; members[EAT_ADMIN_G][EAT_ADMIN1] = '管理A'; members[EAT_ADMIN_G][EAT_ADMIN2] = '管理B';
   return {
-    reply: function (rt, msgs) { EAT_SENT.push({ type: 'reply', text: msgs[0].text, quick: msgs[0].quickReply }); return true; },
+    reply: function (rt, msgs) { if (/^forged/.test(String(rt))) return false; EAT_SENT.push({ type: 'reply', text: msgs[0].text, quick: msgs[0].quickReply }); return true; },
     push: function (to, msgs) { EAT_SENT.push({ type: 'push', to: to, text: msgs[0].text }); return true; },
     memberProfile: function (g, u) { return members[g] && members[g][u] ? { displayName: members[g][u] } : null; },
   };
@@ -87,6 +87,7 @@ function eatRun() {
   var secret = props.getProperty('EA_FORWARD_SECRET');
   var ss = SpreadsheetApp.openById(props.getProperty('EMPLOYEE_MASTER_ID'));
   var results = [], seq = 0;
+  employeeAdminSetup();
   var ok = function (name, cond, info) { results.push([cond ? 'PASS' : 'FAIL', name, cond ? '' : String(info == null ? '' : info).slice(0, 300)]); };
   var today = AC_today_(), add = EA_addDays;
 
@@ -175,11 +176,39 @@ function eatRun() {
     ok('期限切れは承認不可', /過ぎています/.test(send(approveText(e)).text));
     ok('送信者不明（パソコン版LINE）は不可', /スマートフォン/.test(send(retire, null).text));
 
+    // --- Webhookを切り替えない先行導入方式（直結経路＋返信トークン確認） ---
+    props.setProperty('EA_DIRECT', 'true');
+    function sendRaw(text, forged, userId, groupId) {
+      var n = EAT_SENT.length, e1 = ev(text, userId, groupId);
+      if (forged) e1.replyToken = 'forged-' + e1.replyToken;
+      post({ destination: 'U', events: [e1] });
+      var sent = EAT_SENT.slice(n);
+      return { sent: sent, text: sent.map(function (s) { return s.text; }).join('\n---\n'), quick: sent[0] && sent[0].quick };
+    }
+    var nd = reqs().length;
+    sendRaw('【入社】\n社員番号：90300\n氏名：試験 直子\n入社日：' + add(today, 3) + '\n所属・拠点：部署B\n社員区分：パート\nTOTコード：\nアルコールチェック：対象外', true);
+    ok('直結：偽の返信トークンでは記録しない', reqs().length === nd, reqs().length - nd);
+    var g1 = sendRaw('【入社】\n社員番号：90300\n氏名：試験 直子\n入社日：' + add(today, 3) + '\n所属・拠点：部署B\n社員区分：パート\nTOTコード：\nアルコールチェック：対象外');
+    ok('直結：申請を受付', /受け付けました/.test(g1.text) && reqs().length === nd + 1, g1.text);
+    sendRaw(approveText(g1), true);
+    ok('直結：偽のイベントでは承認されない', reqs()[nd][1] === '申請中', reqs()[nd][1]);
+    sendRaw(approveText(g1));
+    ok('直結：承認→予約', reqs()[nd][1] === '予約', reqs()[nd][1]);
+    ok('直結（回帰）：普段の会話には反応しない', sendRaw('おはようございます').sent.length === 0);
+    sendRaw('90002', false, 'U' + '4'.repeat(32), null);
+    ok('直結（回帰）：1対1の社員番号登録', master()[2][5] === 'U' + '4'.repeat(32), master()[2][5]);
+    props.setProperty('EA_AUTO_APPLY', 'true');
+    var g2 = sendRaw('【退社】\n社員番号：90002\n氏名：試験 二郎\n退職日：' + add(today, -1));
+    sendRaw(approveText(g2));
+    ok('直結：反映日なら承認と同時に反映', master()[2][3] === '退職' && master()[2][13] === add(today, -1), master()[2][3] + ':' + master()[2][13]);
+    props.deleteProperty('EA_AUTO_APPLY');
+    props.deleteProperty('EA_DIRECT');
+
     // --- 安全対策 ---
     var n0 = reqs().length;
     ok('署名違いは拒否', post(forward([ev(hire)], 'wrong-secret')) === 'NG');
     ok('5分より古い転送は拒否', post(forward([ev(hire)], null, -301)) === 'NG');
-    var f1 = forward([ev('【退社】\n社員番号：90002\n氏名：試験 二郎\n退職日：' + add(today, 30), undefined, undefined, 'EAT-SAME-' + Date.now())]);
+    var f1 = forward([ev(hire.replace('90100', '90400').replace('TOTコード：600', 'TOTコード：'), undefined, undefined, 'EAT-SAME-' + Date.now())]);
     post(f1);
     ok('同じ転送の再送は拒否', post(f1) === 'NG');
     var same = JSON.parse(f1.payload).events;
@@ -198,6 +227,7 @@ function eatRun() {
     ok('実行中のエラー', false, err && err.stack ? err.stack : err);
   } finally {
     props.setProperty('EA_MODE', 'on');
+    props.deleteProperty('EA_DIRECT'); props.deleteProperty('EA_AUTO_APPLY');
     EA_lineClient_ = null;
   }
   var sh = ss.insertSheet('テスト結果');

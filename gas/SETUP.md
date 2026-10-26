@@ -131,3 +131,23 @@ LINEの無料プランは月200通。出勤者全員への朝・夕の案内を�
   - 削除、ファイル名の変更、タブ名「シート1」の変更、A〜B列の編集、共有
   - 退職者も行に残す（過去の回答の部署表示に使うため）。同じ注意書きを参照専用ファイルのD1に記載
 - Apps Script・トリガー・LINE通知・フォームは変更なし（コードは回答シートを列番号で読んでいない）
+
+## 打刻の記録（勤怠見守りの先行開発・VPSのみ）【本番未導入・承認待ち】
+VPSで既存の取り込み（7:05・22:30）とは別に、打刻の記録だけを行う。Apps Script・LINE・スプレッドシートは変更しない。
+
+### 導入手順（承認後・10:00〜17:30に作業）
+1. VPSにログインし、`cd ~/alcohol-check-line && git status` で変更がないことを確認する
+2. `git fetch && git checkout <承認されたコミット> -- src/tot-watch-record.js`（既存のファイルは変えない）
+3. 件数だけ表示（保存しない）：`node --env-file=.env src/tot-watch-record.js --dry-run` → `"ok":true` と件数が出ることを確認
+4. 1回だけ保存：`node --env-file=.env src/tot-watch-record.js` → `ls -l ~/watch-data/raw` にファイルが1つ、権限が `-rw-------` であることを確認
+5. `node src/tot-watch-record.js --check $(date +%F)` で点検結果を確認
+6. cronに2行を追加（既存の2行は残す）：
+   - `2 8,10-16 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1`
+   - `35 22 * * * cd $HOME/alcohol-check-line && $(command -v node) --env-file=.env src/tot-watch-record.js >> $HOME/tot-watch.log 2>&1`
+   - 追加後 `crontab -l` で既存の `tot-relay.js` の2行と合わせて4行あることを確認
+7. 試験運転：翌日 `node src/tot-watch-record.js --check <前日>` で `"healthy":true` を確認。Apps Scriptの実行数で7:05・22:30の取り込みも正常なことを確認
+
+### 元に戻す
+1. `crontab -e` で `tot-watch-record.js` の2行だけを消す（既存の2行は残す）→ 記録が止まる
+2. 必要なら `rm src/tot-watch-record.js`、記録を消す場合は `rm -r ~/watch-data`（記録を消すとその期間の月間判定は保留になる）
+- 既存の処理（7:05・22:30・Apps Script）には影響しないため、それ以外の復旧作業は不要

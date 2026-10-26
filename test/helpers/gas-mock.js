@@ -91,14 +91,14 @@ class Store {
  * files：gas/ 以下のファイル名。clock.now を変えると「今」が変わる。
  * line.members：グループID → {userId: 表示名}（メンバーのプロフィール取得の応答）
  */
-export function createGas({ files, now }) {
-  const clock = { now: new Date(now).getTime() };
+export function createGas({ files, now, shared }) {
+  const clock = shared ? shared.clock : { now: new Date(now).getTime() };
   const RealDate = Date;
   class FakeDate extends RealDate {
     constructor(...a) { if (a.length === 0) super(clock.now); else super(...a); }
     static now() { return clock.now; }
   }
-  const sheets = {};
+  const sheets = shared ? shared.sheets : {};
   const scriptProps = new Store(), userProps = new Store();
   const cache = {};
   const fetches = [];
@@ -155,7 +155,7 @@ export function createGas({ files, now }) {
   };
   vm.createContext(ctx);
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
-  return { ctx, clock, sheets, scriptProps, userProps, cache, fetches, line, logs, FakeDate,
+  return { ctx, clock, sheets, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };
 }
 

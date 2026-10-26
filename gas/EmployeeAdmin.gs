@@ -2,31 +2,36 @@
  * 社員管理AI（第1段階：入社・退社・取消）
  *
  * 流れ：勤怠管理グループに申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
- *       → 予約 → 効力日（入社＝入社日、退社＝退職日の翌日）の朝に従業員マスタへ反映 → グループへ完了報告。反映前なら取消できる。
+ *       → 予約 → 反映日（入社＝入社日、退社＝退職日の翌日）の朝に従業員マスタへ反映 → グループへ完了報告。反映前なら取消できる。
+ *
+ * 置き場所：既存の「勤怠・アルコールチェック管理」とは別の、社員管理AI専用の Apps Script プロジェクト（EmployeeAdminHost.gs と一緒に入れる）。
+ * 受信：社員管理AI専用の LINE 公式アカウント（勤怠管理グループに招待）の Webhook → 署名確認の受け口（Cloudflare Workers または VPS中継）
+ *       → このプロジェクトの doPost（type 'line-verified'）。既存の公式アカウント・Webhook・Apps Script は変更しない。
  *
  * 安全のしくみ
- *  - LINEからの受信は、VPSの中継（src/line-relay.js）が LINE の署名（X-Line-Signature）を確かめたものだけを扱う。
- *    中継→Apps Script の転送は合言葉付きの署名（HMAC）・5分以内・使い捨ての番号（nonce）で確かめる。
- *    署名を確かめられない受信（今の LINE→Apps Script 直結の経路）では、社員管理の操作は一切行わない。
- *  - 承認・申請・取消は、勤怠管理グループ（「LINEグループ」シートで「勤怠管理」として登録済み）のメンバーだけ。
- *    LINEの「グループメンバーのプロフィール取得」で、送信者が今もメンバーかを毎回確かめる。
- *  - 同じLINEイベント（webhookEventId）は一度だけ処理する。
+ *  - 受け口が LINE の署名（X-Line-Signature）をチャネルシークレットで確かめたものだけが届く。
+ *    受け口→Apps Script の転送は、合言葉の署名（HMAC-SHA256・LINEの本文そのものに対して）・5分以内・使い捨て番号（nonce）で確かめる。
+ *    署名の無い・合わない・古い・使い回しの受信は、何も処理しない（改ざんされた本文も署名が合わず拒否）。
+ *  - 申請・承認・取消は、勤怠管理グループ（EA_ADMIN_GROUP_ID）のメッセージで、送信者が今もグループのメンバーである場合だけ（毎回 LINE に問い合わせ）。
+ *  - 同じLINEイベント（webhookEventId）は一度だけ処理する。承認コードは1回限り。
  *
  * 切り替え（スクリプトプロパティ）
- *  - EA_MODE：未設定・off＝何もしない（既存の動きのまま）／record＝記録のみ（返信・承認・反映なし）／on＝利用開始
- *  - EA_AUTO_APPLY：'true' のときだけ、毎朝の処理で従業員マスタへ反映する
- *  - EA_FORWARD_SECRET：VPS中継と同じ合言葉（転送の署名用）
- *  本番では、どれも未設定（＝off）のままなら今までと何も変わらない。
+ *  - EA_MODE：未設定・off＝何もしない／record＝記録のみ（返信・承認・反映なし）／on＝利用開始
+ *  - EA_AUTO_APPLY：'true' のときだけ、従業員マスタへ反映する
+ *  - EA_FORWARD_SECRET：受け口と同じ合言葉／EA_LINE_CHANNEL_TOKEN：社員管理AI用LINEのアクセストークン
+ *  - EA_ADMIN_GROUP_ID：勤怠管理グループのID（社員管理AI用LINEから見たID。参加時に操作ログへ記録される）
+ *  - EMPLOYEE_MASTER_ID：従業員マスタのファイルID
  *
  * 日付はすべて日本時間の 'YYYY-MM-DD'。従業員マスタのO列（入社日）・N列（退職日）へは「文字」で書く
- * （日付型で入ると AC_isRetired が退職扱いにしてしまうため）。
+ * （日付型で入ると既存の AC_isRetired が退職扱いにしてしまうため）。
  * 別表記：第1段階ではC列（既存の読み取り先）に書き、あわせて「別表記」シート（社員番号をキーに複数管理する将来の正本）にも記録する。
+ * 既存プロジェクトと同じシートに書くため、行の追加は appendRow（同時に追加しても上書きしない）で行う。
  */
 
-var EA_VERSION = '2026-10-26-dev3';
+var EA_VERSION = '2026-10-26-dev4';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
-var EA_FORWARD_WINDOW_SEC = 300;     // VPS中継からの転送の有効時間（5分）
+var EA_FORWARD_WINDOW_SEC = 300;     // 受け口からの転送の有効時間（5分）
 var EA_PAUSE_SOURCE = '社員管理AI';  // お知らせ停止シートG列「作成元」
 
 /** マスタ列（AC_COL と同じ並び＋O列 入社日） */
@@ -407,7 +412,7 @@ function EA_sheet_(name, header) {
   return sh;
 }
 
-function EA_appendRow_(sh, row) { sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]); }
+function EA_appendRow_(sh, row) { sh.appendRow(row); }   // 既存プロジェクトと同時に書いても上書きしない
 
 function EA_log_(op, id, code, uid, name, result, detail) {
   try { EA_appendRow_(EA_sheet_(EA_SHEET_LOG, EA_LOG_HEADER), [new Date(), op, id || '', code ? "'" + code : '', uid || '', name || '', result || '', detail || '']); }
@@ -426,15 +431,17 @@ function EA_ms_(v) { return Object.prototype.toString.call(v) === '[object Date]
 
 function EA_dateObj_(iso) { return Utilities.parseDate(iso, AC_TZ, 'yyyy-MM-dd'); }
 
-/** 勤怠管理グループのグループID（「LINEグループ」シートで「勤怠管理」として有効なもの） */
-function EA_adminGroups_() { return AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || []; }
+/** 勤怠管理グループのグループID（社員管理AI用LINEから見たID。スクリプトプロパティ EA_ADMIN_GROUP_ID、複数ならカンマ区切り） */
+function EA_adminGroups_() {
+  return String(EA_props_().getProperty('EA_ADMIN_GROUP_ID') || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+}
 
 // ---- LINE（テスト時は EA_lineClient_ に模擬を入れる。本物はトークンが無ければ何もしない） ----
 var EA_lineClient_ = null;
 function EA_line_() { return EA_lineClient_ || EA_REAL_LINE_; }
 var EA_REAL_LINE_ = {
   reply: function (replyToken, messages) {
-    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    var t = EA_props_().getProperty('EA_LINE_CHANNEL_TOKEN');
     if (!t || !replyToken) return false;
     var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/reply', {
       method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + t },
@@ -443,7 +450,7 @@ var EA_REAL_LINE_ = {
     return res.getResponseCode() === 200;
   },
   push: function (to, messages) {
-    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    var t = EA_props_().getProperty('EA_LINE_CHANNEL_TOKEN');
     if (!t || !to) return false;
     var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
       method: 'post', contentType: 'application/json',
@@ -454,7 +461,7 @@ var EA_REAL_LINE_ = {
   },
   /** 送信者が今もグループのメンバーなら {displayName}、確認できなければ null（安全側） */
   memberProfile: function (groupId, userId) {
-    var t = EA_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+    var t = EA_props_().getProperty('EA_LINE_CHANNEL_TOKEN');
     if (!t || !groupId || !userId) return null;
     var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/group/' + encodeURIComponent(groupId) + '/member/' + encodeURIComponent(userId), {
       headers: { Authorization: 'Bearer ' + t }, muteHttpExceptions: true,
@@ -476,41 +483,19 @@ function EA_reply_(ev, text, quick) {
   try { return EA_line_().reply(ev.replyToken, [EA_text_(text, quick)]); } catch (e) { Logger.log('社員管理の返信に失敗'); return false; }
 }
 
-/**
- * 返信と記録（commit）の順番で「本物のLINEイベントか」を確かめる。
- *  - 署名確認済み（VPS中継）：記録してから返信
- *  - 返信トークン確認（直結の経路）：先に返信し、LINEが返信を受け付けた（＝LINEが発行した本物の返信トークン）ときだけ記録する。
- *    偽のイベントは返信トークンが無効なので返信が失敗し、シートには何も書かない。
- * 戻り値：記録まで行ったら true
- */
+/** 記録してから返信する（受信は署名確認済みのものだけなので、記録の前に本物かを確かめ終えている） */
 function EA_respond_(ev, ctx, text, quick, commit) {
-  if (ctx.proof !== 'reply') {
-    if (commit) commit();
-    EA_reply_(ev, text, quick);
-    return true;
-  }
-  if (!EA_reply_(ev, text, quick)) {
-    Logger.log('社員管理：返信トークンが無効のため、操作を行いませんでした');
-    return false;
-  }
-  if (commit) {
-    try { commit(); } catch (e) {
-      Logger.log('社員管理：返信後の記録に失敗 %s', e && e.message ? e.message : '');
-      EA_adminGroups_().forEach(function (g) {
-        try { EA_line_().push(g, [EA_text_('【社員管理】直前の操作を記録できませんでした🙇‍♀️ お手数ですが、もう一度送ってください。（' + (e && e.message ? e.message : '不明なエラー') + '）')]); } catch (x) {}
-      });
-      return false;
-    }
-  }
+  if (commit) commit();
+  EA_reply_(ev, text, quick);
   return true;
 }
 
-// ---- 入口①：VPS中継からの転送（doPost の type 'line-verified'） ----
+// ---- 入口：署名確認の受け口（Cloudflare Workers／VPS中継）からの転送（doPost の type 'line-verified'） ----
 function EA_handleForward_(body) {
   var cache = CacheService.getScriptCache();
   var v = EA_verifyForward(body, EA_props_().getProperty('EA_FORWARD_SECRET'), Math.floor(Date.now() / 1000),
     function (n) { return !!cache.get('ea:nonce:' + n); }, EA_hmacHex_);
-  if (!v.ok) { Logger.log('中継からの転送を受け付けませんでした：%s', v.error); return 'NG'; }
+  if (!v.ok) { Logger.log('受け口からの転送を受け付けませんでした：%s', v.error); return 'NG'; }
   cache.put('ea:nonce:' + body.nonce, '1', 900);
   var payload;
   try { payload = JSON.parse(body.payload); } catch (e) { return 'NG'; }
@@ -519,35 +504,29 @@ function EA_handleForward_(body) {
     function (id) { cache.put('ea:ev:' + id, '1', 21600); });
   events.forEach(function (ev) {
     try {
-      if (!EA_handleEvent_(ev, { verified: true, proof: 'signature' })) AC_handleEvent_(ev);   // 社員管理以外は今までどおりの処理へ
+      if (!EA_handleEvent_(ev, { verified: true })) EA_onOtherEvent_(ev);
     } catch (err) {
-      Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');
-      AC_adminNotice_('webhook', '【エラー】公式LINEに届いたメッセージの処理で問題がありました🙇‍♀️\n（' + (err && err.message ? err.message : '不明なエラー') + '）');
+      var msg = err && err.message ? err.message : '不明なエラー';
+      Logger.log('社員管理の処理エラー：%s', msg);
+      EA_log_('エラー', '', '', '', '', 'NG', msg);
     }
   });
   return 'OK';
 }
 
-/**
- * 入口②：今の LINE→Apps Script 直結の経路（Webhookを切り替えずに先行導入する方式）。doPost から1件ずつ呼ぶ。
- * EA_DIRECT='true' のときだけ動く。社員管理のメッセージ（勤怠管理グループの【入社】等）だけを扱い、それ以外は false を返して既存の処理へ。
- * Apps Script では LINE の署名ヘッダーを読めないため、「返信トークンで本物か確かめてから記録する」方式（EA_respond_）で守る。
- */
-function EA_handleDirect_(ev) {
-  try {
-    if (EA_props_().getProperty('EA_DIRECT') !== 'true') return false;
-    if (!EA_isCandidate_(ev)) return false;            // 1対1・普段の会話・部門登録などは、ここで既存の処理へ（シートも読まない）
-    var cache = CacheService.getScriptCache(), id = ev.webhookEventId;
-    if (id && cache.get('ea:ev:' + id)) return true;    // 同じイベントは二度処理しない
-    if (id) cache.put('ea:ev:' + id, '1', 21600);
-    return EA_handleEvent_(ev, { verified: true, proof: 'reply' });
-  } catch (err) {
-    Logger.log('社員管理（直結）の処理エラー：%s', err && err.message ? err.message : '');
-    return true;   // 社員管理のメッセージの失敗は既存の処理に回さない（既存の処理は社員管理のメッセージに反応しないため影響なし）
+/** 社員管理以外のイベント：グループへの参加・退出だけ記録する（グループIDの確認用）。それ以外は何もしない */
+function EA_onOtherEvent_(ev) {
+  var src = ev && ev.source;
+  if (!src || src.type !== 'group') return;
+  if (ev.type === 'join') {
+    EA_log_('グループ参加', '', '', '', '', 'OK', 'グループID ' + src.groupId + (EA_adminGroups_().indexOf(src.groupId) !== -1 ? '（勤怠管理グループとして設定済み）' : '（未設定）'));
+    EA_reply_(ev, '社員管理AIです。管理本部の設定が終わると、このグループで「入社」「退社」の申請と承認ができるようになります。');
+  } else if (ev.type === 'leave') {
+    EA_log_('グループ退出', '', '', '', '', 'OK', 'グループID ' + src.groupId);
   }
 }
 
-/** グループのテキストで、社員管理の形式に当てはまるものか（シートを読まない軽い判定） */
+/** グループのテキストで、社員管理の形式に当てはまるものか */
 function EA_isCandidate_(ev) {
   var src = ev && ev.source;
   return !!(src && src.type === 'group' && ev.type === 'message' && ev.message && ev.message.type === 'text' && EA_parseMessage(ev.message.text));
@@ -563,7 +542,7 @@ function EA_handleEvent_(ev, ctx) {
   var uid = src.userId || '';
   if (mode === 'record') {
     var info = parsed.type === 'request' ? parsed.kind + '／形式エラー' + (parsed.errors || []).length + '件' : parsed.type + '／' + (parsed.kind || parsed.action);
-    EA_log_('記録のみ', parsed.id || '', parsed.fields && parsed.fields.code, uid, '', '記録', info + '（' + (ctx.proof || '') + '）');
+    EA_log_('記録のみ', parsed.id || '', parsed.fields && parsed.fields.code, uid, '', '記録', info);
     return true;
   }
   var lock = LockService.getScriptLock();
@@ -771,8 +750,8 @@ function employeeAdminSetup() {
   EA_pauseSheet_();
   [[EA_SHEET_REQ, EA_REQ_HEADER], [EA_SHEET_HIST, EA_HIST_HEADER], [EA_SHEET_LOG, EA_LOG_HEADER], [EA_SHEET_ALIAS, EA_ALIAS_HEADER]]
     .forEach(function (x) { EA_sheet_(x[0], x[1]); });
-  Logger.log('社員管理AIの準備：完了（版 %s）。EA_MODE=%s／EA_DIRECT=%s／EA_AUTO_APPLY=%s', EA_VERSION,
-    EA_props_().getProperty('EA_MODE') || '未設定', EA_props_().getProperty('EA_DIRECT') || '未設定', EA_props_().getProperty('EA_AUTO_APPLY') || '未設定');
+  Logger.log('社員管理AIの準備：完了（版 %s）。EA_MODE=%s／EA_AUTO_APPLY=%s', EA_VERSION,
+    EA_props_().getProperty('EA_MODE') || '未設定', EA_props_().getProperty('EA_AUTO_APPLY') || '未設定');
 }
 
 /** 毎朝の処理のトリガー（5時台）を作る。本番では自動反映の承認後に実行 */
@@ -784,7 +763,7 @@ function employeeAdminSetupTriggers() {
 
 /** 緊急停止：社員管理AIのすべての動きを止める（既存の勤怠・アルコールチェックには影響なし） */
 function employeeAdminStop() {
-  ['EA_MODE', 'EA_DIRECT', 'EA_AUTO_APPLY'].forEach(function (k) { EA_props_().deleteProperty(k); });
+  ['EA_MODE', 'EA_AUTO_APPLY'].forEach(function (k) { EA_props_().deleteProperty(k); });
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'employeeAdminDaily') ScriptApp.deleteTrigger(t); });
   Logger.log('社員管理AIを停止しました（設定とトリガーを削除。シートの記録は残しています）');
 }
@@ -837,6 +816,13 @@ function EA_hist_(id, kind, code, sheet, row, col, before, after) {
     EA_MASTER_COL_NAMES[col - 1] || String(col), before === '' || before == null ? '' : "'" + String(before), after === '' || after == null ? '' : "'" + String(after)]);
 }
 
+/** その社員番号の最後の行（1始まり）。無ければ -1 */
+function EA_lastRowOfCode_(ms, code) {
+  var v = ms.getRange(1, 1, Math.max(ms.getLastRow(), 1), 1).getValues();
+  for (var i = v.length - 1; i >= 1; i--) if (EA_cellCode(v[i][0]) === code) return i + 1;
+  return -1;
+}
+
 function EA_applyOne_(req, reqSheet) {
   try {
     var ms = AC_masterSheet_();
@@ -846,16 +832,14 @@ function EA_applyOne_(req, reqSheet) {
     if (!plan.ok) throw new Error(plan.error);
     var sheetName = ms.getName();
     (plan.updates || []).forEach(function (u) {
-      var cell = ms.getRange(u.row, u.col), before = mv[u.row - 1][u.col - 1];
-      if (u.text) cell.setNumberFormat('@');
-      cell.setValue(u.text ? String(u.value) : u.value);
+      var before = mv[u.row - 1][u.col - 1];
+      ms.getRange(u.row, u.col).setValue(u.text && u.value !== '' ? "'" + String(u.value) : u.value);   // ' つき＝文字として書く
       EA_hist_(req.id, req.kind, req.fields.code, sheetName, u.row, u.col, before, u.value);
     });
     if (plan.append) {
-      var r = ms.getLastRow() + 1;
-      plan.textCols.forEach(function (c) { ms.getRange(r, c).setNumberFormat('@'); });
-      AC_checkboxes_(ms, r, 1);
-      ms.getRange(r, 1, 1, plan.append.length).setValues([plan.append]);
+      ms.appendRow(plan.append.map(function (v, k) { return plan.textCols.indexOf(k + 1) !== -1 && v !== '' ? "'" + v : v; }));
+      var r = EA_lastRowOfCode_(ms, req.fields.code);
+      if (r > 0) AC_checkboxes_(ms, r, 1);
       EA_hist_(req.id, req.kind, req.fields.code, sheetName, r, 1, '', '（行を追加）');
     }
     if (req.kind === '入社' && req.fields.alias) {

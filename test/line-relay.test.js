@@ -66,13 +66,12 @@ test('中継：届かなければ再送し、成功したら一時保存を消�
   } finally { relay.server.close(); }
 });
 
-test('中継→Apps Script（模擬）まで通しで：LINEの署名つき受信が社員管理の申請になり、返信される', async () => {
-  const g = createGas({ files: ['AlcoholCheck.gs', 'EmployeeAdmin.gs'], now: '2026-11-10T10:00:00+09:00' });
+test('中継→Apps Script（模擬・社員管理AI専用プロジェクト）まで通しで：LINEの署名つき受信が雛形の返信になり、再送は1回だけ', async () => {
+  const g = createGas({ files: ['EmployeeAdmin.gs', 'EmployeeAdminHost.gs'], now: '2026-11-10T10:00:00+09:00' });
   const ss = g.newSpreadsheet('【テスト】従業員マスタ（架空）');
   ss.insertSheet('従業員マスタ').appendRow(['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日']);
   const G = 'C' + 'a'.repeat(32), A = 'U' + '1'.repeat(32);
-  const grp = ss.insertSheet('LINEグループ'); grp.appendRow(['グループID', '部門（所属）', '登録日時', '状態']); grp.appendRow([G, '勤怠管理', '', '有効']);
-  g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: ss.getId(), LINE_CHANNEL_ACCESS_TOKEN: 'fake', EA_FORWARD_SECRET: FWD, EA_MODE: 'on' });
+  g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: ss.getId(), EA_LINE_CHANNEL_TOKEN: 'fake', EA_FORWARD_SECRET: FWD, EA_MODE: 'on', EA_ADMIN_GROUP_ID: G });
   g.line.members[G] = { [A]: '管理A' };
   const fetchImpl = async (url, opt) => {
     assert.equal(url, GAS_URL);
@@ -88,7 +87,6 @@ test('中継→Apps Script（模擬）まで通しで：LINEの署名つき受�
     await relay.drain();
     const reply = g.fetches.find((f) => f.url.endsWith('/reply'));
     assert.match(reply.body.messages[0].text, /【退社】/);
-    // 同じLINEイベントの再送（LINE側の再送）は1回だけ
     await fetch(`${base}/line/webhook`, { method: 'POST', body, headers: { 'x-line-signature': lineSig(body) } });
     await relay.drain();
     assert.equal(g.fetches.filter((f) => f.url.endsWith('/reply')).length, 1);

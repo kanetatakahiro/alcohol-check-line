@@ -5,7 +5,7 @@
 - 安全対策：VPS中継（新規 src/line-relay.js）で LINE 署名を確認し、合言葉の署名・5分・nonce つきで転送（doPost の type 'line-verified'）。署名確認できない直結経路では社員管理は動かない。webhookEventId の重複防止
 - gas/AlcoholCheck.gs：doPost に 'line-verified' の分岐を追加、版 2026-10-26ea。既存の経路・処理は変更なし
 - 切り替え：EA_MODE（未設定=何もしない／record／on）。本番は未設定のままなら影響なし
-- テスト：純粋関数・模擬Apps Script結合・中継・既存の回帰（npm test）、テスト用Apps Script用の検査 gas/test/EmployeeAdminTest.gs。すべて架空データ
+- テスト：npm test 120件すべて成功（純粋関数23・模擬Apps Script＋模擬Webhook結合10・中継5・既存82）。テスト用Apps Script「【テスト】社員管理AI（架空データ）」と同名のテスト用スプレッドシート（架空データ）を作成し、gas/test/EmployeeAdminTest.gs の eatRun で実際のシート上の結合テスト39件すべて成功（LINEへの送信なし・トリガーなし）
 - 資料：gas/EMPLOYEE_ADMIN.md、deploy/line-relay/（本番導入時用・未適用）
 - main・feature/watch-record・本番GAS・従業員マスタ・LINE・VPS・DNS・Webhookは変更なし
 

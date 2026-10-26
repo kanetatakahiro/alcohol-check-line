@@ -30,8 +30,8 @@
 - 従業員マスタ O列（入社日）とお知らせ停止 G・H列を追加。既存処理は14列・6列までしか読まず、`AC_markRetired_`・名簿取り込みもO列を消さないことを確認済み
 
 ## テスト
-- `npm test`：純粋関数23件、模擬Apps Script＋模擬Webhookの結合10件、VPS中継5件、既存82件（すべて架空データ）
-- テスト用Apps Script：`gas/test/EmployeeAdminTest.gs`（`eatSetup` → `eatRun`）。LINEトークンがある・本番の従業員マスタなら中止。結果は「テスト結果」シート
+- `npm test`：純粋関数23件、模擬Apps Script＋模擬Webhookの結合10件、VPS中継5件、既存82件（すべて架空データ）— 2026-10-26 全120件成功
+- テスト用Apps Script：`gas/test/EmployeeAdminTest.gs`（`eatSetup` → `eatRun`）。LINEトークンがある・本番の従業員マスタなら中止。結果は「テスト結果」シート — 2026-10-26 テスト用プロジェクト「【テスト】社員管理AI（架空データ）」で39件すべて成功
 
 ## 本番導入の手順（すべて別途承認後）
 1. 11/1〜の打刻記録の安定を確認

@@ -7,3 +7,11 @@ workers_dev = true
 
 [observability]
 enabled = false   # 受信内容をCloudflareのログに残さない
+
+# 転送できなかった分の一時保存と再送（5分ごと）
+[[kv_namespaces]]
+binding = "PENDING"
+id = "（作成した KV 名前空間のID）"
+
+[triggers]
+crons = ["*/5 * * * *"]

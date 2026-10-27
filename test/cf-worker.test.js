@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import worker, { lineSignatureOk, forwardBody, clock } from '../workers/line-webhook/src/index.js';
+import worker, { lineSignatureOk, forwardBody, clock, retryPending } from '../workers/line-webhook/src/index.js';
 
 // Cloudflare Workers の受け口（workers/line-webhook）の単体テスト。すべて架空の値。
 const CH = 'channel-secret-not-real', FWD = 'forward-secret-not-real';
@@ -91,4 +91,56 @@ test('受け口：社員管理が NG・エラー・通信失敗、または既�
   assert.equal(down.status, 500);
   assert.ok(down.calls.some((c) => c.url === EX));
   assert.equal((await call(req(raw, h), ENV, async (url) => (url === EX ? new Response('', { status: 500 }) : new Response('OK')))).status, 500);
+});
+
+function fakeKV() {
+  const m = new Map();
+  return { m,
+    async put(k, v) { m.set(k, v); }, async get(k) { return m.has(k) ? m.get(k) : null; }, async delete(k) { m.delete(k); },
+    async list({ prefix = '', limit = 1000 } = {}) { return { keys: [...m.keys()].filter((k) => k.startsWith(prefix)).sort().slice(0, limit).map((name) => ({ name })) }; } };
+}
+
+test('受け口：転送先が失敗したら一時保存して200を返し、定期実行で届くまで再送する（届いたら消す）', async () => {
+  const kv = fakeKV(), env = { ...ENV, PENDING: kv };
+  const raw = JSON.stringify({ events: [{ webhookEventId: 'E1', source: { type: 'group', groupId: G } }] });
+  const h = { 'x-line-signature': sig(CH, raw) };
+  // 既存はOK、社員管理が落ちている
+  const r = await call(req(raw, h), env, async (url) => { if (url === EA) throw new Error('down'); return new Response('OK'); });
+  assert.equal(r.status, 200);
+  assert.equal(kv.m.size, 1);
+  assert.match([...kv.m.keys()][0], /:ea$/);
+  // まだ落ちている → 残る
+  const realFetch = globalThis.fetch, realLog = console.log; console.log = () => {};
+  try {
+    const sent = [];
+    globalThis.fetch = async () => { throw new Error('down'); };
+    assert.deepEqual(await retryPending(env), { sent: 0, left: 1, failed: 0 });
+    // 復旧 → 届いて消える。署名は送る直前に付け直す
+    globalThis.fetch = async (url, opt) => { sent.push({ url, body: JSON.parse(opt.body) }); return new Response('OK'); };
+    assert.deepEqual(await retryPending(env), { sent: 1, left: 0, failed: 0 });
+    assert.equal(kv.m.size, 0);
+    assert.equal(sent[0].url, EA);
+    assert.equal(sent[0].body.type, 'line-verified');
+    assert.deepEqual(JSON.parse(sent[0].body.payload).events.map((e) => e.webhookEventId), ['E1']);
+    // 既存が落ちたときは既存の分だけ保存（本文そのまま）
+    const r2 = await call(req(raw, h), env, async (url) => { if (url === EX) throw new Error('down'); return new Response('OK'); });
+    assert.equal(r2.status, 200);
+    const item = JSON.parse([...kv.m.values()][0]);
+    assert.equal(item.target, 'existing');
+    assert.equal(item.payload, raw);
+    // 24時間を過ぎても届かなければ failed: に移す
+    globalThis.fetch = async () => { throw new Error('down'); };
+    clock.now = () => Date.now() + 25 * 3600 * 1000;
+    assert.deepEqual(await retryPending(env), { sent: 0, left: 0, failed: 1 });
+    assert.ok([...kv.m.keys()][0].startsWith('failed:'));
+  } finally { clock.now = () => Date.now(); globalThis.fetch = realFetch; console.log = realLog; }
+});
+
+test('受け口：一時保存もできないときは500（LINE側で失敗が分かる）、検証ボタンの失敗は保存しない', async () => {
+  const broken = { async put() { throw new Error('kv down'); }, async list() { return { keys: [] }; } };
+  const raw = JSON.stringify({ events: [{ webhookEventId: 'E1' }] });
+  assert.equal((await call(req(raw, { 'x-line-signature': sig(CH, raw) }), { ...ENV, PENDING: broken }, async () => { throw new Error('down'); })).status, 500);
+  const kv = fakeKV(), empty = JSON.stringify({ events: [] });
+  assert.equal((await call(req(empty, { 'x-line-signature': sig(CH, empty) }), { ...ENV, PENDING: kv }, async () => { throw new Error('down'); })).status, 500);
+  assert.equal(kv.m.size, 0);
 });

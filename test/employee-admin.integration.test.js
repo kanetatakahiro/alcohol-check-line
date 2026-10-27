@@ -60,7 +60,19 @@ function setup({ mode = 'on', autoApply = false } = {}) {
   const postA = (body) => A.ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent();
   const sig = (raw) => createHmac('sha256', CH).update(raw).digest('base64');
   /** LINE（社員管理AI用）→ Cloudflare Workers → B。headers を変えると改ざん・署名なしの試験 */
-  async function viaWorker(rawBody, headers) {
+  async function withWorkerFetch(fn) {
+    const realFetch = globalThis.fetch, realLog = console.log;
+    console.log = () => {};
+    workerClock.now = () => B.clock.now;
+    globalThis.fetch = async (url, opt) => {
+      if (url === GAS_A) { toA.push(opt.body); return new Response(A.ctx.doPost({ postData: { contents: opt.body } }).getContent(), { status: 200 }); }
+      toB.push(opt.body);
+      if (gasDown > 0) { gasDown--; throw new Error('timeout'); }
+      return new Response(B.ctx.doPost({ postData: { contents: opt.body } }).getContent(), { status: 200 });
+    };
+    try { return await fn(); } finally { globalThis.fetch = realFetch; console.log = realLog; }
+  }
+  async function viaWorker(rawBody, headers, extraEnv) {
     const realFetch = globalThis.fetch, realLog = console.log;
     console.log = () => {};                         // 受け口のログ（件数だけ）は表示しない
     workerClock.now = () => B.clock.now;            // 受け口の時計を模擬の「今」に合わせる
@@ -74,7 +86,7 @@ function setup({ mode = 'on', autoApply = false } = {}) {
     };
     try {
       const res = await worker.fetch(new Request('https://ea.example.workers.dev/line/webhook', { method: 'POST', body: rawBody,
-        headers: headers || { 'x-line-signature': sig(rawBody), 'content-type': 'application/json' } }), env, { waitUntil() {} });
+        headers: headers || { 'x-line-signature': sig(rawBody), 'content-type': 'application/json' } }), { ...env, ...(extraEnv || {}) }, { waitUntil() {} });
       return res.status;
     } finally { globalThis.fetch = realFetch; console.log = realLog; }
   }
@@ -90,7 +102,7 @@ function setup({ mode = 'on', autoApply = false } = {}) {
   const reqs = () => sheet('社員管理_申請').dump().slice(1);
   const master = () => m.dump();
   const approveText = (r) => r.quick.items[0].action.text;
-  return { A, B, ss, m, ev, postA, postB, sig, viaWorker, send, sheet, reqs, master, approveText, toA, toB, setGasDown: (n) => { gasDown = n; } };
+  return { A, B, ss, m, ev, env, postA, postB, sig, viaWorker, withWorkerFetch, send, sheet, reqs, master, approveText, toA, toB, setGasDown: (n) => { gasDown = n; } };
 }
 
 test('入社：Workers経由の申請 → 承認 → 入社日に反映 → 報告。既存の読み取り（A）からも正しく見える', async () => {
@@ -365,4 +377,33 @@ test('社員管理グループが未設定のあいだは、届いたメッセ�
   assert.equal(t.reqs().length, 0);
   assert.equal((await t.send('おはようございます')).sent.length, 0);   // 社員管理の形式でない会話は記録しない
   assert.equal(t.sheet('社員管理_操作ログ').dump().at(-1)[7], last[7]);
+});
+
+test('転送失敗時の再送：社員管理AIが一時的に落ちても、Workersの一時保存→定期再送で1回だけ処理され、返信の期限切れはグループ送信で知らせる', async () => {
+  const t = setup();
+  const kv = new Map();
+  const PENDING = { async put(k, v) { kv.set(k, v); }, async get(k) { return kv.get(k) ?? null; }, async delete(k) { kv.delete(k); },
+    async list({ prefix }) { return { keys: [...kv.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })) }; } };
+  const { retryPending } = await import('../workers/line-webhook/src/index.js');
+  const e = t.ev(HIRE, { id: 'RETRY-1' });
+  e.replyToken = 'forged-expired';                         // 再送時には返信の期限が切れている想定（模擬LINEは400を返す）
+  const raw = JSON.stringify({ destination: 'Ubot', events: [e] });
+  // 1回目：社員管理AIが落ちている
+  t.setGasDown(1);
+  const nA = t.toA.length;
+  const st = await t.viaWorker(raw, null, { PENDING });
+  assert.equal(st, 200);                                   // LINEには成功を返す（イベントは一時保存）
+  assert.equal(t.toA.length, nA + 1);                       // 既存へはその場で届いている
+  assert.equal(kv.size, 1);
+  assert.equal(t.reqs().length, 0);
+  // 定期実行で再送 → 処理される
+  const n = t.B.fetches.length;
+  await t.withWorkerFetch(() => retryPending({ ...t.env, PENDING }));
+  assert.equal(kv.size, 0);
+  assert.equal(t.reqs().length, 1);
+  const push = t.B.fetches.slice(n).find((f) => f.url.endsWith('/push'));
+  assert.match(push.body.messages[0].text, /入社の申請を受け付けました/);   // 返信できないのでグループへ送信
+  // 同じイベントがもう一度届いても二重にならない
+  await t.viaWorker(raw, null, { PENDING });
+  assert.equal(t.reqs().length, 1);
 });

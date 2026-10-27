@@ -29,7 +29,7 @@
  * 既存プロジェクトと同じシートに書くため、行の追加は appendRow（同時に追加しても上書きしない）で行う。
  */
 
-var EA_VERSION = '2026-10-27c';
+var EA_VERSION = '2026-10-27d';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
 var EA_FORWARD_WINDOW_SEC = 300;     // 受け口からの転送の有効時間（5分）
@@ -487,7 +487,10 @@ function EA_reply_(ev, text, quick) {
 /** 記録してから返信する（受信は署名確認済みのものだけなので、記録の前に本物かを確かめ終えている） */
 function EA_respond_(ev, ctx, text, quick, commit) {
   if (commit) commit();
-  EA_reply_(ev, text, quick);
+  if (!EA_reply_(ev, text, quick) && ev && ev.source && ev.source.groupId) {
+    // 返信できない（再送で届いて返信の期限が切れた等）ときは、グループへの送信で知らせる
+    try { EA_line_().push(ev.source.groupId, [EA_text_(text, quick)]); } catch (e) { Logger.log('社員管理の送信に失敗'); }
+  }
   return true;
 }
 

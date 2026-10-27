@@ -35,11 +35,13 @@ class Range {
 }
 
 class Sheet {
-  constructor(ss, name) { this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; }
+  static seq = 0;
+  constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; }
   fmtOf(r, c) { return this.fmt[`${r},${c}`] || this.colFmt[c]; }
   clear() { this.rows = []; this.fmt = {}; this.colFmt = {}; return this; }
   getName() { return this.name; }
   setName(n) { this.name = n; }
+  getSheetId() { return this.sid; }
   getParent() { return this.ss; }
   get(r, c) { const row = this.rows[r - 1]; const v = row ? row[c - 1] : undefined; return v === undefined || v === null ? '' : v; }
   set(r, c, v) { while (this.rows.length < r) this.rows.push([]); this.rows[r - 1][c - 1] = v; }
@@ -72,8 +74,11 @@ class Spreadsheet {
   getName() { return this.name; }
   getSheetByName(n) { return this.sheets.find((s) => s.name === n) || null; }
   insertSheet(n) { const s = new Sheet(this, n); this.sheets.push(s); return s; }
-  getSheets() { return this.sheets.slice(); }
-  deleteSheet(s) { this.sheets = this.sheets.filter((x) => x !== s); }
+  getSheets() { return this.sheets.map((x) => new Proxy(x, {})); }   // 本物と同じく毎回別の物（中身は同じシート）
+  deleteSheet(s) {
+    if (this.sheets.length === 1) throw new Error('ドキュメント内のシートをすべて削除することはできません。');
+    this.sheets = this.sheets.filter((x) => x.getSheetId() !== s.getSheetId());
+  }
   getUrl() { return `https://docs.google.com/spreadsheets/d/${this.id}/edit`; }
 }
 

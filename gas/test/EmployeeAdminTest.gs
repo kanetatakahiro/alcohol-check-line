@@ -61,7 +61,7 @@ function EAT_reset_() {
   var ss = SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('EMPLOYEE_MASTER_ID'));
   var keep = ss.getSheets()[0];
   keep.clear(); keep.setName('従業員マスタ');
-  ss.getSheets().forEach(function (s) { if (s !== keep) ss.deleteSheet(s); });
+  ss.getSheets().forEach(function (s) { if (s.getSheetId() !== keep.getSheetId()) ss.deleteSheet(s); });   // 同じシートでも別の物として返るためIDで比べる
   keep.getRange(1, 1, 4, 14).setValues([EAT_HEAD14,
     ["'90001", '試験 一郎', '', '在籍', '部署A', EAT_EMP1, '一郎', '', true, true, '', '正社員', 501, ''],
     ["'90002", '試験 二郎', 'しけん二郎', '在籍', '部署B', '', '', '', false, true, '', 'パート', 502, ''],

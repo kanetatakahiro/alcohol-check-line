@@ -28,7 +28,7 @@
  * 既存プロジェクトと同じシートに書くため、行の追加は appendRow（同時に追加しても上書きしない）で行う。
  */
 
-var EA_VERSION = '2026-10-27a';
+var EA_VERSION = '2026-10-27b';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
 var EA_FORWARD_WINDOW_SEC = 300;     // 受け口からの転送の有効時間（5分）
@@ -538,8 +538,15 @@ function EA_handleEvent_(ev, ctx) {
   if (mode === 'off' || !ctx || !ctx.verified) return false;
   if (!EA_isCandidate_(ev)) return false;
   var src = ev.source, parsed = EA_parseMessage(ev.message.text);
-  if (EA_adminGroups_().indexOf(src.groupId) === -1) return false;   // 社員管理グループ以外では反応しない
   var uid = src.userId || '';
+  var groups = EA_adminGroups_();
+  if (!groups.length) {   // 社員管理グループが未設定：最初の接続確認用に、グループID・送信者確認の結果だけ記録する（返信・申請はしない）
+    var mem0 = uid ? EA_line_().memberProfile(src.groupId, uid) : null;
+    EA_log_('未設定グループ', '', '', uid, mem0 ? mem0.displayName : '', '記録', 'グループID ' + src.groupId + '／署名確認済み／送信者：'
+      + (!uid ? '不明（ID無し）' : mem0 ? 'メンバー確認OK' : 'メンバー確認できず') + '／イベント ' + (ev.webhookEventId || '-'));
+    return true;
+  }
+  if (groups.indexOf(src.groupId) === -1) return false;   // 社員管理グループ以外では反応しない
   if (mode === 'record') {   // 記録のみ：返信・申請・承認・反映はしない。署名確認・送信者確認・重複防止の結果だけを残す
     var info = parsed.type === 'request' ? parsed.kind + '／形式エラー' + (parsed.errors || []).length + '件' : parsed.type + '／' + (parsed.kind || parsed.action);
     var member = uid ? EA_line_().memberProfile(src.groupId, uid) : null;

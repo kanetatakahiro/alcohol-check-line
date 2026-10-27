@@ -316,3 +316,16 @@ test('テスト用プロジェクトの検査は、LINEのトークンがある�
   g.scriptProps.setProperty('EMPLOYEE_MASTER_ID', '1a8gBGm-adBHybREOOSLEjL9j4OHVwA0X_EdylHIZODU');
   assert.throws(() => g.ctx.eatRun(), /中止/);
 });
+
+test('社員管理グループが未設定のあいだは、届いたメッセージのグループIDと送信者確認の結果だけを記録する（返信・申請なし）', async () => {
+  const t = setup();
+  t.B.scriptProps.deleteProperty('EA_ADMIN_GROUP_ID');
+  const r = await t.send('入社');
+  assert.equal(r.sent.length, 0);
+  const last = t.sheet('社員管理_操作ログ').dump().at(-1);
+  assert.equal(last[1], '未設定グループ');
+  assert.match(last[7], new RegExp('グループID ' + ADMIN_G_B + '／署名確認済み／送信者：メンバー確認OK'));
+  assert.equal(t.reqs().length, 0);
+  assert.equal((await t.send('おはようございます')).sent.length, 0);   // 社員管理の形式でない会話は記録しない
+  assert.equal(t.sheet('社員管理_操作ログ').dump().at(-1)[7], last[7]);
+});

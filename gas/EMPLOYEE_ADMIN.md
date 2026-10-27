@@ -4,15 +4,17 @@
 
 ## 構成（既存システムと分離）
 ```
-勤怠管理グループ（LINE）
- ├─ 既存の公式アカウント「REBIRTH 管理本部」 → 既存Webhook → 既存の Apps Script「勤怠・アルコールチェック管理」   ← 変更しない
- └─ 社員管理AI用の公式アカウント（新規・招待）
+勤怠管理グループ（LINE）… 既存の公式アカウント「REBIRTH 管理本部」 → 既存Webhook → 既存の Apps Script   ← 変更しない
+社員管理グループ（LINE・新設、同じメンバー）… 社員管理AI用の公式アカウント（新規）
        → Cloudflare Workers（workers/line-webhook）… LINE署名を確認。違えば401
        → 社員管理AI専用の Apps Script（EmployeeAdmin.gs＋EmployeeAdminHost.gs）… 転送の署名・5分・nonceを確認
        → 従業員マスタ（既存と同じファイル）・お知らせ停止シート
 ```
 - 既存の公式アカウント・Webhook・Apps Script（gas/AlcoholCheck.gs は main と同一）・VPS・DNS は変更しない
-- 既存の公式アカウントは、社員管理のメッセージ（【入社】等）には今までどおり反応しない（部門登録以外のグループ発言は無視する作り）
+- LINEの仕様で「1つのグループに入れる公式アカウントは1つだけ」のため、既存の勤怠管理グループには追加せず、同じメンバーで社員管理グループを新設する（既存の公式アカウントは退出させない）
+  （出典：LINE Developers「グループトークや複数人トークでボットを使う」 https://developers.line.biz/ja/docs/messaging-api/group-chats/ ）
+- パソコン版LINE：送信者のIDは「プロフィール情報の利用に同意した利用者」だけに付く。同意はスマートフォン版LINEで行うため、スマートフォンでLINEを使っている人ならパソコンから送っても付く見込み（パソコン版だけの利用者は付かず、受け付けない）。実機で確認する
+  （出典：LINE Developers「ユーザーのプロフィール情報の取得に関する同意」 https://developers.line.biz/ja/docs/messaging-api/user-consent/ ）
 
 ## 署名検証方式の比較（2026-10-26 選定）
 | | ①専用LINE＋Cloudflare Workers（採用） | ②既存LINEのWebhookをWorkersへ切替 | ③既存LINEのWebhookをVPS中継へ切替 |
@@ -76,3 +78,10 @@
 
 ## 参考：既存Webhookを切り替える場合（今回は不要）
 既存の公式アカウントも署名検証の受け口に通す場合：既存Apps Scriptに転送受け付け（`line-verified` → 社員管理以外は今までどおり `AC_handleEvent_`）を追加 → Workers（転送先＝既存Apps Script）をデプロイして「検証」で成功を確認 → 業務時間外にWebhook URLを切替（LINEの切替は即時でURLが1つのため受信は途切れない）→ 社員番号登録・部門登録を確認。切り戻しはWebhook URLを元のApps ScriptのURLに戻すだけ（即時）。
+
+## 本番の状況（2026-10-27）
+- 社員管理AI専用の Apps Script「社員管理AI（本番）」を作成・ウェブアプリとして公開（版 2026-10-27a、EA_MODE=record）
+- `employeeAdminSetup` を実行：従業員マスタ O1「入社日」、お知らせ停止 G1・H1、社員管理用シート4枚を追加（既存のデータは変更なし。実行前に O1・G1・H1 が空であることを確認）
+- 合言葉（EA_FORWARD_SECRET）を Apps Script 内で作成（表示していない）
+- 実環境の自己点検（ウェブアプリへ実際にHTTPで送信）：正しい署名＝OK、同じ転送の再送・本文の差し替え・5分より古い・署名なし＝すべて NG
+- 残り：社員管理AI用LINE公式アカウントの作成、Cloudflare Workers の公開、社員管理グループの作成、LINEからの記録のみテスト

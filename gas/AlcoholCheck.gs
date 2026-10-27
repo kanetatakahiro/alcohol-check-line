@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-22a';
+var AC_CODE_VERSION = '2026-10-27a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -507,6 +507,8 @@ function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
         + pend.slice(0, 20).map(function (p) { return '・' + nm(p.tot) + 'さん　' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
         + (pend.length > 20 ? '\n…ほか' + (pend.length - 20) + '件' : '') + '\n\nいつもありがとうございます！').slice(0, 4900));
     }
+    // 管理本部の本人へ、自分の申請だけ（REQUEST_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。管理者への一覧は上のまま
+    try { AC_selfRequestNotices_(pend, mv, ss, today, props); } catch (e) { Logger.log('本人への承認待ちのお知らせに失敗'); }
   }
   // 有給の年5日（月曜の朝だけデータが届く）
   if (Array.isArray(R.paidLeaves) && !R.paidLeaves.some(function (l) { return l && l._error; })) {
@@ -1092,6 +1094,71 @@ function AC_pendingRequests(employees, requests) {
   return out;
 }
 
+/**
+ * 純粋関数：承認待ちの申請を、本人宛ての通知に分ける（管理本部の在籍者で、LINE確認済みの人だけ）。
+ * pend：AC_pendingRequests の結果（tot は申請の対象となる従業員＝本人のTOTコード）。
+ * 戻り値：[{ code, name, userId, items:[pend…], text }]。他人の申請は入らない。照合できない申請・LINE未登録の人は入らない。
+ */
+var AC_SELF_REQUEST_DEPT = '管理本部';
+function AC_selfRequestNotices(pend, masterValues, today) {
+  var byTot = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var r = masterValues[i], tot = AC_totKey(r[AC_COL.totCode]);
+    if (!tot) continue;
+    (byTot[tot] = byTot[tot] || []).push(r);
+  }
+  var groups = {};
+  (pend || []).forEach(function (p) {
+    var rows = byTot[AC_totKey(p.tot)] || [];
+    if (rows.length !== 1) return;   // 照合できない・TOTコードが重複している人には送らない
+    var r = rows[0];
+    if (String(r[AC_COL.dept]).trim() !== AC_SELF_REQUEST_DEPT || String(r[AC_COL.status]).trim() !== '在籍') return;
+    if (AC_isRetired(r[AC_COL.retiredOn], today)) return;
+    if (r[AC_COL.lineOk] !== true || !AC_isUserId(r[AC_COL.userId])) return;
+    var code = AC_cellCode_(r[AC_COL.code]);
+    if (!code) return;
+    var g = groups[code] || (groups[code] = { code: code, name: String(r[AC_COL.name]).trim(), userId: r[AC_COL.userId], items: [] });
+    g.items.push(p);
+  });
+  return Object.keys(groups).sort().map(function (code) {
+    var g = groups[code];
+    g.text = ('【承認待ちの申請】' + (g.name ? g.name + 'さん、' : '') + 'TOTで、ご自身の申請のうち承認待ちのものが' + g.items.length + '件あります。\n\n'
+      + g.items.slice(0, 20).map(function (p) { return '・' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
+      + (g.items.length > 20 ? '\n…ほか' + (g.items.length - 20) + '件' : '')
+      + '\n\n承認は管理本部の担当者が行います。内容を直したい場合や急ぎの場合は、担当者へお知らせください。').slice(0, 4900);
+    return g;
+  });
+}
+
+/** 本人宛ての承認待ちのお知らせ（朝のTOT取り込みのとき）。記録は従業員マスタのファイルの「承認待ち本人通知」シート */
+function AC_selfRequestNotices_(pend, mv, ss, today, props) {
+  var mode = String(props.getProperty('REQUEST_SELF_NOTIFY') || '').trim();
+  if (mode !== 'record' && mode !== 'on') return;
+  var live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
+  var list = AC_selfRequestNotices(pend, mv, today);
+  var pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date(), rows = [];
+  list.forEach(function (g) {
+    var key = 'sent:' + today + ':reqself:' + g.code;   // 同じ人へは1回の取り込み（朝）につき1通
+    var result;
+    if (AC_isPaused(pauseIdx, g.code, today)) result = 'お知らせ停止中のため送らない';
+    else if (state.getProperty(key)) result = '送信済みのため送らない';
+    else if (!live) result = '記録のみ（送信しない）';
+    else {
+      try { AC_pushTo_(g.userId, g.text); state.setProperty(key, now.toISOString()); result = '送信'; } catch (e) { result = '送信失敗'; }
+    }
+    rows.push([now, "'" + g.code, g.name, g.items.length, g.text, result]);
+  });
+  var name = '承認待ち本人通知';
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, 6).setValues([['日時', '社員番号', '氏名', '件数', '本文', '結果']]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
+  Logger.log('本人への承認待ちのお知らせ（%s）：対象 %s人', mode, list.length);
+}
+
 /** 純粋関数：有給の年5日（入社日・取得した有休の日から、一人ずつ） */
 function AC_paidLeaveStatus(employees, leaves, today) {
   var byKey = {};
@@ -1391,6 +1458,7 @@ var AC_SETTINGS_SHOWN = {
   TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
   AGREEMENT_START_MONTH: '未設定＝4月',
   FORM_LIVE_FROM: '未設定＝2026-10-20',
+  REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
   'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
@@ -3100,7 +3168,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

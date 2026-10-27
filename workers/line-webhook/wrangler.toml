@@ -1,6 +1,6 @@
-# 社員管理AI：LINE Webhook の署名確認つき受け口（Cloudflare Workers・無料プラン）
-# 導入（承認後）：npx wrangler deploy → npx wrangler secret put LINE_CHANNEL_SECRET／EA_FORWARD_SECRET／GAS_WEBAPP_URL
-name = "rebirth-employee-admin-line"
+# 既存のLINE公式アカウント「REBIRTH 管理本部」の Webhook 受け口（LINE署名の確認つき・Cloudflare Workers 無料プラン）
+# 導入（承認後）：シークレット LINE_CHANNEL_SECRET・EA_FORWARD_SECRET、テキスト EXISTING_GAS_URL・GAS_WEBAPP_URL・EA_GROUP_ID
+name = "rebirth-line-webhook"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 workers_dev = true

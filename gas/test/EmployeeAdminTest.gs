@@ -193,7 +193,7 @@ function eatRun() {
     var jn = EAT_SENT.length;
     post(forward([{ type: 'join', webhookEventId: 'EATJ' + Date.now(), replyToken: 'rj', source: { type: 'group', groupId: EAT_ADMIN_G } }]));
     var lg = ss.getSheetByName('社員管理_操作ログ').getDataRange().getValues();
-    ok('グループ参加でグループIDを記録', /設定済み/.test(lg[lg.length - 1][7]) && EAT_SENT.length === jn + 1);
+    ok('グループ参加でグループIDを記録（返信は既存の処理）', /設定済み/.test(lg[lg.length - 1][7]) && EAT_SENT.length === jn);
     props.setProperty('EA_MODE', 'off');
     ok('EA_MODE=off なら何もしない', send('入社').sent.length === 0);
     props.setProperty('EA_MODE', 'record');

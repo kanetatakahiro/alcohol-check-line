@@ -1,25 +1,26 @@
 /**
  * 社員管理AI（第1段階：入社・退社・取消）
  *
- * 流れ：社員管理グループ（管理本部用のLINEグループ）に申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
+ * 流れ：勤怠管理グループ（管理本部用のLINEグループ）に申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
  *       → 予約 → 反映日（入社＝入社日、退社＝退職日の翌日）の朝に従業員マスタへ反映 → グループへ完了報告。反映前なら取消できる。
  *
  * 置き場所：既存の「勤怠・アルコールチェック管理」とは別の、社員管理AI専用の Apps Script プロジェクト（EmployeeAdminHost.gs と一緒に入れる）。
- * 受信：社員管理AI専用の LINE 公式アカウント（社員管理グループに招待。LINEの仕様で1つのグループに公式アカウントは1つだけのため、既存の勤怠管理グループとは別のグループ）の Webhook → 署名確認の受け口（Cloudflare Workers または VPS中継）
- *       → このプロジェクトの doPost（type 'line-verified'）。既存の公式アカウント・Webhook・Apps Script は変更しない。
+ * 受信：既存の公式アカウント「REBIRTH 管理本部」の Webhook を Cloudflare Workers（workers/line-webhook）で受け、LINE署名を確認したうえで
+ *       既存の Apps Script には本文をそのまま、勤怠管理グループのイベントだけこのプロジェクトの doPost（type 'line-verified'）へ転送する。
+ *       既存の Apps Script のコードは変更しない。
  *
  * 安全のしくみ
  *  - 受け口が LINE の署名（X-Line-Signature）をチャネルシークレットで確かめたものだけが届く。
  *    受け口→Apps Script の転送は、合言葉の署名（HMAC-SHA256・LINEの本文そのものに対して）・5分以内・使い捨て番号（nonce）で確かめる。
  *    署名の無い・合わない・古い・使い回しの受信は、何も処理しない（改ざんされた本文も署名が合わず拒否）。
- *  - 申請・承認・取消は、社員管理グループ（EA_ADMIN_GROUP_ID）のメッセージで、送信者が今もグループのメンバーである場合だけ（毎回 LINE に問い合わせ）。
+ *  - 申請・承認・取消は、勤怠管理グループ（EA_ADMIN_GROUP_ID）のメッセージで、送信者が今もグループのメンバーである場合だけ（毎回 LINE に問い合わせ）。
  *  - 同じLINEイベント（webhookEventId）は一度だけ処理する。承認コードは1回限り。
  *
  * 切り替え（スクリプトプロパティ）
  *  - EA_MODE：未設定・off＝何もしない／record＝記録のみ（返信・承認・反映なし）／on＝利用開始
  *  - EA_AUTO_APPLY：'true' のときだけ、従業員マスタへ反映する
  *  - EA_FORWARD_SECRET：受け口と同じ合言葉／EA_LINE_CHANNEL_TOKEN：社員管理AI用LINEのアクセストークン
- *  - EA_ADMIN_GROUP_ID：社員管理グループのID（社員管理AI用LINEから見たID。参加時に操作ログへ記録される）
+ *  - EA_ADMIN_GROUP_ID：勤怠管理グループのID（社員管理AI用LINEから見たID。参加時に操作ログへ記録される）
  *  - EMPLOYEE_MASTER_ID：従業員マスタのファイルID
  *
  * 日付はすべて日本時間の 'YYYY-MM-DD'。従業員マスタのO列（入社日）・N列（退職日）へは「文字」で書く
@@ -28,7 +29,7 @@
  * 既存プロジェクトと同じシートに書くため、行の追加は appendRow（同時に追加しても上書きしない）で行う。
  */
 
-var EA_VERSION = '2026-10-27b';
+var EA_VERSION = '2026-10-27c';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
 var EA_FORWARD_WINDOW_SEC = 300;     // 受け口からの転送の有効時間（5分）
@@ -251,7 +252,7 @@ function EA_transition(state, action) {
  */
 function EA_judgeDecision(req, decision, ctx) {
   if (!ctx.verified) return { ok: false, error: '署名確認済みのメッセージではないため受け付けません' };
-  if (!ctx.isGroupMember) return { ok: false, error: '社員管理グループのメンバーだけが承認できます' };
+  if (!ctx.isGroupMember) return { ok: false, error: '勤怠管理グループのメンバーだけが承認できます' };
   if (!req) return { ok: false, error: 'その申請番号は見つかりません' };
   if (req.state === '申請中' && EA_isExpired(req.createdAtMs, ctx.nowMs)) return { ok: false, error: '承認期限（72時間）を過ぎています。もう一度申請してください', expire: true };
   if (decision.action === 'approve' && decision.code !== req.approvalCode) return { ok: false, error: '承認コードが違います' };
@@ -431,7 +432,7 @@ function EA_ms_(v) { return Object.prototype.toString.call(v) === '[object Date]
 
 function EA_dateObj_(iso) { return Utilities.parseDate(iso, AC_TZ, 'yyyy-MM-dd'); }
 
-/** 社員管理グループのグループID（社員管理AI用LINEから見たID。スクリプトプロパティ EA_ADMIN_GROUP_ID、複数ならカンマ区切り） */
+/** 勤怠管理グループのグループID（社員管理AI用LINEから見たID。スクリプトプロパティ EA_ADMIN_GROUP_ID、複数ならカンマ区切り） */
 function EA_adminGroups_() {
   return String(EA_props_().getProperty('EA_ADMIN_GROUP_ID') || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
 }
@@ -519,8 +520,7 @@ function EA_onOtherEvent_(ev) {
   var src = ev && ev.source;
   if (!src || src.type !== 'group') return;
   if (ev.type === 'join') {
-    EA_log_('グループ参加', '', '', '', '', 'OK', 'グループID ' + src.groupId + (EA_adminGroups_().indexOf(src.groupId) !== -1 ? '（社員管理グループとして設定済み）' : '（未設定）'));
-    EA_reply_(ev, '社員管理AIです。管理本部の設定が終わると、このグループで「入社」「退社」の申請と承認ができるようになります。');
+    EA_log_('グループ参加', '', '', '', '', 'OK', 'グループID ' + src.groupId + (EA_adminGroups_().indexOf(src.groupId) !== -1 ? '（勤怠管理グループとして設定済み）' : '（未設定）'));   // 返信は既存の処理が行う
   } else if (ev.type === 'leave') {
     EA_log_('グループ退出', '', '', '', '', 'OK', 'グループID ' + src.groupId);
   }
@@ -540,13 +540,13 @@ function EA_handleEvent_(ev, ctx) {
   var src = ev.source, parsed = EA_parseMessage(ev.message.text);
   var uid = src.userId || '';
   var groups = EA_adminGroups_();
-  if (!groups.length) {   // 社員管理グループが未設定：最初の接続確認用に、グループID・送信者確認の結果だけ記録する（返信・申請はしない）
+  if (!groups.length) {   // 勤怠管理グループが未設定：最初の接続確認用に、グループID・送信者確認の結果だけ記録する（返信・申請はしない）
     var mem0 = uid ? EA_line_().memberProfile(src.groupId, uid) : null;
     EA_log_('未設定グループ', '', '', uid, mem0 ? mem0.displayName : '', '記録', 'グループID ' + src.groupId + '／署名確認済み／送信者：'
       + (!uid ? '不明（ID無し）' : mem0 ? 'メンバー確認OK' : 'メンバー確認できず') + '／イベント ' + (ev.webhookEventId || '-'));
     return true;
   }
-  if (groups.indexOf(src.groupId) === -1) return false;   // 社員管理グループ以外では反応しない
+  if (groups.indexOf(src.groupId) === -1) return false;   // 勤怠管理グループ以外では反応しない
   if (mode === 'record') {   // 記録のみ：返信・申請・承認・反映はしない。署名確認・送信者確認・重複防止の結果だけを残す
     var info = parsed.type === 'request' ? parsed.kind + '／形式エラー' + (parsed.errors || []).length + '件' : parsed.type + '／' + (parsed.kind || parsed.action);
     var member = uid ? EA_line_().memberProfile(src.groupId, uid) : null;

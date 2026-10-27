@@ -6,14 +6,16 @@ import { createGas, signForward } from './helpers/gas-mock.js';
 import worker, { clock as workerClock } from '../workers/line-webhook/src/index.js';
 
 // 社員管理AIの結合テスト（すべて架空データ）
-//  A：既存の「勤怠・アルコールチェック管理」（gas/AlcoholCheck.gs そのまま）＋既存の公式LINE
-//  B：社員管理AI専用プロジェクト（EmployeeAdmin.gs＋EmployeeAdminHost.gs）＋社員管理AI用LINE（Cloudflare Workers の受け口）
-//  AとBは同じ従業員マスタ（同じスプレッドシート）を使う。勤怠管理グループには両方の公式アカウントが入っている。
+//  既存の公式LINE → Cloudflare Workers（署名確認）→ A と B
+//  A：既存の「勤怠・アルコールチェック管理」（gas/AlcoholCheck.gs そのまま）… すべてのイベントを本文そのままで受け取る
+//  B：社員管理AI専用プロジェクト（EmployeeAdmin.gs＋EmployeeAdminHost.gs）… 勤怠管理グループのイベントだけを署名つき転送で受け取る
+//  AとBは同じ従業員マスタ（同じスプレッドシート）を使う。
 
 const CH = 'ea-channel-secret-not-real', FWD = 'ea-forward-secret-not-real';
+const GAS_A = 'https://script.google.com/macros/s/EXISTING-TEST/exec';
 const GAS_B = 'https://script.google.com/macros/s/EA-TEST/exec';
-const ADMIN_G_A = 'C' + 'a'.repeat(32);     // 既存の公式LINEから見た勤怠管理グループ
-const ADMIN_G_B = 'C' + 'e'.repeat(32);     // 社員管理AI用LINEから見た勤怠管理グループ
+const ADMIN_G_A = 'C' + 'a'.repeat(32);     // 勤怠管理グループ
+const ADMIN_G_B = ADMIN_G_A;                // 同じ公式アカウントなので同じID
 const DEPT_G = 'C' + 'b'.repeat(32);
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
 const ADMIN1 = U(1), ADMIN2 = U(2), OUTSIDER = U(9), EMP1 = U(3);
@@ -45,7 +47,8 @@ function setup({ mode = 'on', autoApply = false } = {}) {
   B.line.members[ADMIN_G_B] = { [ADMIN1]: '管理A', [ADMIN2]: '管理B' };
   B.ctx.employeeAdminSetup();
 
-  const env = { LINE_CHANNEL_SECRET: CH, EA_FORWARD_SECRET: FWD, GAS_WEBAPP_URL: GAS_B };
+  const env = { LINE_CHANNEL_SECRET: CH, EXISTING_GAS_URL: GAS_A, EA_FORWARD_SECRET: FWD, GAS_WEBAPP_URL: GAS_B, EA_GROUP_ID: ADMIN_G_A };
+  const toA = [], toB = [];
   let seq = 0, gasDown = 0;
   const ev = (text, { userId = ADMIN1, groupId = ADMIN_G_B, id } = {}) => ({
     type: 'message', webhookEventId: id || `EV${++seq}`, replyToken: `rt${seq}`, timestamp: A.clock.now,
@@ -62,14 +65,16 @@ function setup({ mode = 'on', autoApply = false } = {}) {
     console.log = () => {};                         // 受け口のログ（件数だけ）は表示しない
     workerClock.now = () => B.clock.now;            // 受け口の時計を模擬の「今」に合わせる
     globalThis.fetch = async (url, opt) => {
+      if (url === GAS_A) { toA.push(opt.body); return new Response(A.ctx.doPost({ postData: { contents: opt.body } }).getContent(), { status: 200 }); }
       assert.equal(url, GAS_B);
+      toB.push(opt.body);
       if (gasDown > 0) { gasDown--; throw new Error('timeout'); }
       const out = B.ctx.doPost({ postData: { contents: opt.body } }).getContent();
       return new Response(out, { status: 200 });
     };
     try {
       const res = await worker.fetch(new Request('https://ea.example.workers.dev/line/webhook', { method: 'POST', body: rawBody,
-        headers: headers || { 'x-line-signature': sig(rawBody), 'content-type': 'application/json' } }), env);
+        headers: headers || { 'x-line-signature': sig(rawBody), 'content-type': 'application/json' } }), env, { waitUntil() {} });
       return res.status;
     } finally { globalThis.fetch = realFetch; console.log = realLog; }
   }
@@ -85,7 +90,7 @@ function setup({ mode = 'on', autoApply = false } = {}) {
   const reqs = () => sheet('社員管理_申請').dump().slice(1);
   const master = () => m.dump();
   const approveText = (r) => r.quick.items[0].action.text;
-  return { A, B, ss, m, ev, postA, postB, sig, viaWorker, send, sheet, reqs, master, approveText, setGasDown: (n) => { gasDown = n; } };
+  return { A, B, ss, m, ev, postA, postB, sig, viaWorker, send, sheet, reqs, master, approveText, toA, toB, setGasDown: (n) => { gasDown = n; } };
 }
 
 test('入社：Workers経由の申請 → 承認 → 入社日に反映 → 報告。既存の読み取り（A）からも正しく見える', async () => {
@@ -261,30 +266,62 @@ test('範囲：勤怠管理グループ以外・1対1・普段の会話には反
   assert.equal(t.reqs().length, 0);
 });
 
-test('グループ参加：社員管理AI用LINEを招待すると、グループIDを操作ログに記録する', async () => {
+test('グループ参加：既存の公式LINEがグループに招待されたときは、既存の処理が返信し、社員管理は記録だけする', async () => {
   const t = setup();
   const n = t.B.fetches.length;
-  const raw = JSON.stringify({ destination: 'Ubot', events: [{ type: 'join', webhookEventId: 'J1', replyToken: 'rj', source: { type: 'group', groupId: ADMIN_G_B } }] });
+  const raw = JSON.stringify({ destination: 'Ubot', events: [{ type: 'join', webhookEventId: 'J1', replyToken: 'rj', source: { type: 'group', groupId: ADMIN_G_A } }] });
   assert.equal(await t.viaWorker(raw), 200);
-  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /社員管理グループとして設定済み/);
-  assert.match(t.B.fetches.slice(n)[0].body.messages[0].text, /社員管理AIです/);
+  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /勤怠管理グループとして設定済み/);
+  assert.equal(t.B.fetches.slice(n).filter((f) => f.url.endsWith('/reply')).length, 0);
+  assert.ok(t.A.fetches.some((f) => f.url.endsWith('/reply') && /グループに招待していただき/.test(f.body.messages[0].text)));
 });
 
-test('既存（A）への影響なし：同じグループの社員管理のメッセージに既存の公式LINEは反応せず、社員番号登録・部門登録・ToT中継はそのまま', async () => {
+test('既存（A）への影響なし：Workers経由でも既存は今までと同じ本文を受け取り、社員番号登録・部門登録・普段の会話・ToT中継はそのまま', async () => {
   const t = setup();
-  const before = JSON.stringify(t.master());
-  const nA = t.A.fetches.length;
-  for (const text of ['入社', HIRE, '承認 EA-20261110-001 123456', '【取消】\n申請番号：EA-20261110-001']) t.postA({ events: [t.ev(text, { groupId: ADMIN_G_A })] });
-  assert.equal(t.A.fetches.length, nA);
-  assert.equal(JSON.stringify(t.master()), before);
-  assert.equal(t.reqs().length, 0);
-  t.postA({ events: [t.ev('90002', { groupId: null, userId: U(4) })] });
+  // 1対1の社員番号登録：A にだけ届き、B には届かない
+  const r1 = await t.send('90002', { groupId: null, userId: U(4) });
+  assert.equal(r1.status, 200);
   assert.equal(t.master()[2][5], U(4));
-  t.postA({ events: [t.ev('部門登録 部署B', { groupId: DEPT_G })] });
+  assert.equal(t.toA.at(-1), r1.raw);                   // 既存へは LINE の本文がそのまま
+  assert.equal(t.toB.length, 0);
+  // 部門登録（別グループ）：A だけ
+  const nA = t.A.fetches.length;
+  await t.send('部門登録 部署B', { groupId: DEPT_G });
   assert.equal(t.sheet('LINEグループ').dump()[2][1], '部署B');
+  assert.ok(t.A.fetches.slice(nA).some((f) => /「部署B」のグループとして登録しました/.test((f.body.messages || [{}])[0].text || '')));
+  assert.equal(t.toB.length, 0);
+  // 勤怠管理グループの社員管理のメッセージ：A は反応せず（返信なし）、B が処理する。返信は1回だけ
+  const nA2 = t.A.fetches.length;
+  const r2 = await t.send('入社');
+  assert.equal(t.A.fetches.length, nA2);
+  assert.equal(r2.sent.length, 1);
+  // 普段の会話：A も B も返信しない
+  const r3 = await t.send('おはようございます');
+  assert.equal(r3.sent.length, 0);
+  assert.equal(t.A.fetches.length, nA2);
+  // フォーム報告など既存の勤怠管理グループの使い方は変わらない（A の LINEグループ設定はそのまま）
+  assert.equal(t.sheet('LINEグループ').dump()[1][1], '勤怠管理');
   assert.equal(t.postA({ type: 'tot-raw', secret: 'x' }), 'NG');
   // 社員管理の転送形式を A に送っても、A は社員管理を持たないので何もしない
   t.postA(signForward(FWD, { events: [t.ev(HIRE, { groupId: ADMIN_G_A })] }, Math.floor(t.A.clock.now / 1000)));
+  assert.equal(t.reqs().length, 0);
+});
+
+test('Workers：社員管理の設定が無いときは既存への中継だけ（段階的な切り替え用）／既存が失敗したら500', async () => {
+  const t = setup();
+  const raw = JSON.stringify({ destination: 'Ubot', events: [t.ev(HIRE)] });
+  const realFetch = globalThis.fetch, realLog = console.log, calls = [];
+  console.log = () => {};
+  globalThis.fetch = async (url, opt) => { calls.push(url); return new Response(url === GAS_A ? t.A.ctx.doPost({ postData: { contents: opt.body } }).getContent() : 'x', { status: 200 }); };
+  try {
+    const onlyRelay = { LINE_CHANNEL_SECRET: CH, EXISTING_GAS_URL: GAS_A };
+    const res = await worker.fetch(new Request('https://w/line/webhook', { method: 'POST', body: raw, headers: { 'x-line-signature': t.sig(raw) } }), onlyRelay, { waitUntil() {} });
+    assert.equal(res.status, 200);
+    assert.deepEqual(calls, [GAS_A]);
+    globalThis.fetch = async () => { throw new Error('down'); };
+    const res2 = await worker.fetch(new Request('https://w/line/webhook', { method: 'POST', body: raw, headers: { 'x-line-signature': t.sig(raw) } }), onlyRelay, { waitUntil() {} });
+    assert.equal(res2.status, 500);
+  } finally { globalThis.fetch = realFetch; console.log = realLog; }
   assert.equal(t.reqs().length, 0);
 });
 

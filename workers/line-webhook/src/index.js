@@ -13,7 +13,8 @@
 //   EXISTING_GAS_URL     テキスト：既存の Apps Script のウェブアプリURL（今の Webhook URL と同じ）
 //   EA_FORWARD_SECRET    シークレット：社員管理AIの Apps Script のスクリプトプロパティ EA_FORWARD_SECRET と同じ合言葉
 //   GAS_WEBAPP_URL       テキスト：社員管理AIの Apps Script のウェブアプリURL
-//   EA_GROUP_ID          テキスト：勤怠管理グループのID（未設定なら社員管理AIへは転送しない＝既存への中継だけ）
+//   EA_GROUP_ID          テキスト（任意）：勤怠管理グループのID。未設定なら、グループの「入社」「退社」「取消」【入社】等・承認／却下の
+//                        メッセージだけを社員管理AIへ送り、どのグループかの判定は社員管理AI側（EA_ADMIN_GROUP_ID）で行う
 //   PENDING              KV名前空間のバインディング（転送できなかった分の一時保存）
 
 const MAX_BODY = 1024 * 1024;
@@ -55,6 +56,15 @@ async function post(url, body) {
     const res = await fetch(url, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(28000) });
     return { status: res.status, text: (await res.text()).trim() };
   } catch { return { status: -1, text: '' }; }
+}
+
+/** 社員管理AIの形式のメッセージか（gas/EmployeeAdmin.gs の EA_parseMessage と同じ判定） */
+export function isEaMessage(e) {
+  if (!e || e.type !== 'message' || !e.message || e.message.type !== 'text') return false;
+  const t = String(e.message.text || '').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).trim();
+  const one = t.replace(/[\s　]+/g, '');
+  return one === '入社' || one === '退社' || one === '取消' || /^【\s*(入社|退社|退職|取消)\s*】/.test(t)
+    || /^(承認|却下)[\s　]*EA-\d{8}-\d{3}/.test(t);
 }
 
 const RETRY_MAX_MS = 24 * 3600 * 1000;
@@ -125,7 +135,8 @@ export default {
       body = JSON.parse(raw);
     } catch { return new Response('', { status: 400 }); }
     const events = Array.isArray(body.events) ? body.events : [];
-    const eaEvents = env.EA_GROUP_ID ? events.filter((e) => e && e.source && e.source.type === 'group' && e.source.groupId === env.EA_GROUP_ID) : [];
+    const eaEvents = events.filter((e) => e && e.source && e.source.type === 'group'
+      && (env.EA_GROUP_ID ? e.source.groupId === env.EA_GROUP_ID : isEaMessage(e)));
     const jobs = [{ target: 'existing', payload: raw }];                          // ① 既存：本文をそのまま
     // ② 社員管理AI：勤怠管理グループのイベントがあるとき（検証ボタン＝0件のときも接続確認のため送る）
     if (eaReady && (eaEvents.length > 0 || events.length === 0)) jobs.push({ target: 'ea', payload: JSON.stringify({ destination: body.destination, events: eaEvents }) });

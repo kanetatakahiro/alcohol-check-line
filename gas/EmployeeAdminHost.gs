@@ -91,6 +91,18 @@ function employeeAdminCheckLine() {
   return true;
 }
 
+/** 従業員マスタのファイルの「LINEグループ」シートから、有効な「勤怠管理」グループのIDを EA_ADMIN_GROUP_ID に設定する（IDは表示しない） */
+function employeeAdminUseKintaiGroup() {
+  var sh = AC_masterSheet_().getParent().getSheetByName('LINEグループ');
+  if (!sh) throw new Error('「LINEグループ」シートがありません');
+  var ids = sh.getDataRange().getValues().slice(1).filter(function (r) {
+    return String(r[3]).trim() === '有効' && String(r[1]).split(/[、,，]/).map(function (x) { return x.trim(); }).indexOf('勤怠管理') !== -1;
+  }).map(function (r) { return String(r[0]).trim(); });
+  if (ids.length !== 1) throw new Error('勤怠管理グループが ' + ids.length + ' 件あります（1件のときだけ設定します）');
+  PropertiesService.getScriptProperties().setProperty('EA_ADMIN_GROUP_ID', ids[0]);
+  Logger.log('勤怠管理グループを設定しました（IDは表示しません）');
+}
+
 // ---- 既存と同じ定義（gas/AlcoholCheck.gs から複製。変更しないこと） ----
 var AC_TZ = 'Asia/Tokyo';
 

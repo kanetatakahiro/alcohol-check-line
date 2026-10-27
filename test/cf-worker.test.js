@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import worker, { lineSignatureOk, forwardBody, clock, retryPending } from '../workers/line-webhook/src/index.js';
+import worker, { lineSignatureOk, forwardBody, clock, retryPending, isEaMessage } from '../workers/line-webhook/src/index.js';
 
 // Cloudflare Workers の受け口（workers/line-webhook）の単体テスト。すべて架空の値。
 const CH = 'channel-secret-not-real', FWD = 'forward-secret-not-real';
@@ -143,4 +143,17 @@ test('受け口：一時保存もできないときは500（LINE側で失敗が�
   const kv = fakeKV(), empty = JSON.stringify({ events: [] });
   assert.equal((await call(req(empty, { 'x-line-signature': sig(CH, empty) }), { ...ENV, PENDING: kv }, async () => { throw new Error('down'); })).status, 500);
   assert.equal(kv.m.size, 0);
+});
+
+test('受け口：グループIDを設定しない場合は、社員管理の形式のメッセージだけを社員管理へ送る（判定は社員管理AIと同じ）', async () => {
+  const m = (text) => ({ type: 'message', source: { type: 'group', groupId: 'Cx' }, message: { type: 'text', text } });
+  for (const t of ['入社', ' 退社 ', '取消', '【入社】\n社員番号：1', '【 退職 】', '承認 EA-20261110-001 123456', '却下　EA-20261110-001', '承認 EA-２０２６１１１０-００１ 1']) assert.equal(isEaMessage(m(t)), true, t);
+  for (const t of ['おはようございます', '入社しました', '部門登録 勤怠管理', '承認します', '90001']) assert.equal(isEaMessage(m(t)), false, t);
+  const raw = JSON.stringify({ events: [m('入社'), m('おはよう'), { ...m('入社'), source: { type: 'user', userId: 'U' } }] });
+  const env = { ...ENV, EA_GROUP_ID: '' };
+  clock.now = () => 1_800_000_000_000;
+  const r = await call(req(raw, { 'x-line-signature': sig(CH, raw) }), env);
+  clock.now = () => Date.now();
+  const fb = JSON.parse(r.calls.find((c) => c.url === EA).opt.body);
+  assert.deepEqual(JSON.parse(fb.payload).events.map((e) => e.message.text), ['入社']);
 });

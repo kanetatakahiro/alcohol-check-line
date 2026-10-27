@@ -28,13 +28,26 @@ function AC_masterSheet_() {
 /** 設定とトリガーの確認（秘密の値は表示しない） */
 function employeeAdminShowSettings() {
   var p = PropertiesService.getScriptProperties().getProperties();
-  var shown = ['EA_MODE', 'EA_AUTO_APPLY'], presence = ['EA_FORWARD_SECRET', 'EA_LINE_CHANNEL_TOKEN', 'EA_ADMIN_GROUP_ID', 'EMPLOYEE_MASTER_ID'];
+  var shown = ['EA_MODE', 'EA_AUTO_APPLY', 'EA_ADMIN_GROUP_ID'], presence = ['EA_FORWARD_SECRET', 'EA_LINE_CHANNEL_TOKEN', 'EMPLOYEE_MASTER_ID'];
   var out = ['社員管理AI 版 ' + EA_VERSION];
   shown.forEach(function (k) { out.push(k + '：' + (p[k] || '未設定')); });
   presence.forEach(function (k) { out.push(k + '：' + (p[k] ? '設定あり' : '未設定')); });
   out.push('トリガー：' + (ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); }).join('、') || 'なし'));
   Logger.log(out.join('\n'));
   return out;
+}
+
+/** 受け口（Cloudflare Workers）と共有する合言葉を作る。すでにあれば何もしない。値は表示しない */
+function employeeAdminCreateSecret() {
+  var p = PropertiesService.getScriptProperties();
+  if (p.getProperty('EA_FORWARD_SECRET')) { Logger.log('合言葉はすでにあります（表示しません）'); return; }
+  p.setProperty('EA_FORWARD_SECRET', (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''));
+  Logger.log('合言葉を作成しました（表示しません）。Cloudflare に登録するときだけ employeeAdminShowSecret を実行してください');
+}
+
+/** 【安藤さんが実行】合言葉を実行ログに表示する（Cloudflare の EA_FORWARD_SECRET に貼り付ける。チャット等には貼らない） */
+function employeeAdminShowSecret() {
+  Logger.log(PropertiesService.getScriptProperties().getProperty('EA_FORWARD_SECRET') || '未作成です（employeeAdminCreateSecret を実行）');
 }
 
 // ---- 既存と同じ定義（gas/AlcoholCheck.gs から複製。変更しないこと） ----

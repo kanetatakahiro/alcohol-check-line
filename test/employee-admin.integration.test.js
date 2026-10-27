@@ -253,6 +253,12 @@ test('範囲：勤怠管理グループ以外・1対1・普段の会話には反
   assert.equal((await t.send(HIRE)).sent.length, 0);
   assert.equal(t.reqs().length, 0);
   assert.equal(t.sheet('社員管理_操作ログ').dump().at(-1)[1], '記録のみ');
+  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /署名確認済み／送信者：メンバー確認OK／イベント EV/);
+  await t.send(HIRE, { userId: OUTSIDER });
+  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /メンバー確認できず/);
+  await t.send(HIRE, { userId: null });
+  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /不明（ID無し）/);
+  assert.equal(t.reqs().length, 0);
 });
 
 test('グループ参加：社員管理AI用LINEを招待すると、グループIDを操作ログに記録する', async () => {
@@ -260,7 +266,7 @@ test('グループ参加：社員管理AI用LINEを招待すると、グルー�
   const n = t.B.fetches.length;
   const raw = JSON.stringify({ destination: 'Ubot', events: [{ type: 'join', webhookEventId: 'J1', replyToken: 'rj', source: { type: 'group', groupId: ADMIN_G_B } }] });
   assert.equal(await t.viaWorker(raw), 200);
-  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /勤怠管理グループとして設定済み/);
+  assert.match(t.sheet('社員管理_操作ログ').dump().at(-1)[7], /社員管理グループとして設定済み/);
   assert.match(t.B.fetches.slice(n)[0].body.messages[0].text, /社員管理AIです/);
 });
 

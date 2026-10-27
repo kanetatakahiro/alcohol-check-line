@@ -1,25 +1,25 @@
 /**
  * 社員管理AI（第1段階：入社・退社・取消）
  *
- * 流れ：勤怠管理グループに申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
+ * 流れ：社員管理グループ（管理本部用のLINEグループ）に申請 → 形式チェック・従業員マスタと照合 → グループ内の誰かが承認（承認コード・72時間有効）
  *       → 予約 → 反映日（入社＝入社日、退社＝退職日の翌日）の朝に従業員マスタへ反映 → グループへ完了報告。反映前なら取消できる。
  *
  * 置き場所：既存の「勤怠・アルコールチェック管理」とは別の、社員管理AI専用の Apps Script プロジェクト（EmployeeAdminHost.gs と一緒に入れる）。
- * 受信：社員管理AI専用の LINE 公式アカウント（勤怠管理グループに招待）の Webhook → 署名確認の受け口（Cloudflare Workers または VPS中継）
+ * 受信：社員管理AI専用の LINE 公式アカウント（社員管理グループに招待。LINEの仕様で1つのグループに公式アカウントは1つだけのため、既存の勤怠管理グループとは別のグループ）の Webhook → 署名確認の受け口（Cloudflare Workers または VPS中継）
  *       → このプロジェクトの doPost（type 'line-verified'）。既存の公式アカウント・Webhook・Apps Script は変更しない。
  *
  * 安全のしくみ
  *  - 受け口が LINE の署名（X-Line-Signature）をチャネルシークレットで確かめたものだけが届く。
  *    受け口→Apps Script の転送は、合言葉の署名（HMAC-SHA256・LINEの本文そのものに対して）・5分以内・使い捨て番号（nonce）で確かめる。
  *    署名の無い・合わない・古い・使い回しの受信は、何も処理しない（改ざんされた本文も署名が合わず拒否）。
- *  - 申請・承認・取消は、勤怠管理グループ（EA_ADMIN_GROUP_ID）のメッセージで、送信者が今もグループのメンバーである場合だけ（毎回 LINE に問い合わせ）。
+ *  - 申請・承認・取消は、社員管理グループ（EA_ADMIN_GROUP_ID）のメッセージで、送信者が今もグループのメンバーである場合だけ（毎回 LINE に問い合わせ）。
  *  - 同じLINEイベント（webhookEventId）は一度だけ処理する。承認コードは1回限り。
  *
  * 切り替え（スクリプトプロパティ）
  *  - EA_MODE：未設定・off＝何もしない／record＝記録のみ（返信・承認・反映なし）／on＝利用開始
  *  - EA_AUTO_APPLY：'true' のときだけ、従業員マスタへ反映する
  *  - EA_FORWARD_SECRET：受け口と同じ合言葉／EA_LINE_CHANNEL_TOKEN：社員管理AI用LINEのアクセストークン
- *  - EA_ADMIN_GROUP_ID：勤怠管理グループのID（社員管理AI用LINEから見たID。参加時に操作ログへ記録される）
+ *  - EA_ADMIN_GROUP_ID：社員管理グループのID（社員管理AI用LINEから見たID。参加時に操作ログへ記録される）
  *  - EMPLOYEE_MASTER_ID：従業員マスタのファイルID
  *
  * 日付はすべて日本時間の 'YYYY-MM-DD'。従業員マスタのO列（入社日）・N列（退職日）へは「文字」で書く
@@ -28,7 +28,7 @@
  * 既存プロジェクトと同じシートに書くため、行の追加は appendRow（同時に追加しても上書きしない）で行う。
  */
 
-var EA_VERSION = '2026-10-26-dev4';
+var EA_VERSION = '2026-10-27a';
 var EA_APPROVAL_HOURS = 72;          // 承認の有効期限
 var EA_PAST_DAYS_LIMIT = 7;          // 過去日付は7日前まで（警告つき）
 var EA_FORWARD_WINDOW_SEC = 300;     // 受け口からの転送の有効時間（5分）
@@ -251,7 +251,7 @@ function EA_transition(state, action) {
  */
 function EA_judgeDecision(req, decision, ctx) {
   if (!ctx.verified) return { ok: false, error: '署名確認済みのメッセージではないため受け付けません' };
-  if (!ctx.isGroupMember) return { ok: false, error: '勤怠管理グループのメンバーだけが承認できます' };
+  if (!ctx.isGroupMember) return { ok: false, error: '社員管理グループのメンバーだけが承認できます' };
   if (!req) return { ok: false, error: 'その申請番号は見つかりません' };
   if (req.state === '申請中' && EA_isExpired(req.createdAtMs, ctx.nowMs)) return { ok: false, error: '承認期限（72時間）を過ぎています。もう一度申請してください', expire: true };
   if (decision.action === 'approve' && decision.code !== req.approvalCode) return { ok: false, error: '承認コードが違います' };
@@ -431,7 +431,7 @@ function EA_ms_(v) { return Object.prototype.toString.call(v) === '[object Date]
 
 function EA_dateObj_(iso) { return Utilities.parseDate(iso, AC_TZ, 'yyyy-MM-dd'); }
 
-/** 勤怠管理グループのグループID（社員管理AI用LINEから見たID。スクリプトプロパティ EA_ADMIN_GROUP_ID、複数ならカンマ区切り） */
+/** 社員管理グループのグループID（社員管理AI用LINEから見たID。スクリプトプロパティ EA_ADMIN_GROUP_ID、複数ならカンマ区切り） */
 function EA_adminGroups_() {
   return String(EA_props_().getProperty('EA_ADMIN_GROUP_ID') || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
 }
@@ -519,7 +519,7 @@ function EA_onOtherEvent_(ev) {
   var src = ev && ev.source;
   if (!src || src.type !== 'group') return;
   if (ev.type === 'join') {
-    EA_log_('グループ参加', '', '', '', '', 'OK', 'グループID ' + src.groupId + (EA_adminGroups_().indexOf(src.groupId) !== -1 ? '（勤怠管理グループとして設定済み）' : '（未設定）'));
+    EA_log_('グループ参加', '', '', '', '', 'OK', 'グループID ' + src.groupId + (EA_adminGroups_().indexOf(src.groupId) !== -1 ? '（社員管理グループとして設定済み）' : '（未設定）'));
     EA_reply_(ev, '社員管理AIです。管理本部の設定が終わると、このグループで「入社」「退社」の申請と承認ができるようになります。');
   } else if (ev.type === 'leave') {
     EA_log_('グループ退出', '', '', '', '', 'OK', 'グループID ' + src.groupId);
@@ -538,11 +538,13 @@ function EA_handleEvent_(ev, ctx) {
   if (mode === 'off' || !ctx || !ctx.verified) return false;
   if (!EA_isCandidate_(ev)) return false;
   var src = ev.source, parsed = EA_parseMessage(ev.message.text);
-  if (EA_adminGroups_().indexOf(src.groupId) === -1) return false;   // 勤怠管理グループ以外では反応しない
+  if (EA_adminGroups_().indexOf(src.groupId) === -1) return false;   // 社員管理グループ以外では反応しない
   var uid = src.userId || '';
-  if (mode === 'record') {
+  if (mode === 'record') {   // 記録のみ：返信・申請・承認・反映はしない。署名確認・送信者確認・重複防止の結果だけを残す
     var info = parsed.type === 'request' ? parsed.kind + '／形式エラー' + (parsed.errors || []).length + '件' : parsed.type + '／' + (parsed.kind || parsed.action);
-    EA_log_('記録のみ', parsed.id || '', parsed.fields && parsed.fields.code, uid, '', '記録', info);
+    var member = uid ? EA_line_().memberProfile(src.groupId, uid) : null;
+    EA_log_('記録のみ', parsed.id || '', parsed.fields && parsed.fields.code, uid, member ? member.displayName : '', '記録',
+      info + '／署名確認済み／送信者：' + (!uid ? '不明（ID無し）' : member ? 'メンバー確認OK' : 'メンバー確認できず') + '／イベント ' + (ev.webhookEventId || '-'));
     return true;
   }
   var lock = LockService.getScriptLock();
@@ -570,7 +572,7 @@ function EA_dispatch_(ev, p, uid, gid, ctx) {
   }
   var member = EA_line_().memberProfile(gid, uid);
   if (!member) {
-    EA_respond_(ev, ctx, '【社員管理】勤怠管理グループのメンバーであることを確認できなかったため、受け付けできませんでした。', null,
+    EA_respond_(ev, ctx, '【社員管理】このグループのメンバーであることを確認できなかったため、受け付けできませんでした。', null,
       function () { EA_log_('拒否', p.id || '', p.fields && p.fields.code, uid, '', 'NG', 'グループメンバー確認不可'); });
     return;
   }
@@ -629,7 +631,7 @@ function EA_submit_(ev, p, who, ctx) {
   var msg = '【社員管理】' + p.kind + 'の申請を受け付けました（' + id + '）\n' + EA_describe(p.kind, p.fields, masterName)
     + '\n従業員マスタへの反映：' + eff + (p.kind === '退社' ? '（退職日の翌日）' : '')
     + (v.warnings.length ? '\n\n⚠ 確認してください\n・' + v.warnings.join('\n・') : '')
-    + '\n\n内容が正しければ、勤怠管理グループのどなたかが下の「承認」を押してください（' + EA_APPROVAL_HOURS + '時間以内）。'
+    + '\n\n内容が正しければ、このグループのどなたかが下の「承認」を押してください（' + EA_APPROVAL_HOURS + '時間以内）。'
     + '\n（ボタンが出ないときは「承認 ' + id + ' ' + code + '」と送ってください）';
   EA_respond_(ev, ctx, msg, [{ label: '承認', text: '承認 ' + id + ' ' + code }, { label: '却下', text: '却下 ' + id }], function () {
     EA_appendRow_(R.sheet, [id, '申請中', p.kind, "'" + p.fields.code, p.kind === '入社' ? p.fields.name : masterName, "'" + eff,

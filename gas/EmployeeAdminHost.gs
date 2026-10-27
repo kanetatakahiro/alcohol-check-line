@@ -80,6 +80,17 @@ function employeeAdminSelfTest() {
   return res.every(function (r) { return r[1] === r[2]; });
 }
 
+/** 社員管理AI用LINEのアクセストークンが有効かを確かめる（トークンは表示しない。公式アカウント名だけ表示） */
+function employeeAdminCheckLine() {
+  var t = PropertiesService.getScriptProperties().getProperty('EA_LINE_CHANNEL_TOKEN');
+  if (!t) { Logger.log('EA_LINE_CHANNEL_TOKEN が未設定です'); return false; }
+  var res = UrlFetchApp.fetch('https://api.line.me/v2/bot/info', { headers: { Authorization: 'Bearer ' + t }, muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) { Logger.log('LINEのトークンが使えません（HTTP %s）', String(res.getResponseCode())); return false; }
+  var info = JSON.parse(res.getContentText());
+  Logger.log('LINEのトークンは有効です：%s（%s）', info.displayName || '', info.basicId || '');
+  return true;
+}
+
 // ---- 既存と同じ定義（gas/AlcoholCheck.gs から複製。変更しないこと） ----
 var AC_TZ = 'Asia/Tokyo';
 

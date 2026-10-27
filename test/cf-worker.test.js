@@ -56,7 +56,9 @@ test('受け口：署名違いは401・転送しない。検証ボタンは200�
   assert.deepEqual((await call(req(raw, { 'x-line-signature': sig('x', raw) }))).status, 401);
   assert.equal((await call(req(raw))).calls.length, 0);
   const empty = JSON.stringify({ events: [] });
-  assert.equal((await call(req(empty, { 'x-line-signature': sig(CH, empty) }))).status, 200);
+  const v = await call(req(empty, { 'x-line-signature': sig(CH, empty) }));
+  assert.equal(v.status, 200);                         // 検証ボタンも Apps Script まで転送して確かめる
+  assert.equal(v.calls.length, 1);
   assert.equal((await call(req(raw, {}, '/other'))).status, 404);
   assert.equal((await call(req(null, {}, '/line/webhook', 'GET'))).status, 404);
   const bad = 'not json';

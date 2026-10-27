@@ -65,7 +65,7 @@ export default {
       payload = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       n = (JSON.parse(payload).events || []).length;
     } catch { return new Response('', { status: 400 }); }
-    if (n === 0) return new Response('OK');   // LINE Developers の「検証」ボタン
+    // イベント0件（LINE Developers の「検証」ボタン）も Apps Script まで転送し、合言葉・接続まで含めて確かめる
     let status = 0, text = '';
     try {
       const res = await fetch(env.GAS_WEBAPP_URL, {

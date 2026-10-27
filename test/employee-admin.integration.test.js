@@ -211,7 +211,7 @@ test('署名：署名なし・改ざん・別のチャネルの署名は Workers
   assert.equal(t.reqs().length, 0);
   assert.equal(t.sheet('社員管理_操作ログ').dump().length, 1);
   const empty = JSON.stringify({ destination: 'Ubot', events: [] });
-  assert.equal(await t.viaWorker(empty), 200);          // LINE Developers の「検証」ボタン
+  assert.equal(await t.viaWorker(empty), 200);          // LINE Developers の「検証」ボタン（Apps Scriptまで届いてOK）
 });
 
 test('転送：Bへの直接の送信（署名なし）・合言葉違い・古い・使い回し・本文差し替えは NG で何も記録しない', async () => {

@@ -53,3 +53,18 @@
 安藤さん：Cloudflare無料アカウント作成、Worker「rebirth-line-webhook」を作成、シークレット2つ（LINE_CHANNEL_SECRET・EA_FORWARD_SECRET）登録、社員管理AI（本番）にEA_LINE_CHANNEL_TOKEN（既存のトークンをコピー。再発行しない）登録、Chrome拡張に dash.cloudflare.com の操作を許可
 Claude：Workerのコード公開と設定 → 社員管理AI（本番）更新 → 事前確認 → Webhook URL切替・検証 → 記録のみで確認 → 申請・承認を有効化
 戻し方：Webhook URL を既存の Apps Script の URL に戻す（即時）。社員管理だけ止める場合は `employeeAdminStop`
+
+## 切り替え前の記録（2026-10-27 11:00 確認・変更なし）
+| 項目 | 値 |
+|---|---|
+| 既存チャネル | REBIRTH 管理本部（Messaging API・チャネルID 2011885566） |
+| 旧Webhook URL | https://script.google.com/macros/s/AKfycbyoN1IRoiNXEpIMCOWiHCgRflH0XgxmVGUdVj0c6B9cYnT-IKtqxBiHTeP8uuDALkSt/exec （deploy/set-env.sh と同じ） |
+| Webhookの利用／再送／エラー統計 | オン／オフ／オフ |
+| グループ参加の許可／応答メッセージ／あいさつ | 有効／有効／有効 |
+| 既存 Apps Script のデプロイ | 「勤怠・アルコールチェック管理」ウェブアプリ バージョン19（2026/10/16 12:35）。切り替えでは変更しない |
+| 社員管理AI（本番） | ウェブアプリ バージョン4（2026/10/27 11:00）、EA_MODE=record、勤怠管理グループ設定済み、自己点検5項目OK |
+
+### 復旧手順（既存機能に問題が出たとき・1分）
+1. LINE Developers → REBIRTH 管理本部 → Messaging API設定 → Webhook URL「編集」→ 上の旧Webhook URL を貼って「更新」→「検証」で成功を確認
+2. 社員管理AI（本番）で `employeeAdminStop`（社員管理だけを止める場合はこれだけ）
+3. Workers の一時保存（KV の p:）に残った既存向けの転送は、旧URLに戻した後も Workers の定期再送で既存へ届く（Workers は削除しない）

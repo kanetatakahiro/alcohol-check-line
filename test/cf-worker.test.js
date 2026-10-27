@@ -67,6 +67,7 @@ test('受け口：署名違いは401・どこにも転送しない。検証ボ�
   assert.equal(v.status, 200);
   assert.equal(v.calls.length, 2);
   assert.equal((await call(req(raw, {}, '/other'))).status, 404);
+  assert.equal((await call(req(null, {}, '/healthz', 'GET'))).status, 200);
   assert.equal((await call(req(null, {}, '/line/webhook', 'GET'))).status, 404);
   const bad = 'not json';
   assert.equal((await call(req(bad, { 'x-line-signature': sig(CH, bad) }))).status, 400);

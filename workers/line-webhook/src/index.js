@@ -115,6 +115,7 @@ export default {
 
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/healthz') return new Response('ok');   // 稼働確認（中身は返さない）
     if (request.method !== 'POST' || url.pathname !== '/line/webhook') return new Response('', { status: 404 });
     if (!env.LINE_CHANNEL_SECRET || !GAS_URL.test(env.EXISTING_GAS_URL || '')) {
       console.log('設定不足');

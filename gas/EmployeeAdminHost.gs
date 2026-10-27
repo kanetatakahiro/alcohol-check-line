@@ -28,7 +28,7 @@ function AC_masterSheet_() {
 /** 設定とトリガーの確認（秘密の値は表示しない） */
 function employeeAdminShowSettings() {
   var p = PropertiesService.getScriptProperties().getProperties();
-  var shown = ['EA_MODE', 'EA_AUTO_APPLY', 'EA_ADMIN_GROUP_ID'], presence = ['EA_FORWARD_SECRET', 'EA_LINE_CHANNEL_TOKEN', 'EMPLOYEE_MASTER_ID'];
+  var shown = ['EA_MODE', 'EA_AUTO_APPLY', 'EA_ADMIN_GROUP_ID', 'EA_WEBAPP_URL'], presence = ['EA_FORWARD_SECRET', 'EA_LINE_CHANNEL_TOKEN', 'EMPLOYEE_MASTER_ID'];
   var out = ['社員管理AI 版 ' + EA_VERSION];
   shown.forEach(function (k) { out.push(k + '：' + (p[k] || '未設定')); });
   presence.forEach(function (k) { out.push(k + '：' + (p[k] ? '設定あり' : '未設定')); });
@@ -55,7 +55,7 @@ function employeeAdminShowSecret() {
  *  正しい署名＝OK／同じ転送の再送＝NG／本文の差し替え＝NG／5分より古い＝NG／署名なし＝NG
  */
 function employeeAdminSelfTest() {
-  var url = ScriptApp.getService().getUrl();
+  var url = PropertiesService.getScriptProperties().getProperty('EA_WEBAPP_URL');   // デプロイしたウェブアプリのURL（…/exec）
   var secret = PropertiesService.getScriptProperties().getProperty('EA_FORWARD_SECRET');
   if (!url || !secret) throw new Error('ウェブアプリのURLまたは合言葉がありません');
   var payload = JSON.stringify({ destination: 'selftest', events: [] });

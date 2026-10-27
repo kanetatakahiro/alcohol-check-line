@@ -150,6 +150,8 @@ export default {
     if (ctx && ctx.waitUntil) ctx.waitUntil(work);                                  // LINE側が先に接続を切っても最後まで行う
     const res = await work;
     console.log(`受信 ${events.length}件（社員管理 ${eaEvents.length}件）：` + res.map((r) => `${r.target}=${r.ok ? 'OK' : r.kept ? '一時保存' : '失敗'}`).join(' '));
+    // 検証ボタン（0件）は既存への接続で判定する（社員管理側は別に自己点検で確認する）
+    if (events.length === 0) return res[0].ok ? new Response('OK') : new Response('', { status: 500 });
     return res.every((r) => r.ok || r.kept) ? new Response('OK') : new Response('', { status: 500 });
   },
 };

@@ -50,6 +50,36 @@ function employeeAdminShowSecret() {
   Logger.log(PropertiesService.getScriptProperties().getProperty('EA_FORWARD_SECRET') || '未作成です（employeeAdminCreateSecret を実行）');
 }
 
+/**
+ * 実環境の自己点検：このウェブアプリへ実際に HTTP で送り、転送の確認が働くかを見る（シートには書かない。合言葉は表示しない）
+ *  正しい署名＝OK／同じ転送の再送＝NG／本文の差し替え＝NG／5分より古い＝NG／署名なし＝NG
+ */
+function employeeAdminSelfTest() {
+  var url = ScriptApp.getService().getUrl();
+  var secret = PropertiesService.getScriptProperties().getProperty('EA_FORWARD_SECRET');
+  if (!url || !secret) throw new Error('ウェブアプリのURLまたは合言葉がありません');
+  var payload = JSON.stringify({ destination: 'selftest', events: [] });
+  var make = function (tsShift, p) {
+    var ts = Math.floor(Date.now() / 1000) + (tsShift || 0), nonce = Utilities.getUuid(), body = p || payload;
+    return { type: 'line-verified', ts: ts, nonce: nonce, payload: body, sig: EA_hmacHex_(secret, ts + '.' + nonce + '.' + body) };
+  };
+  var post = function (obj) {
+    return UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify(obj), muteHttpExceptions: true, followRedirects: true })
+      .getContentText().trim();
+  };
+  var ok = make(0), tampered = make(0);
+  tampered.payload = JSON.stringify({ destination: 'selftest2', events: [] });
+  var res = [
+    ['正しい署名', post(ok), 'OK'],
+    ['同じ転送の再送', post(ok), 'NG'],
+    ['本文の差し替え', post(tampered), 'NG'],
+    ['5分より古い', post(make(-301)), 'NG'],
+    ['署名なし（LINEの本文そのまま）', post({ destination: 'selftest', events: [] }), 'NG'],
+  ];
+  res.forEach(function (r) { Logger.log('%s：%s（期待 %s）%s', r[0], r[1], r[2], r[1] === r[2] ? '✅' : '❌'); });
+  return res.every(function (r) { return r[1] === r[2]; });
+}
+
 // ---- 既存と同じ定義（gas/AlcoholCheck.gs から複製。変更しないこと） ----
 var AC_TZ = 'Asia/Tokyo';
 

@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-27a';
+var AC_CODE_VERSION = '2026-10-27b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -172,6 +172,8 @@ function alcoholCheckImportTot() {
       done++;
     }
     if (!done) Logger.log('新しいCSVはありません');
+    // 管理本部の本人へのお知らせ（朝のTOTデータから。Webアプリの版を変えずに動かすため、ここから呼ぶ）
+    try { AC_selfNoticesHourly_(); } catch (e) { Logger.log('本人へのお知らせの処理に失敗：%s', e && e.message); }
   } finally { lock.releaseLock(); }
 }
 
@@ -507,8 +509,8 @@ function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
         + pend.slice(0, 20).map(function (p) { return '・' + nm(p.tot) + 'さん　' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
         + (pend.length > 20 ? '\n…ほか' + (pend.length - 20) + '件' : '') + '\n\nいつもありがとうございます！').slice(0, 4900));
     }
-    // 管理本部の本人へ、自分の申請だけ（REQUEST_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。管理者への一覧は上のまま
-    try { AC_selfRequestNotices_(pend, mv, ss, today, props); } catch (e) { Logger.log('本人への承認待ちのお知らせに失敗'); }
+    // 管理本部の本人へのお知らせ（自分の申請だけ）は、ここでは送らない。1時間ごとの処理（AC_selfNoticesHourly_）が
+    // 保存済みの朝のデータから行う（Webアプリの版を変えずに動かすため）。管理者への一覧は上のまま
   }
   // 有給の年5日（月曜の朝だけデータが届く）
   if (Array.isArray(R.paidLeaves) && !R.paidLeaves.some(function (l) { return l && l._error; })) {
@@ -1101,23 +1103,11 @@ function AC_pendingRequests(employees, requests) {
  */
 var AC_SELF_REQUEST_DEPT = '管理本部';
 function AC_selfRequestNotices(pend, masterValues, today) {
-  var byTot = {};
-  for (var i = 1; i < (masterValues || []).length; i++) {
-    var r = masterValues[i], tot = AC_totKey(r[AC_COL.totCode]);
-    if (!tot) continue;
-    (byTot[tot] = byTot[tot] || []).push(r);
-  }
-  var groups = {};
+  var targets = AC_selfNoticeTargets(masterValues, today), groups = {};
   (pend || []).forEach(function (p) {
-    var rows = byTot[AC_totKey(p.tot)] || [];
-    if (rows.length !== 1) return;   // 照合できない・TOTコードが重複している人には送らない
-    var r = rows[0];
-    if (String(r[AC_COL.dept]).trim() !== AC_SELF_REQUEST_DEPT || String(r[AC_COL.status]).trim() !== '在籍') return;
-    if (AC_isRetired(r[AC_COL.retiredOn], today)) return;
-    if (r[AC_COL.lineOk] !== true || !AC_isUserId(r[AC_COL.userId])) return;
-    var code = AC_cellCode_(r[AC_COL.code]);
-    if (!code) return;
-    var g = groups[code] || (groups[code] = { code: code, name: String(r[AC_COL.name]).trim(), userId: r[AC_COL.userId], items: [] });
+    var t = targets[AC_totKey(p.tot)];
+    if (!t) return;   // 照合できない・TOTコードが重複している・対象外の人には送らない
+    var g = groups[t.code] || (groups[t.code] = { code: t.code, name: t.name, userId: t.userId, items: [] });
     g.items.push(p);
   });
   return Object.keys(groups).sort().map(function (code) {
@@ -1130,7 +1120,7 @@ function AC_selfRequestNotices(pend, masterValues, today) {
   });
 }
 
-/** 本人宛ての承認待ちのお知らせ（朝のTOT取り込みのとき）。記録は従業員マスタのファイルの「承認待ち本人通知」シート */
+/** 本人宛ての承認待ちのお知らせ（朝のTOTデータ。AC_selfNoticesHourly_ から）。記録は従業員マスタのファイルの「承認待ち本人通知」シート */
 function AC_selfRequestNotices_(pend, mv, ss, today, props) {
   var mode = String(props.getProperty('REQUEST_SELF_NOTIFY') || '').trim();
   if (mode !== 'record' && mode !== 'on') return;
@@ -1157,6 +1147,138 @@ function AC_selfRequestNotices_(pend, mv, ss, today, props) {
   }
   if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
   Logger.log('本人への承認待ちのお知らせ（%s）：対象 %s人', mode, list.length);
+}
+
+/** 管理本部の本人へのお知らせの対象者（在籍・退職日前・LINE確認済み・TOTコードが1人に決まる人）。{ TOTコード: {code, name, userId} } */
+function AC_selfNoticeTargets(masterValues, today) {
+  var byTot = {};
+  for (var i = 1; i < (masterValues || []).length; i++) {
+    var r = masterValues[i], tot = AC_totKey(r[AC_COL.totCode]);
+    if (!tot) continue;
+    (byTot[tot] = byTot[tot] || []).push(r);
+  }
+  var out = {};
+  Object.keys(byTot).forEach(function (tot) {
+    var rows = byTot[tot];
+    if (rows.length !== 1) return;   // TOTコードが重複している人には送らない
+    var r = rows[0];
+    if (String(r[AC_COL.dept]).trim() !== AC_SELF_REQUEST_DEPT || String(r[AC_COL.status]).trim() !== '在籍') return;
+    if (AC_isRetired(r[AC_COL.retiredOn], today)) return;
+    if (r[AC_COL.lineOk] !== true || !AC_isUserId(r[AC_COL.userId])) return;
+    var code = AC_cellCode_(r[AC_COL.code]);
+    if (!code) return;
+    out[tot] = { code: code, name: String(r[AC_COL.name]).trim(), userId: r[AC_COL.userId] };
+  });
+  return out;
+}
+
+/**
+ * 純粋関数：未申請の打刻漏れ（TOTのエラー勤務のうち、同じ人・同じ日の打刻申請が「承認待ち」「承認済み」でない日）。
+ * 対象は AC_attendanceFindings と同じ（昨日から7日前まで）。戻り値：[{ tot, date }]（日付順）
+ */
+function AC_unrequestedPunchErrors(R, today) {
+  var codeByKey = AC_totCodeByKey_(R.employees), requested = {};
+  (R.requests || []).forEach(function (q) {
+    if (!q || q._error || q.type !== 'timerecords' || (q.status !== 'applying' && q.status !== 'approved')) return;
+    var tot = codeByKey[q.employeeKey];
+    if (tot && q.date) requested[AC_totKey(tot) + ':' + String(q.date).slice(0, 10)] = true;
+  });
+  var seen = {};
+  return AC_attendanceFindings(R, today).punchErrors.filter(function (p) {
+    var k = AC_totKey(p.tot) + ':' + p.date;
+    if (requested[k] || seen[k]) return false;
+    seen[k] = true;
+    return true;
+  }).sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+}
+
+/**
+ * 純粋関数：未申請の打刻漏れを、管理本部の本人宛てにまとめる（1人1通。本人の日付だけ）。
+ * 戻り値：[{ code, name, userId, tot, dates:[…] }]（本文は送るときに作る）
+ */
+function AC_punchSelfNotices(R, masterValues, today) {
+  var targets = AC_selfNoticeTargets(masterValues, today), groups = {};
+  AC_unrequestedPunchErrors(R, today).forEach(function (p) {
+    var t = targets[AC_totKey(p.tot)];
+    if (!t) return;
+    var g = groups[t.code] || (groups[t.code] = { code: t.code, name: t.name, userId: t.userId, tot: AC_totKey(p.tot), dates: [] });
+    g.dates.push(p.date);
+  });
+  return Object.keys(groups).sort().map(function (c) { return groups[c]; });
+}
+
+/** 純粋関数：打刻漏れのお知らせ本文。1日なら既存の打刻漏れの文面、複数日なら日付を並べる */
+function AC_punchSelfMessage(dates, ctx, overrides, today) {
+  if (dates.length === 1) return AC_punchMessage(dates[0], ctx, overrides, today);
+  var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
+  return AC_punchMessage(dates[0], ctx, overrides, today).replace(md(dates[0]), dates.map(md).join('、'));
+}
+
+/** 管理本部の本人への未申請の打刻漏れのお知らせ（PUNCH_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。記録は「打刻漏れ本人通知」シート */
+function AC_punchSelfNotices_(R, mv, ss, today, props) {
+  var mode = String(props.getProperty('PUNCH_SELF_NOTIFY') || '').trim();
+  if (mode !== 'record' && mode !== 'on') return;
+  var live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
+  var list = AC_punchSelfNotices(R, mv, today);
+  var pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date(), rows = [], overrides = AC_templateOverrides_();
+  list.forEach(function (g) {
+    // 同じ日の打刻漏れは1回だけ知らせる（夜の既存の勤怠通知で送った日も除く）。お知らせ停止の期間中の日・停止中の人は除く
+    var kind = live ? ':punchself:' : ':punchrec:';   // 送信の記録は「sent:日付:…」（8日後に自動で消える）。記録のみは別の名前
+    var skip = {}, dates = g.dates.filter(function (d) {
+      if (AC_isPaused(pauseIdx, g.code, today) || AC_isPaused(pauseIdx, g.code, d)) { skip[d] = 'お知らせ停止中'; return false; }
+      if (state.getProperty('sent:' + d + kind + g.code) || state.getProperty('att:' + d + ':punch:' + g.tot)) { skip[d] = 'お知らせ済み'; return false; }
+      return true;
+    });
+    var text = '', result;
+    if (!dates.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
+    else {
+      text = AC_punchSelfMessage(dates, null, overrides, today);
+      if (!live) result = '記録のみ（送信しない）';
+      else {
+        try { AC_pushTo_(g.userId, text); result = '送信'; } catch (e) { result = '送信失敗'; }
+      }
+      if (result !== '送信失敗') dates.forEach(function (d) { state.setProperty('sent:' + d + kind + g.code, now.toISOString()); });
+    }
+    rows.push([now, "'" + g.code, g.name, g.dates.join('、'), text, result]);
+  });
+  var name = '打刻漏れ本人通知';
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, 6).setValues([['日時', '社員番号', '氏名', '対象日（未申請の打刻漏れ）', '本文', '結果']]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
+  Logger.log('本人への打刻漏れのお知らせ（%s）：対象 %s人', mode, list.length);
+}
+
+/**
+ * 1時間ごと（alcoholCheckImportTot から）：朝のTOT受信で保存された tot-latest.json を使い、管理本部の本人へのお知らせを1日1回行う。
+ * Webアプリの版（デプロイ）を変えずに動かすための入口。夜のデータ（申請データなし）・前日のデータ・7〜12時以外では動かない。
+ */
+function AC_selfNoticesHourly_() {
+  var props = PropertiesService.getScriptProperties();
+  var used = ['REQUEST_SELF_NOTIFY', 'PUNCH_SELF_NOTIFY'].some(function (k) { var m = String(props.getProperty(k) || '').trim(); return m === 'record' || m === 'on'; });
+  if (!used) return;
+  var today = AC_today_(), hour = Number(Utilities.formatDate(new Date(), AC_TZ, 'HH'));
+  if (hour < 7 || hour >= 12) return;
+  var state = AC_state_(), doneKey = 'selfnotice:' + today;
+  if (state.getProperty(doneKey)) return;
+  var file = AC_totLatestFile_();
+  if (!file || Utilities.formatDate(file.getLastUpdated(), AC_TZ, 'yyyy-MM-dd') !== today) return;
+  var data;
+  try { data = JSON.parse(file.getBlob().getDataAsString('UTF-8')); } catch (e) { return; }
+  var R = (data && data.results) || {};
+  if (data.today !== today || !Array.isArray(R.employees) || !Array.isArray(R.requests) || !Array.isArray(R.workings)) return;
+  if (R.requests.some(function (q) { return q && q._error; }) || R.workings.some(function (w) { return w && w._error; })) {
+    state.setProperty(doneKey, 'skip');
+    Logger.log('本人へのお知らせ：TOTの申請または勤務データが一部読めなかったため、今日は行いません');
+    return;
+  }
+  state.setProperty(doneKey, new Date().toISOString());   // 途中で失敗しても、同じ日に繰り返さない
+  var master = AC_masterSheet_(), mv = master.getDataRange().getValues(), ss = master.getParent();
+  try { AC_selfRequestNotices_(AC_pendingRequests(R.employees, R.requests), mv, ss, today, props); } catch (e) { Logger.log('本人への承認待ちのお知らせに失敗'); }
+  try { AC_punchSelfNotices_(R, mv, ss, today, props); } catch (e) { Logger.log('本人への打刻漏れのお知らせに失敗'); }
 }
 
 /** 純粋関数：有給の年5日（入社日・取得した有休の日から、一人ずつ） */
@@ -1363,16 +1485,22 @@ function AC_monthShiftSheetDone(values, month, toDate) {
   return false;
 }
 
-/** 保存済みの tot-latest.json を読む（フォルダの作成・設定の書き込みはしない） */
-function AC_readTotLatest_() {
+/** 保存済みの tot-latest.json のファイル（フォルダの作成・設定の書き込みはしない） */
+function AC_totLatestFile_() {
   var id = PropertiesService.getScriptProperties().getProperty('TOT_FOLDER_ID');
   var folder = null;
   if (id) folder = DriveApp.getFolderById(id);
   else { var it = DriveApp.getFoldersByName(AC_TOT_FOLDER); if (it.hasNext()) folder = it.next(); }
   if (!folder) return null;
   var files = folder.getFilesByName('tot-latest.json');
-  if (!files.hasNext()) return null;
-  try { return JSON.parse(files.next().getBlob().getDataAsString('UTF-8')); } catch (e) { return null; }
+  return files.hasNext() ? files.next() : null;
+}
+
+/** 保存済みの tot-latest.json を読む（フォルダの作成・設定の書き込みはしない） */
+function AC_readTotLatest_() {
+  var file = AC_totLatestFile_();
+  if (!file) return null;
+  try { return JSON.parse(file.getBlob().getDataAsString('UTF-8')); } catch (e) { return null; }
 }
 
 function AC_manualNextMonthShift_(commit) {
@@ -1459,6 +1587,7 @@ var AC_SETTINGS_SHOWN = {
   AGREEMENT_START_MONTH: '未設定＝4月',
   FORM_LIVE_FROM: '未設定＝2026-10-20',
   REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
+  PUNCH_SELF_NOTIFY: '未設定＝本人へ未申請の打刻漏れを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
   'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
@@ -3168,7 +3297,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

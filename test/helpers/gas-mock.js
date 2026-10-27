@@ -114,8 +114,25 @@ export function createGas({ files, now, shared }) {
       hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(d).map((x) => [x.type, x.value]));
     return f.replace('yyyy', p.year).replace('MM', p.month).replace('dd', p.day).replace('HH', p.hour).replace('mm', p.minute).replace('ss', p.second);
   };
+  // ドライブ（「TOT取り込み」フォルダ1つだけの模擬）：drive.files[ファイル名] = { content, updated(ミリ秒) }
+  const drive = { files: {} };
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const fileObj = (name) => ({
+    getName: () => name, getId: () => 'file-' + name,
+    getLastUpdated: () => new FakeDate(drive.files[name].updated),
+    getBlob: () => ({ getDataAsString: () => drive.files[name].content }),
+    setContent: (t) => { drive.files[name] = { content: t, updated: clock.now }; },
+  });
+  const folder = {
+    getId: () => 'folder-tot',
+    getFiles: () => iter(Object.keys(drive.files).map(fileObj)),
+    getFilesByName: (n) => iter(Object.hasOwn(drive.files, n) ? [fileObj(n)] : []),
+    createFile: (n, t) => { drive.files[n] = { content: t, updated: clock.now }; return fileObj(n); },
+  };
   const ctx = {
     Date: FakeDate,
+    DriveApp: { getFolderById: () => folder, getFoldersByName: () => iter([folder]), createFolder: () => folder },
+    MimeType: { PLAIN_TEXT: 'text/plain' },
     console,
     Logger: { log: (...a) => { logs.push(a.join(' ')); } },
     SpreadsheetApp: {
@@ -160,7 +177,7 @@ export function createGas({ files, now, shared }) {
   };
   vm.createContext(ctx);
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
-  return { ctx, clock, sheets, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, FakeDate,
+  return { ctx, clock, sheets, drive, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };
 }
 

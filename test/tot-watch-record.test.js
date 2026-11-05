@@ -127,10 +127,10 @@ test('記録: 混雑・サーバーエラーは最大3回再試行、権限エ�
 });
 
 test('記録: 再試行の途中で禁止時間帯に入ったら、それ以上ToTへ問い合わせない', async () => {
-  let t = jst('2026-11-01T08:29:58').getTime(), calls = 0;
+  let t = jst('2026-11-01T08:29:00').getTime(), calls = 0;   // 8:29:00・8:29:05は問い合わせ、30秒待った8:29:35は応答待ちが8:30を過ぎるので止める
   await assert.rejects(getWithRetry('/x', { token: 't', now: () => new Date(t), wait: async ms => { t += ms; },
     fetchImpl: async () => { calls++; return { ok: false, status: 503 }; } }), /禁止時間帯/);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test('記録: 一部失敗なら5分後に1回やり直す。失敗した項目は記録に残る', async () => {
@@ -252,4 +252,49 @@ test('毎営業日の確認: 前日・当日の結果、最後の記録、空き
   assert.match(r, /最後の記録：2026-11-02 08:02（成功）/);
   assert.match(r, /空き容量：\d+MB/);
   assert.match(dailyReport(dir, jst('2026-11-02T07:00:00')), /2026-11-02：まだ予定の回なし/);
+});
+
+test('記録: やり直しが予定の時刻から20分を過ぎても、同じ枠として記録し、22:35の点検・まとめを行う', async () => {
+  let t = jst('2026-11-01T22:35:00').getTime(), round = 0;
+  const dir = tmpDir();
+  const base = fakeTot();
+  const fetchImpl = async (url, opt) => {
+    if (url.includes('/requests/') && round === 0) return { ok: false, status: 503 };
+    return base.fetchImpl(url, opt);
+  };
+  // 1回目は混雑で長引き（再試行の待ち）、5分後のやり直しが22:55を過ぎる
+  await runRecord({ env: { TOT_ACCESS_TOKEN: 't' }, fetchImpl, now: () => new Date(t), log: () => {}, dir,
+    wait: async ms => { if (ms === 300000) { round = 1; t += 15 * 60000; } t += ms; } });
+  const m = readManifest(dir);
+  assert.deepEqual(m.map(e => e.slot), ['22:35', '22:35']);
+  assert.equal(m[1].ok, true);
+  assert.ok(fs.existsSync(path.join(dir, 'raw', '2026-11-01_2235.json')));
+  assert.ok(fs.existsSync(path.join(dir, 'status', '2026-11-01.json')));
+  assert.ok(fs.existsSync(path.join(dir, 'archive', '2026-11-01.jsonl.gz')));
+});
+
+test('記録: 問い合わせの途中（応答待ちの上限30秒）で禁止時間帯に入るときは問い合わせない', async () => {
+  let calls = 0;
+  await assert.rejects(getWithRetry('/x', { token: 't', now: () => jst('2026-11-01T08:29:45'), wait: noWait,
+    fetchImpl: async () => { calls++; return { ok: true, status: 200, json: async () => [] }; } }), /禁止時間帯/);
+  assert.equal(calls, 0);
+  const r = await getWithRetry('/x', { token: 't', now: () => jst('2026-11-01T08:29:00'), wait: noWait,
+    fetchImpl: async () => { calls++; return { ok: true, status: 200, json: async () => [] }; } });
+  assert.equal(r.status, 200);
+  assert.equal(calls, 1);
+});
+
+test('記録: 実行中の鍵は1回の最長の実行時間より短く古い扱いにせず、他の実行の鍵を消さない', () => {
+  const dir = tmpDir();
+  ensureDirs(dir);
+  const t0 = Date.now();
+  const release = acquireLock(dir, t0);
+  assert.ok(release);
+  assert.equal(acquireLock(dir, t0 + 45 * 60000), null);   // 45分後もまだ実行中の扱い
+  const other = acquireLock(dir, t0 + 61 * 60000);          // 1時間を過ぎたら古い鍵として取り直す
+  assert.ok(other);
+  release();                                                 // 元の実行が後から終わっても、新しい鍵は消えない
+  assert.ok(fs.existsSync(path.join(dir, '.lock')));
+  other();
+  assert.ok(!fs.existsSync(path.join(dir, '.lock')));
 });

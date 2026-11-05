@@ -26,7 +26,9 @@ const FORBIDDEN = [[510, 600], [1050, 1110]];   // ToTの利用禁止時間帯�
 const REQUEST_RETRY_WAITS = [5000, 30000, 60000];
 const RUN_RETRY_WAIT = 5 * 60 * 1000;
 const RUN_MAX_MINUTES = 10;                     // 1回の取得にかかる時間の上限の見込み（再試行の判断に使う）
-const LOCK_STALE_MS = 15 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 30000;              // 1件の応答待ちの上限
+// 1回の実行の最長（1件：応答待ち30秒×4回＋待ち95秒、5件で約18分。やり直しを含め約41分）より長く、次の回（1時間後）より短く
+const LOCK_STALE_MS = 50 * 60 * 1000;
 
 /** 日本時間の「時×60＋分」 */
 export function japanMinutes(d) {
@@ -109,9 +111,11 @@ export async function getWithRetry(pathName, { token, fetchImpl, now, wait }) {
   let last = null;
   for (let i = 0; i <= REQUEST_RETRY_WAITS.length; i++) {
     if (i > 0) await wait(REQUEST_RETRY_WAITS[i - 1]);
-    assertAllowedTime(now());
+    const at = now();
+    assertAllowedTime(at);
+    assertAllowedTime(new Date(at.getTime() + REQUEST_TIMEOUT_MS));   // 応答待ちの途中で禁止時間帯に入るなら問い合わせない
     try {
-      const res = await fetchImpl(`${API}${pathName}`, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(30000),
+      const res = await fetchImpl(`${API}${pathName}`, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
       if (res.ok) return { status: res.status, data: await res.json() };
       last = res.status;
@@ -124,11 +128,11 @@ export async function getWithRetry(pathName, { token, fetchImpl, now, wait }) {
   return { status: last, data: null };
 }
 
-/** 1回分の取得（成否は項目ごと） */
-export async function fetchSnapshot({ token, fetchImpl, now, wait }) {
+/** 1回分の取得（成否は項目ごと）。やり直しでも同じ枠になるよう、日付・枠は実行開始時のものを渡せる */
+export async function fetchSnapshot({ token, fetchImpl, now, wait, today = null, slot = null }) {
   const fetchedAt = now();
-  const today = japanDate(fetchedAt);
-  const snap = { schema: SCHEMA, fetchedAt: fetchedAt.toISOString(), today, slot: slotFor(fetchedAt), parts: {}, data: { requests: {} } };
+  today = today || japanDate(fetchedAt);
+  const snap = { schema: SCHEMA, fetchedAt: fetchedAt.toISOString(), today, slot: slot || slotFor(fetchedAt), parts: {}, data: { requests: {} } };
   let first = true;
   for (const item of watchPlan(today)) {
     if (!first) await wait(1100);
@@ -166,8 +170,11 @@ export function acquireLock(dir, nowMs = Date.now()) {
     const st = fs.statSync(f);
     if (nowMs - st.mtimeMs > LOCK_STALE_MS) fs.rmSync(f, { force: true });
   } catch { /* 鍵なし */ }
-  try { fs.writeFileSync(f, String(process.pid), { flag: 'wx', mode: 0o600 }); return () => fs.rmSync(f, { force: true }); }
+  const id = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  try { fs.writeFileSync(f, id, { flag: 'wx', mode: 0o600 }); }
   catch { return null; }
+  // 自分の鍵のときだけ消す（古い扱いで別の実行が取り直した鍵は消さない）
+  return () => { try { if (fs.readFileSync(f, 'utf8') === id) fs.rmSync(f, { force: true }); } catch { /* 鍵なし */ } };
 }
 
 export function rawName(snap) { return `${snap.today}_${snap.slot.replace(':', '')}.json`; }
@@ -295,9 +302,9 @@ export async function runRecord({ env = process.env, fetchImpl = fetch, now = ()
     let snap = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       let error = null;
-      try { snap = await fetchSnapshot({ token, fetchImpl, now, wait }); } catch (e) { error = /禁止時間帯/.test(e.message) ? 'forbidden' : 'error'; snap = null; }
+      try { snap = await fetchSnapshot({ token, fetchImpl, now, wait, today: startDay, slot: startSlot }); } catch (e) { error = /禁止時間帯/.test(e.message) ? 'forbidden' : 'error'; snap = null; }
       const saved = snap && Object.values(snap.parts).some(s => s === 200) ? saveSnapshot(dir, snap) : null;
-      const entry = { schema: SCHEMA, at: now().toISOString(), today: snap ? snap.today : startDay, slot: snap ? snap.slot : startSlot, attempt,
+      const entry = { schema: SCHEMA, at: now().toISOString(), today: startDay, slot: startSlot, attempt,
         ok: !!(snap && snap.ok), saved: !!saved, file: saved && saved.file, sha256: saved && saved.sha256,
         parts: snap ? snap.parts : null, counts: snap ? countsOf(snap) : null, error };
       appendManifest(dir, entry);
@@ -306,7 +313,7 @@ export async function runRecord({ env = process.env, fetchImpl = fetch, now = ()
       await wait(RUN_RETRY_WAIT);
     }
     // 点検：8:02の回は前日分（22:35を含む）、22:35の回はその日の分。結果は status/ に残す（通知はしない）
-    const today = japanDate(now()), slot = slotFor(now());
+    const today = startDay, slot = startSlot;   // やり直しで時刻が進んでも、実行開始時の日付・枠で点検する
     const targets = slot === '08:02' ? [addDays(today, -1), today] : slot === '22:35' ? [today] : [];
     for (const d of targets) {
       const st = checkDay(dir, d, readManifest(dir), { upTo: d === today && slot !== '22:35' ? slot : null });

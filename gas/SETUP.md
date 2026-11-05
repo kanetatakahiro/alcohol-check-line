@@ -132,7 +132,7 @@ LINEの無料プランは月200通。出勤者全員への朝・夕の案内を�
   - 退職者も行に残す（過去の回答の部署表示に使うため）。同じ注意書きを参照専用ファイルのD1に記載
 - Apps Script・トリガー・LINE通知・フォームは変更なし（コードは回答シートを列番号で読んでいない）
 
-## 打刻の記録（勤怠見守りの先行開発・VPSのみ）【本番未導入・承認待ち】
+## 打刻の記録（勤怠見守りの先行開発・VPSのみ）【VPSに導入済み（2026-11-05・コミット 9295f5b）】
 VPSで既存の取り込み（7:05・22:30）とは別に、打刻の記録だけを行う。Apps Script・LINE・スプレッドシートは変更しない。作業は10:00〜17:30（ToTの利用禁止時間帯を避ける）。
 
 ### cronの一覧（導入後）
@@ -153,8 +153,10 @@ VPSで既存の取り込み（7:05・22:30）とは別に、打刻の記録だ�
 7. コントロールパネル：本契約に移行済み（「お試し期間中」の表示なし）・稼働中・IP 133.167.110.249
 
 ### 導入手順（承認後）
+承認されたコミット：`9295f5b`（PR #1 のブランチ `claude/watch-record-review-pr-afx8az`。2026-11-05 13:58 にこの手順で導入済み）
+
 1. `crontab -l > ~/crontab-backup-$(date +%Y%m%d).txt`（今のcronを控える）
-2. `git fetch origin feature/watch-record && git show <承認されたコミット>:src/tot-watch-record.js > src/tot-watch-record.js`（新しいファイルを1つ置くだけ。既存のファイル・ブランチは変えない）
+2. `git fetch origin claude/watch-record-review-pr-afx8az && git show 9295f5b:src/tot-watch-record.js > src/tot-watch-record.js`（新しいファイルを1つ置くだけ。既存のファイル・ブランチは変えない）
 3. `sha256sum src/tot-relay.js src/tot-client.js src/reconcile.js` → 導入前と同じこと
 4. `node --env-file=.env src/tot-watch-record.js --dry-run` → `"ok":true` と件数（保存しない）
 5. `node --env-file=.env src/tot-watch-record.js` → `ls -l ~/watch-data/raw` にファイル1つ・`-rw-------`、`ls -ld ~/watch-data` が `drwx------`

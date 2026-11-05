@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-10-27b';
+var AC_CODE_VERSION = '2026-11-05a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -969,6 +969,7 @@ function AC_handleGroupEvent_(ev) {
     AC_pushLine_('【グループLINE】公式LINEがグループから退出しました（「LINEグループ」シートを「退出」にしました）。');
     return;
   }
+  if (ev.type === 'postback') { if (typeof INQ_onGroupPostback_ === 'function') INQ_onGroupPostback_(ev); return; }   // 問い合わせのボタン（gas/Inquiry.gs）
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
   var depts = AC_parseDeptRegistration(ev.message.text);
   if (!depts) return;   // グループの普段の会話には反応しない
@@ -1588,11 +1589,14 @@ var AC_SETTINGS_SHOWN = {
   FORM_LIVE_FROM: '未設定＝2026-10-20',
   REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
   PUNCH_SELF_NOTIFY: '未設定＝本人へ未申請の打刻漏れを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
+  INQ_MODE: '未設定＝問い合わせ管理は動かない（record＝記録だけ／on＝利用開始）',
+  INQ_NOTIFY_TO: '未設定＝問い合わせの通知は勤怠管理グループへ（admin＝管理者の個別LINEへ）',
+  INQ_REMIND_DAYS: '未設定＝問い合わせのリマインドは毎日（weekdays＝土日は送らない）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
-  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES'];
+  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'INQ_SPREADSHEET_ID'];
 var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
-  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm'];
+  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'INQ_remind'];
 
 /**
  * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
@@ -2846,9 +2850,9 @@ function AC_handleEvent_(ev) {
     AC_reply_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
     return;
   }
-  if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
+  if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') { if (typeof INQ_onUserEvent_ === 'function') INQ_onUserEvent_(ev); return; }   // 問い合わせ（gas/Inquiry.gs）
   var code = AC_parseEmployeeCode(ev.message.text);
-  if (!code) return;
+  if (!code) { if (typeof INQ_onUserEvent_ === 'function') INQ_onUserEvent_(ev); return; }   // 社員番号ではない文字 → 問い合わせ（gas/Inquiry.gs）
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   var result;

@@ -1,6 +1,7 @@
 # 従業員問い合わせ管理（第1段階）：既存システムへの追加の調査結果
 
 調査日：2026-11-05／ブランチ `feature/inquiry`（main edd2e57 から作成）
+追記（2026-11-05・実装時）：Node.js 22 を導入し npm test を実行できるようにした。本番の版（2026-10-27b）は PR #2 で main への統合を確認中で、feature/inquiry にはこの版を取り込み済み。実装と反映手順は SPEC.md・RELEASE.md を参照。
 調査の方法：GitHub のコードと資料を読んだだけです。本番のApps Script・デプロイ・トリガー・スクリプトプロパティ・LINE・Webhook・VPS・Cloudflare には触れていません。LINEの送信もしていません。
 
 ## まとめ（先に結論）

@@ -109,6 +109,7 @@ export function createGas({ files, now, shared }) {
   const fetches = [];
   const line = { members: {}, profiles: {} };
   const logs = [];
+  const triggers = [];
   const fmtDate = (d, tz, f) => {
     const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(d).map((x) => [x.type, x.value]));
@@ -163,7 +164,9 @@ export function createGas({ files, now, shared }) {
           if (line.members[g] && Object.hasOwn(line.members[g], u)) text = JSON.stringify({ displayName: line.members[g][u], userId: u });
           else code = 404;
         } else if (prof) {
-          text = JSON.stringify({ displayName: line.profiles[decodeURIComponent(prof[1])] || '試験ユーザー' });
+          const pu = decodeURIComponent(prof[1]);
+          if (line.profiles[pu] === null) code = 404;   // 友だちでない・存在しない利用者
+          else text = JSON.stringify({ displayName: line.profiles[pu] || '試験ユーザー' });
         } else if (/\/message\/reply$/.test(url) && rec.body && /^forged/.test(String(rec.body.replyToken))) {
           code = 400; text = '{"message":"Invalid reply token"}';   // LINEが発行していない返信トークン
         } else if (!/api\.line\.me\/v2\/bot\/message\/(reply|push)$/.test(url)) {
@@ -173,11 +176,21 @@ export function createGas({ files, now, shared }) {
       },
     },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
+    ScriptApp: {   // トリガーの模擬（作成・削除を記録するだけ）
+      getProjectTriggers: () => triggers.slice(),
+      deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i !== -1) triggers.splice(i, 1); },
+      newTrigger: (fn) => {
+        const t = { fn, at: null, getHandlerFunction: () => fn, getEventType: () => 'CLOCK' };
+        const b = { timeBased: () => b, atHour: (h) => { t.at = h; return b; }, nearMinute: () => b, everyDays: () => b, everyHours: () => b,
+          inTimezone: () => b, create: () => { triggers.push(t); return t; } };
+        return b;
+      },
+    },
     module: { exports: {} },
   };
   vm.createContext(ctx);
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
-  return { ctx, clock, sheets, drive, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, FakeDate,
+  return { ctx, clock, sheets, drive, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };
 }
 

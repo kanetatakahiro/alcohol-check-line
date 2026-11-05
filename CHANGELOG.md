@@ -1,5 +1,14 @@
 # 変更履歴
 
+## 2026-11-05 従業員問い合わせ管理 第1段階（版 2026-11-05a・ブランチ feature/inquiry・本番未導入）
+- 新規 gas/Inquiry.gs：1対1の社員番号以外のメッセージを問い合わせとして受付（問い合わせ専用のスプレッドシート）、勤怠管理グループへボタンつきで通知（対応します／対応済みにする・postback `inq|1|…`）、9:00・17:00のリマインド（INQ_remind）、同じ人の追記（対応中は30分に1回まで通知）、定型連絡は記録のみ、機密は通知に出さずシートでは伏せる、未登録者へ社員番号の案内を1回（返信）
+- 安全対策：webhookEventId で重複を防ぐ（一時記憶＋受信記録）、送信者のプロフィール・グループのメンバーを確認、案件ごとの合言葉、状態は一方向（二重押し・古いボタンは変えない）、入口でエラーを止める
+- gas/AlcoholCheck.gs：受信処理から Inquiry.gs を呼ぶ3行（関数が無ければ何もしない）、設定表示に INQ_ の項目と INQ_remind を追加、版 2026-11-05a。既存の処理は変更なし
+- INQ_MODE（未設定／record／on）で段階的に有効化。未設定なら今と同じ動き
+- テスト：npm test 126件すべて成功（既存92件＋問い合わせ34件。架空データ・模擬環境）。test/helpers/gas-mock.js にプロフィールの404とトリガーの模擬を追加
+- 資料：docs/inquiry/INVESTIGATION.md（調査）・SPEC.md（仕様）・RELEASE.md（反映手順・テスト手順・戻し方）
+- 本番のApps Script・デプロイ・トリガー・スクリプトプロパティ・LINE・Webhook・VPS・Cloudflareは変更なし
+
 ## 2026-10-27 本番反映：管理本部の本人へのお知らせ（記録のみ・版 2026-10-27b）
 - 17:1x 本番の「コード.gs」を feature/self-request-notice 28f80da の gas/AlcoholCheck.gs に置き換え（反映前は 72bbe88 と一致を確認、保存後は 28f80da と一致を確認）
 - スクリプトプロパティ：REQUEST_SELF_NOTIFY=record（設定済み）、PUNCH_SELF_NOTIFY=record を追加。本人へのLINE送信はしない

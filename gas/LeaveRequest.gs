@@ -77,7 +77,8 @@ function AC_leaveRequestReport(month, live, counts) {
     (live ? '送信：' : '対象：') + (c.sent || 0) + '人',
     live ? '送れなかった人：' + (c.failed || 0) + '人' + (c.failed ? '（もう一度 alcoholCheckLeaveRequestNotice を実行すると、送っていない人にだけ送ります）' : '') : null,
     c.already ? '今月すでに送った人：' + c.already + '人' : null,
-    '除いた人：お知らせ停止 ' + (c.paused || 0) + '人／除外の社員番号 ' + (c.excluded || 0) + '人／同じLINEの重複 ' + (c.dup || 0) + '人',
+    '除いた人：お知らせ停止 ' + (c.paused || 0) + '人／除外の社員番号 ' + (c.excluded || 0) + '人／同じLINEの重複 ' + (c.dup || 0) + '人'
+      + (c.setting ? '／お知らせ設定でOFF ' + c.setting + '人' : ''),
     '詳しくは従業員マスタの「' + LR_SHEET + '」シートをご覧ください。'];
   return lines.filter(function (x) { return x !== null; }).join('\n');
 }
@@ -97,8 +98,15 @@ function alcoholCheckLeaveRequestNotice() {
     LR_cleanup_(state, v.target);
     var master = AC_masterSheet_(), mv = master.getDataRange().getValues(), ss = master.getParent();
     var plan = AC_leaveRequestTargets(mv, today, AC_pauseIndex_(), AC_parseCodeList(props.getProperty('LEAVE_REQUEST_EXCLUDE_CODES')));
+    if (typeof AC_noticeCheck_ === 'function') {   // お知らせ設定（ATT-01 希望休の案内。gas/Notices.gs）
+      plan.targets = plan.targets.filter(function (p) {
+        if (AC_noticeCheck_('ATT-01', p.code, today).send) return true;
+        plan.skipped.push({ code: p.code, name: p.name, reason: 'お知らせ設定でOFF' });
+        return false;
+      });
+    }
     var text = AC_leaveRequestMessage(today, AC_templateOverrides_());
-    var rows = [], counts = { sent: 0, failed: 0, already: 0, paused: 0, excluded: 0, dup: 0 };
+    var rows = [], counts = { sent: 0, failed: 0, already: 0, paused: 0, excluded: 0, dup: 0, setting: 0 };
     var sh = LR_sheet_(ss);
     plan.targets.forEach(function (p) {
       var key = 'leavereq:' + v.target + ':' + p.userId, result;
@@ -111,7 +119,8 @@ function alcoholCheckLeaveRequestNotice() {
       rows.push([now, v.target, "'" + p.code, p.name, result, text]);
     });
     plan.skipped.forEach(function (s) {
-      if (s.reason === 'お知らせ停止中') counts.paused++; else if (s.reason === '除外の社員番号') counts.excluded++; else counts.dup++;
+      if (s.reason === 'お知らせ停止中') counts.paused++; else if (s.reason === '除外の社員番号') counts.excluded++;
+      else if (s.reason === 'お知らせ設定でOFF') counts.setting++; else counts.dup++;
       rows.push([now, v.target, "'" + s.code, s.name, '送らない（' + s.reason + '）', '']);
     });
     if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, LR_HEADER.length).setValues(rows);

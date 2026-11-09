@@ -39,6 +39,7 @@ class Sheet {
   constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; }
   fmtOf(r, c) { return this.fmt[`${r},${c}`] || this.colFmt[c]; }
   clear() { this.rows = []; this.fmt = {}; this.colFmt = {}; return this; }
+  clearContents() { this.rows = []; return this; }
   getName() { return this.name; }
   setName(n) { this.name = n; }
   getSheetId() { return this.sid; }

@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-09a';
+var AC_CODE_VERSION = '2026-11-09b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -391,10 +391,11 @@ function AC_processTotRaw_(body) {
     var names = AC_namesByTot_(mv, R.employees);
     var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
     var pauseIdx = AC_pauseIndex_(), codeOfTot = AC_codeByTot(mv);
-    var send = function (tot, key, text, date) {
+    var send = function (tot, key, text, date, nid) {
       if (!night) return;
       var c0 = codeOfTot[AC_totKey(tot)];
       if (c0 && (AC_isPaused(pauseIdx, c0, today) || (date && AC_isPaused(pauseIdx, c0, date)))) return;   // お知らせ停止中・停止期間中の日
+      if (c0 && nid && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_(nid, c0, today).send) return;   // お知らせ設定（gas/Notices.gs）
       var build = function () { return typeof text === 'function' ? text(careCtx(tot)) : text; };   // 送るときだけ気遣いを決める
       if (test) {
         if (state.getProperty(key + ':test')) return;
@@ -424,14 +425,14 @@ function AC_processTotRaw_(body) {
     var careGiven = {};
     if (night && Array.isArray(R.timerecord)) {
       AC_todayStatus(R, today).forEach(function (t) {
-        send(t.tot, 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), function (c) { return AC_todayStatusMessage(t.kind, today, c, overrides); });
+        send(t.tot, 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), function (c) { return AC_todayStatusMessage(t.kind, today, c, overrides); }, null, 'ATT-02');
       });
     }
-    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }, p.date); });
+    f.punchErrors.forEach(function (p) { send(p.tot, 'att:' + p.date + ':punch:' + AC_totKey(p.tot), function (c) { return AC_punchMessage(p.date, c, overrides, today); }, p.date, 'ATT-02'); });
     Object.keys(f.overtime).forEach(function (tot) {
       var min = f.overtime[tot];
       if (min >= 45 * 60) {
-        send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 45, today, overrides, c); });
+        send(tot, 'att:' + month + ':ot45:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 45, today, overrides, c); }, null, 'HR-04');
         // 36協定の管理のため、管理者にも必ず知らせる（本人への通知だけで終わらせない）
         var akey = 'att:' + month + ':ot45admin:' + AC_totKey(tot);
         if (night && (notify || test) && !state.getProperty(akey)) {
@@ -443,7 +444,7 @@ function AC_processTotRaw_(body) {
           } catch (e) { Logger.log('45時間の管理者通知に失敗'); }
         }
       }
-      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 30, today, overrides, c); });
+      else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 30, today, overrides, c); }, null, 'HR-02');
     });
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
@@ -1132,6 +1133,7 @@ function AC_selfRequestNotices_(pend, mv, ss, today, props) {
     var key = 'sent:' + today + ':reqself:' + g.code;   // 同じ人へは1回の取り込み（朝）につき1通
     var result;
     if (AC_isPaused(pauseIdx, g.code, today)) result = 'お知らせ停止中のため送らない';
+    else if (typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('HR-01', g.code, today).send) result = 'お知らせ設定でOFFのため送らない';
     else if (state.getProperty(key)) result = '送信済みのため送らない';
     else if (!live) result = '記録のみ（送信しない）';
     else {
@@ -1231,7 +1233,8 @@ function AC_punchSelfNotices_(R, mv, ss, today, props) {
       return true;
     });
     var text = '', result;
-    if (!dates.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
+    if (dates.length && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('ATT-02', g.code, today).send) { result = '送らない（お知らせ設定でOFF）'; dates = []; }
+    else if (!dates.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
     else {
       text = AC_punchSelfMessage(dates, null, overrides, today);
       if (!live) result = '記録のみ（送信しない）';
@@ -1593,13 +1596,18 @@ var AC_SETTINGS_SHOWN = {
   INQ_NOTIFY_TO: '未設定＝問い合わせの通知は勤怠管理グループへ（admin＝管理者の個別LINEへ）',
   INQ_REMIND_DAYS: '未設定＝問い合わせのリマインドは毎日（weekdays＝土日は送らない）',
   LEAVE_REQUEST_NOTIFY: '未設定＝希望休の申請期限の案内をしない（record＝記録だけ／on＝毎月10日に送信）',
+  NOTICE_SETTINGS: '未設定＝お知らせ設定を使わない（record＝OFFの人を記録だけ／on＝チェックに従う）',
+  NOTICE_ALCOHOL_SCOPE: '未設定＝guide（ATT-03・04 は8:30・18:30の案内だけに効く／guideAndFollow＝入力確認も／all＝お礼も）',
+  NOTICE_DEPT_CHANGE: '未設定＝keep（所属が変わっても個人の設定を引き継ぐ／reset＝新しい所属の初期値に戻す）',
+  ALERT_TO_GROUP: '未設定＝飲酒検知を勤怠管理グループにも送る（"false" で管理者だけ）',
+  NIGHT_WATCH: '未設定＝夜の取り込みを22:45に見守る（"false" で停止）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
   'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'INQ_SPREADSHEET_ID',
   'LEAVE_REQUEST_EXCLUDE_CODES'];
 var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
   'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'INQ_remind',
-  'alcoholCheckLeaveRequestNotice'];
+  'alcoholCheckLeaveRequestNotice', 'alcoholCheckNightRelayWatch'];
 
 /**
  * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
@@ -1885,13 +1893,16 @@ function AC_dispatch_(kind) {
 
   var registry = notifyPeople ? AC_loadRegistry_() : {};
   var tests = AC_testNames_(props, today);
-  var sent = 0, unregistered = [], failed = [];
+  var sent = 0, unregistered = [], failed = [], offBySetting = 0;
   var deliver = function (name, text, tag) {
     var key = AC_normalizeName(name);
     var test = tests[key], reg = registry[key];
     var who = test ? 'test:' + test.code : reg ? reg.code : key;
     var dedupe = 'sent:' + today + ':' + tag + ':' + who;
     if (state.getProperty(dedupe)) return;
+    // お知らせ設定（ATT-03 出勤前・ATT-04 退勤後）。本人向けの案内だけに効く。飲酒検知・記録・J列の対象者判定には影響しない（gas/Notices.gs）
+    var nid = typeof AC_alcoholNoticeId === 'function' ? AC_alcoholNoticeId(tag, props.getProperty('NOTICE_ALCOHOL_SCOPE')) : null;
+    if (nid && (test || reg) && !AC_noticeCheck_(nid, test ? test.code : reg.code, today).send) { offBySetting++; return; }
     var careKey = 'att:' + today + ':care:' + (test ? test.code : reg ? reg.code : key);
     if (typeof text === 'function') text = text(!!state.getProperty(careKey)).text;
     try {
@@ -1930,7 +1941,7 @@ function AC_dispatch_(kind) {
     var adminMsg = AC_buildMessage(today, kind === 'followBefore' ? '出勤前' : '退勤前', r, plan, failed);
     if (adminMsg) AC_pushLine_(adminMsg);
   }
-  Logger.log('送信 %s通／LINE未登録 %s人／失敗 %s人', sent, unregistered.length, failed.length);
+  Logger.log('送信 %s通／LINE未登録 %s人／失敗 %s人／お知らせ設定でOFF %s人', sent, unregistered.length, failed.length, offBySetting);
   state.setProperty(runKey, new Date().toISOString());
 }
 
@@ -2094,7 +2105,10 @@ function AC_checkAlerts_(props, d, dryRun) {
     Logger.log('要確認の測定結果：%s行目', h.row);
     if (dryRun) return;
     var time = Utilities.formatDate(h.at, AC_TZ, 'HH:mm');
-    AC_pushLine_(AC_render('alcoholAlert', d.today, { time: time, name: h.name, label: h.label, result: h.result }, AC_templateOverrides_()));
+    var text = AC_render('alcoholAlert', d.today, { time: time, name: h.name, label: h.label, result: h.result }, AC_templateOverrides_());
+    // 勤怠管理グループと管理者（安全運転管理者）の2か所へ。送信先ごとに記録し、片方の失敗で止めない（gas/Notices.gs）
+    if (typeof AC_alertSend_ === 'function') { AC_alertSend_(props, state, d.today, h, text); return; }
+    AC_pushLine_(text);
     state.setProperty(key, new Date().toISOString());
   });
 }

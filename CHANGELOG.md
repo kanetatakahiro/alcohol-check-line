@@ -1,5 +1,19 @@
 # 変更履歴
 
+## 2026-11-09 REBIRTH全社通知管理 Ver.1（版 2026-11-09b・ブランチ feature/notification-settings・本番未導入）
+- 新規 gas/Notices.gs：お知らせ34項目（ATT-01〜10・HR-01〜11・SAF-01〜05・GEN-01〜08）と重要な通知4項目（CRIT-01〜04。一般の設定では止められない）
+- 「お知らせ設定」（1人1行・34のチェック）・「所属別お知らせ設定」・「お知らせ種類」・「お知らせ設定履歴」・「通知送信履歴」を作る関数 alcoholCheckSetupNoticeSettings。従業員マスタの A〜O 列と既存のシートは変更しない。初回は LEAVE_REQUEST_EXCLUDE_CODES を ATT-01 の OFF として引き継ぐ
+- 所属の初期値：希望休はリスタイル OFF・ほか ON、打刻漏れ・申請の確認・残業の警告は ON、今送っている通知は ON、未実装は OFF。ATT-07・08（有給の取得案内・残日数）は作らない（ON でも送らない）
+- NOTICE_SETTINGS（未設定＝使わない／record＝OFF の人を記録だけ／on＝チェックに従う）で、希望休（ATT-01）、出勤前・退勤後のアルコールチェックの案内（ATT-03・04）、管理本部の本人へのお知らせ（HR-01・ATT-02）、受け口の勤怠の本人向け（ATT-02・HR-02・HR-04。版の公開後に有効）につないだ
+- NOTICE_ALCOHOL_SCOPE（未設定＝guide：ATT-03・04 は 8:30・18:30 の案内だけを止める／guideAndFollow／all）。飲酒検知・記録・J列の判定には影響しない。NOTICE_DEPT_CHANGE（keep／reset）
+- 安全 9-1：飲酒検知を勤怠管理グループと管理者（安全運転管理者）の2か所へ。送信先ごとに記録し、片方の失敗で止めない。送れなかった先だけ10分後にやり直す（3回まで）。ALERT_TO_GROUP=false で管理者だけ
+- 安全 9-2：本人への未実施の催促は変更なし。管理者・グループへの一覧は追加しない（11/9 の決定）
+- 安全 9-3：alcoholCheckNightRelayWatch（15分ごと・22:45〜24:00 に1回判定）。22:30 の取り込みが届いていない・読み取りエラー・処理のエラーのとき勤怠管理グループへ（送れないときは管理者）。取り込みの処理は変更なし。NIGHT_WATCH=false で停止
+- gas/AlcoholCheck.gs：AC_checkAlerts_・AC_dispatch_・AC_processTotRaw_・本人へのお知らせの2関数に判定を追加（Notices.gs が無ければ今の動き）、設定の表示に5項目、トリガーの一覧に1つ、版 2026-11-09b。gas/LeaveRequest.gs：ATT-01 の判定と報告の人数
+- テスト：test/notices.test.js 25件（架空データ）。test/helpers/gas-mock.js に clearContents を追加。npm test 全165件成功
+- 資料：docs/notifications/DESIGN-v1.md（設計・対応表・未決事項）、RELEASE-v1.md（反映手順・戻し方・承認項目）
+- 本番のApps Script・スプレッドシート・LINE・Webhook・トリガー・スクリプトプロパティは変更なし
+
 ## 2026-11-09 希望休の申請期限の案内（版 2026-11-09a・ブランチ feature/leave-request・本番未導入）
 - 新規 gas/LeaveRequest.gs：毎月10日 12時台に、在籍・LINE確認済みの全員（雇用形態・所属は問わない）へ、翌月分の希望休の申請期限（今月15日まで・ToTから申請）を1人1通で案内（alcoholCheckLeaveRequestNotice）
 - 除く人：お知らせ停止中（全部・勤怠のみ）、LEAVE_REQUEST_EXCLUDE_CODES の社員番号（出勤予定のない人）、同じLINEユーザーIDの2行目以降

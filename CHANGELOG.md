@@ -1,5 +1,16 @@
 # 変更履歴
 
+## 2026-11-09 夜22:30の本人向けの勤怠のお知らせを「1人1晩1通」に（版 2026-11-09d・ブランチ feature/notification-settings・本番未導入）
+- 打刻漏れ・当日の打刻なし（ATT-02）、残業30時間（HR-02）、残業45時間（HR-04）を、同じ人には1通にまとめる（AC_nightSelfRun_・AC_nightSelfMessage）。文面は短く、Touch On Time で打刻修正の申請をすることが分かるように
+- 項目ごとに「お知らせ設定」のチェックに従い、OFF の項目は文面から除く。全部 OFF なら送らない（NOTICE_SETTINGS の値にかかわらず）
+- 同じ内容は2回目から送らない（今までの att: の記録を使う）。送信に失敗した人は次の晩にもう一度
+- ATTENDANCE_NOTIFY に record（送らずに「通知送信履歴」へ文面ごと記録）と on（送信）を追加。未設定は今までどおり送らない。true は on と同じ
+- 「通知送信履歴」に項目ごとの結果（送信／記録／除外）と文面（9列目）
+- 確認用の関数 alcoholCheckNightSelfPreview（送らない・記録しない）。設定の表示の ATTENDANCE_NOTIFY・ATTENDANCE_TEST の説明を更新
+- 管理者への通知（残業45時間の管理者通知・ATTENDANCE_TEST のまとめ）、受け口のほかの処理（LINEの受信・問い合わせ・勤怠フォーム・ToTの取り込み）は変更なし。gas/Notices.gs・Inquiry.gs・LeaveRequest.gs は変更なし
+- テスト：test/night-self.test.js 7件（全176件成功）。SPEC.md に仕様を追記、RELEASE-v1.md に反映手順（手順9）
+- 本番は変更なし
+
 ## 2026-11-09 承認待ちの申請の通知を「1つの申請につき1回だけ」に（版 2026-11-09c・ブランチ feature/notification-settings・本番未導入）
 - 承認は月末にまとめて行うため、一度知らせた申請は2度目に知らせない（2026-11-09 安藤・社長 承認）
 - 本人への承認待ちのお知らせ（AC_selfRequestNotices_・REQUEST_SELF_NOTIFY）：まだ知らせていない申請（種類＋requestKey、無ければ employeeKey＋日付）がある人にだけ、その新しい申請だけを1通で。新しい申請が無い日は送らない。送信に失敗した申請は翌日にもう一度

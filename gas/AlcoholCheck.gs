@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-09c';
+var AC_CODE_VERSION = '2026-11-09d';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -347,7 +347,7 @@ function AC_totShape(results) {
 /**
  * 受け取ったデータの処理：
  *  1. 勤務予定をシフト表（2026-2028）と比べる（TOT_APPLY=true なら今日以降の食い違うシフト欄を書き換え）
- *  2. 打刻漏れ等（TOTのエラー勤務）と今月の残業を本人へLINE（ATTENDANCE_NOTIFY=true のときだけ）
+ *  2. 打刻漏れ等（TOTのエラー勤務）と今月の残業を本人へLINE（ATTENDANCE_NOTIFY=record／on のときだけ。1人1晩1通にまとめる。AC_nightSelfRun_）
  *  3. 従業員マスタのファイルに「勤怠チェック」シート（前月・今月の集計）を作る
  */
 function AC_processTotRaw_(body) {
@@ -386,13 +386,15 @@ function AC_processTotRaw_(body) {
     var f = AC_attendanceFindings(R, today);
     var line = AC_lineByTotCode(mv, today);
     var live = props.getProperty('DRY_RUN') === 'false';
-    var notify = props.getProperty('ATTENDANCE_NOTIFY') === 'true' && live;
+    var attMode = AC_attNotifyMode_(props);   // ''（未設定＝送らない）／'record'／'on'
+    var notify = attMode === 'on' && live;
     var test = !notify && props.getProperty('ATTENDANCE_TEST') === 'true' && live;   // テスト：本人ではなく管理者へまとめて1通
     var names = AC_namesByTot_(mv, R.employees);
     var state = AC_state_(), sent = 0, unreg = 0, month = today.slice(0, 7), testLines = [];
     var pauseIdx = AC_pauseIndex_(), codeOfTot = AC_codeByTot(mv);
     var send = function (tot, key, text, date, nid) {
       if (!night) return;
+      if (attMode) return;   // record／on は、下の AC_nightSelfRun_ が1人1通にまとめる
       var c0 = codeOfTot[AC_totKey(tot)];
       if (c0 && (AC_isPaused(pauseIdx, c0, today) || (date && AC_isPaused(pauseIdx, c0, date)))) return;   // お知らせ停止中・停止期間中の日
       if (c0 && nid && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_(nid, c0, today).send) return;   // お知らせ設定（gas/Notices.gs）
@@ -446,6 +448,11 @@ function AC_processTotRaw_(body) {
       }
       else if (min >= 30 * 60) send(tot, 'att:' + month + ':ot30:' + AC_totKey(tot), function (c) { return AC_overtimeMessage(min, 30, today, overrides, c); }, null, 'HR-02');
     });
+    if (night && attMode) {
+      var ns = AC_nightSelfRun_(R, mv, today, { mode: attMode, live: live, test: test, names: names, withToday: Array.isArray(R.timerecord) });
+      sent += ns.counts.sent; unreg += ns.counts.unreg; testLines = testLines.concat(ns.testLines);
+      Logger.log('夜の本人向け（%s）：送信 %s通／記録 %s人／除外 %s件／送信失敗 %s人', attMode, ns.counts.sent, ns.counts.recorded, ns.counts.excluded, ns.counts.failed);
+    }
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
       var body2 = testLines.join('\n\n');
@@ -1627,8 +1634,8 @@ var AC_SETTINGS_SHOWN = {
   TEST_UNTIL: '未設定＝テストモードなし',
   INFECTION_NAME: '未設定＝なし',
   INFECTION_UNTIL: '未設定＝なし',
-  ATTENDANCE_NOTIFY: '未設定＝本人へ送らない',
-  ATTENDANCE_TEST: '未設定＝テスト送信しない',
+  ATTENDANCE_NOTIFY: '未設定＝夜の勤怠のお知らせを本人へ送らない（record＝送らずに「通知送信履歴」へ文面ごと記録／on＝1人1晩1通にまとめて送信。true は on と同じ。お知らせ設定の ATT-02・HR-02・HR-04 に従う）',
+  ATTENDANCE_TEST: '未設定＝テスト送信しない（true＝本人へ送る予定の文面を管理者へまとめて1通。ATTENDANCE_NOTIFY=on のときは動かない）',
   TOT_APPLY: '未設定＝毎日のシフト書き換えはしない',
   TOT_MONTHLY_APPLY: '未設定＝翌月シフト反映をする（"false" で停止）',
   TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
@@ -1789,6 +1796,173 @@ function AC_todayStatus(R, today) {
     if (tot && !punches[s.employeeKey]) { out.push({ tot: tot, kind: 'noClockIn' }); seen[s.employeeKey] = 1; }
   });
   return out;
+}
+
+// ---------------- 夜22:30の本人向けの勤怠のお知らせ：1人1晩1通にまとめる ----------------
+// 対象：ATT-02（打刻漏れ・当日の退勤／出勤の打刻なし）、HR-02（残業30時間）、HR-04（残業45時間）。
+// ATTENDANCE_NOTIFY：未設定＝送らない（今までどおり）／record＝送らずに「通知送信履歴」へ文面ごと記録／on＝送信（true も on と同じ）。
+// 「お知らせ設定」のチェックに項目ごとに従う（NOTICE_SETTINGS の値にかかわらず。チェックの無い項目は文面から除き、全部無ければ送らない）。
+// 同じ内容は2回目から送らない：送った記録は今までと同じ att:日付（月）:種類:TOTコード。record の記録は末尾 :rec、除外の記録は :ex。
+function AC_attNotifyMode_(props) {
+  var v = String(props.getProperty('ATTENDANCE_NOTIFY') || '').trim();
+  return v === 'on' || v === 'true' ? 'on' : v === 'record' ? 'record' : '';
+}
+
+/** 純粋関数：夜の本人向けの項目。[{ tot, kind（noClockOut／noClockIn／punch／ot30／ot45）, nid, key, date, min }] */
+function AC_nightSelfItems(R, today, withToday) {
+  var f = AC_attendanceFindings(R, today), month = today.slice(0, 7), out = [], seen = {};
+  var add = function (it) { if (!seen[it.key]) { seen[it.key] = 1; out.push(it); } };
+  if (withToday && Array.isArray(R.timerecord)) {
+    AC_todayStatus(R, today).forEach(function (t) {
+      add({ tot: t.tot, kind: t.kind, nid: 'ATT-02', key: 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), date: null });
+    });
+  }
+  f.punchErrors.forEach(function (p) {
+    add({ tot: p.tot, kind: 'punch', nid: 'ATT-02', key: 'att:' + p.date + ':punch:' + AC_totKey(p.tot), date: p.date });
+  });
+  Object.keys(f.overtime).forEach(function (tot) {
+    var min = f.overtime[tot];
+    if (min >= 45 * 60) add({ tot: tot, kind: 'ot45', nid: 'HR-04', key: 'att:' + month + ':ot45:' + AC_totKey(tot), date: null, min: min });
+    else if (min >= 30 * 60) add({ tot: tot, kind: 'ot30', nid: 'HR-02', key: 'att:' + month + ':ot30:' + AC_totKey(tot), date: null, min: min });
+  });
+  return out;
+}
+
+/** 純粋関数：1人分の項目を1通の文面にする（短く・やさしく・何をすればよいかが分かるように） */
+function AC_nightSelfMessage(items, today) {
+  var md = function (d) {
+    return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）';
+  };
+  var h = function (min) { return (Math.floor(min / 6) / 10).toFixed(1); };
+  var order = { noClockOut: 0, noClockIn: 1, punch: 2, ot30: 3, ot45: 4 };
+  var list = (items || []).slice().sort(function (a, b) { return (order[a.kind] - order[b.kind]) || ((a.date || '') < (b.date || '') ? -1 : (a.date || '') > (b.date || '') ? 1 : 0); });
+  var punch = [], ot = [], form = false;
+  list.forEach(function (it) {
+    if (it.kind === 'noClockOut') punch.push('・今日' + md(today) + 'の退勤の打刻が、まだありません。勤務中の方は、終わったときに打刻してください');
+    else if (it.kind === 'noClockIn') { punch.push('・今日' + md(today) + 'は出勤の予定ですが、打刻がありません'); form = true; }
+    else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の打刻が確認できません');
+    else if (it.kind === 'ot30') ot.push('・今月の残業が30時間をこえました（いま ' + h(it.min) + '時間）。無理のないようにしてくださいね');
+    else if (it.kind === 'ot45') ot.push('・今月の残業が45時間に達しました（いま ' + h(it.min) + '時間）。これからの業務の量について、上長に相談してください');
+  });
+  var parts = ['お疲れ様です😊 勤怠のお知らせです。'];
+  if (punch.length) {
+    parts.push('【打刻】\n' + punch.join('\n') + '\n→ Touch On Time で確かめて、打刻がもれていたら「打刻修正の申請」をお願いします。'
+      + (form ? '\n→ お休みに変わった場合は、上長の承認のうえ、勤怠連絡フォームでお知らせください。\n' + AC_FORM_URL : ''));
+  }
+  if (ot.length) parts.push('【今月の残業】\n' + ot.join('\n'));
+  parts.push('遅くまでお疲れ様でした。ゆっくり休んでくださいね。');
+  return parts.join('\n\n').slice(0, 4900);
+}
+
+/**
+ * 夜の本人向けのお知らせを1人1通にまとめて、送る（on）・記録する（record）・見るだけ（preview）。
+ * o：{ mode: 'on'|'record'|'preview', live（DRY_RUN=false）, test（ATTENDANCE_TEST の管理者へのまとめ）, names, withToday }
+ * 戻り値：{ counts, people（preview のとき：[{ code, kinds, text, line }]）, testLines }
+ */
+function AC_nightSelfRun_(R, mv, today, o) {
+  o = o || {};
+  var preview = o.mode === 'preview', sendLive = o.mode === 'on' && o.live === true;
+  var items = AC_nightSelfItems(R, today, o.withToday);
+  var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
+  var counts = { people: 0, sent: 0, recorded: 0, excluded: 0, unreg: 0, failed: 0, kinds: {}, reasons: {} };
+  var people = [], testLines = [], logs = [];
+  var setOn = function (id, code) {
+    if (typeof AC_noticeEffective !== 'function' || typeof AC_noticeIndex_ !== 'function') return true;   // Notices.gs が無いとき
+    try { return !!AC_noticeEffective(AC_noticeIndex_(), id, code); } catch (e) { Logger.log('お知らせ設定を読めませんでした（この項目は送りません）'); return false; }
+  };
+  var nname = function (id) { return (typeof AC_NOTICE_BY_ID !== 'undefined' && AC_NOTICE_BY_ID[id] && AC_NOTICE_BY_ID[id].name) || ''; };
+  var row = function (it, code, result, text) { return [now, it.nid, nname(it.nid), '本人', code ? "'" + code : '', it.key, result, '', text || '']; };
+  var exclude = function (it, code, why) {
+    counts.excluded++; counts.reasons[why] = (counts.reasons[why] || 0) + 1;
+    if (preview || state.getProperty(it.key + ':ex')) return;   // 除外の記録は1項目1回
+    state.setProperty(it.key + ':ex', now.toISOString());
+    logs.push(row(it, code, '除外（' + why + '）'));
+  };
+  var byTot = {}, order = [];
+  items.forEach(function (it) {
+    var t = AC_totKey(it.tot);
+    if (!byTot[t]) { byTot[t] = []; order.push(t); }
+    byTot[t].push(it);
+  });
+  order.forEach(function (t) {
+    var code = codeOfTot[t] || '';
+    var keep = byTot[t].filter(function (it) {
+      if (state.getProperty(it.key)) return false;   // 送信済み（今までの1通ずつの送信の記録も見る）
+      if (!code) { exclude(it, code, '従業員マスタに無い'); return false; }
+      if (AC_isPaused(pauseIdx, code, today) || (it.date && AC_isPaused(pauseIdx, code, it.date))) { exclude(it, code, 'お知らせ停止中'); return false; }
+      if (!setOn(it.nid, code)) { exclude(it, code, 'お知らせ設定でOFF'); return false; }
+      return true;
+    });
+    if (o.test && !preview) {   // ATTENDANCE_TEST：本人ではなく管理者へまとめて1通（今までと同じ。文面はまとめた形）
+      var tItems = keep.filter(function (it) { return !state.getProperty(it.key + ':test'); });
+      if (tItems.length) {
+        tItems.forEach(function (it) { state.setProperty(it.key + ':test', now.toISOString()); });
+        testLines.push('■' + ((o.names || {})[t] || 'TOTコード' + t) + 'さん宛て' + (line[t] ? '' : '（LINE未登録のため本番では届きません）') + '\n' + AC_nightSelfMessage(tItems, today));
+      }
+    }
+    var fresh = sendLive || preview ? keep : keep.filter(function (it) { return !state.getProperty(it.key + ':rec'); });
+    if (!fresh.length) return;
+    var text = AC_nightSelfMessage(fresh, today), to = line[t];
+    counts.people++;
+    fresh.forEach(function (it) { counts.kinds[it.kind] = (counts.kinds[it.kind] || 0) + 1; });
+    if (preview) { people.push({ code: code, kinds: fresh.map(function (it) { return it.kind; }), text: text, line: !!to }); if (!to) counts.unreg++; return; }
+    if (!to) { counts.unreg++; fresh.forEach(function (it) { exclude(it, code, 'LINE未登録'); }); return; }
+    if (sendLive) {
+      try {
+        AC_pushTo_(to.userId, text);
+        fresh.forEach(function (it, i) { state.setProperty(it.key, now.toISOString()); logs.push(row(it, code, '送信', i === 0 ? text : '')); });
+        counts.sent++;
+      } catch (e) {   // 記録しないので、次の晩にもう一度送る
+        counts.failed++;
+        fresh.forEach(function (it, i) { logs.push(row(it, code, '送信失敗', i === 0 ? text : '')); });
+      }
+    } else {
+      fresh.forEach(function (it, i) { state.setProperty(it.key + ':rec', now.toISOString()); logs.push(row(it, code, o.mode === 'on' ? '記録（DRY_RUN のため送信しない）' : '記録（送信しない）', i === 0 ? text : '')); });
+      counts.recorded++;
+    }
+  });
+  if (logs.length) AC_nightSelfLog_(logs);
+  return { counts: counts, people: people, testLines: testLines };
+}
+
+/** 「通知送信履歴」へ。9列目に文面（record の確認用）。失敗しても処理は止めない */
+function AC_nightSelfLog_(rows) {
+  try {
+    if (typeof AC_nsSheet_ !== 'function' || typeof AC_NS_LOG_HEADER === 'undefined') return;
+    var sh = AC_nsSheet_(AC_masterSheet_().getParent(), AC_NS_LOG_SHEET, AC_NS_LOG_HEADER);
+    if (!String(sh.getRange(1, 9).getValue() || '')) sh.getRange(1, 9).setValue('文面');
+    sh.getRange(sh.getLastRow() + 1, 1, rows.length, 9).setValues(rows);
+  } catch (e) { Logger.log('通知送信履歴の記録に失敗'); }
+}
+
+/**
+ * 手動確認用：今夜、本人向けの勤怠のお知らせを送るとしたら、何人に・何の項目を・どんな文面で送るか（送らない・記録しない）。
+ * TOT取り込みフォルダの tot-latest.json（最後に届いたデータ）を使う。夜22:30より前は朝のデータなので、当日の打刻の項目は含まない。
+ * 実行ログには件数と文面の例だけを出す（氏名・社員番号は出さない）。
+ */
+function alcoholCheckNightSelfPreview() {
+  var file = AC_totLatestFile_();
+  if (!file) { Logger.log('tot-latest.json が見つかりません'); return null; }
+  var data;
+  try { data = JSON.parse(file.getBlob().getDataAsString('UTF-8')); } catch (e) { Logger.log('tot-latest.json を読めませんでした'); return null; }
+  var R = (data && data.results) || {}, today = data.today;
+  if (!today || !Array.isArray(R.employees) || !Array.isArray(R.workings)) { Logger.log('TOTのデータが足りません（従業員・勤務）'); return null; }
+  var night = Number(Utilities.formatDate(file.getLastUpdated(), AC_TZ, 'HH')) >= 22;
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  var res = AC_nightSelfRun_(R, mv, today, { mode: 'preview', withToday: night && Array.isArray(R.timerecord) });
+  var c = res.counts, k = c.kinds, props = PropertiesService.getScriptProperties();
+  var reasons = Object.keys(c.reasons).map(function (r) { return r + ' ' + c.reasons[r] + '件'; }).join('／') || 'なし';
+  var lines = [
+    '夜の本人向けのお知らせ（確認だけ・送信しない）',
+    'データ：' + today + '（' + (night ? '夜の取り込み' : '朝の取り込み。当日の打刻の項目は含まない') + '）',
+    'ATTENDANCE_NOTIFY：' + (props.getProperty('ATTENDANCE_NOTIFY') || '未設定') + '／DRY_RUN：' + (props.getProperty('DRY_RUN') || '未設定'),
+    '送る人数：' + c.people + '人（1人1通。うち LINE未登録で届かない ' + c.unreg + '人）',
+    '項目：退勤の打刻なし ' + (k.noClockOut || 0) + '件／出勤の打刻なし ' + (k.noClockIn || 0) + '件／打刻漏れ ' + (k.punch || 0) + '件／残業30時間 ' + (k.ot30 || 0) + '人／残業45時間 ' + (k.ot45 || 0) + '人',
+    '除外：' + reasons,
+  ];
+  res.people.filter(function (p) { return p.line; }).slice(0, 3).forEach(function (p, i) { lines.push('―― 文面の例' + (i + 1) + '（' + p.kinds.length + '項目）――\n' + p.text); });
+  Logger.log(lines.join('\n'));
+  return res;
 }
 
 function AC_todayStatusMessage(kind, today, ctx, overrides) {

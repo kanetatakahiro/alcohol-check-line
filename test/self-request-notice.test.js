@@ -17,7 +17,8 @@ const MASTER = [HEAD,
   row('90007', '試験 七郎', '管理本部', 507, { retiredOn: '2026-10-01' }), // 退職日が過去
   row('90008', '試験 八郎', '管理本部', 508), row('90009', '試験 九郎', '管理本部', '0508'), // TOTコード重複
 ];
-const P = (tot, type, date) => ({ tot: String(tot), type, date, requestedDate: date });
+let PN = 0;
+const P = (tot, type, date) => ({ tot: String(tot), type, date, requestedDate: date, key: 'x:' + (++PN) });
 const PEND = [P(501, '打刻申請', '2026-10-25'), P(502, '残業申請', '2026-10-24'), P(501, 'スケジュール（休暇など）申請', '2026-10-26'),
   P(503, '打刻申請', '2026-10-25'), P(504, '打刻申請', '2026-10-25'), P(505, '打刻申請', '2026-10-25'), P(506, '打刻申請', '2026-10-25'),
   P(507, '打刻申請', '2026-10-25'), P(508, '打刻申請', '2026-10-25'), P('', '打刻申請', '2026-10-25'), P(999, '打刻申請', '2026-10-25')];
@@ -112,8 +113,87 @@ test('本人宛て：on で本人へ1通ずつ。同じ日の2回目は送らな
   g.userProps.deleteProperty('selfnotice:2026-10-27');      // 万一もう一度動いても
   assert.equal(hourly(g).length, 0);                          // 同じ日の2回目は本人へも重複しない
   const rec = ss.getSheetByName('承認待ち本人通知').dump().slice(1).map((r) => [r[1], r[5]]);
-  assert.deepEqual(rec, [['90001', '送信'], ['90002', 'お知らせ停止中のため送らない'], ['90001', '送信済みのため送らない'], ['90002', 'お知らせ停止中のため送らない']]);
+  assert.deepEqual(rec, [['90001', '送信'], ['90002', 'お知らせ停止中のため送らない'], ['90002', 'お知らせ停止中のため送らない']]);   // 一郎さんは新しい申請が無いので行も無い
   const { g: g2 } = setup({ REQUEST_SELF_NOTIFY: 'on' });   // DRY_RUN 未設定
   putLatest(g2, { employees: EMP, requests: REQ, workings: [] });
   assert.equal(hourly(g2).length, 0);
+});
+
+// ---------------- 1つの申請につき1回だけ（2026-11-09） ----------------
+const DAY = (d, h = '07:30') => new Date(`2026-10-${d}T${h}:00+09:00`).getTime();
+function morning(g, d, requests) {
+  g.clock.now = DAY(d);
+  putLatest(g, { employees: EMP, requests, workings: [] }, `2026-10-${d}`, `2026-10-${d}T07:05:30+09:00`);
+  return hourly(g);
+}
+const seenKeys = (g) => Object.keys(g.userProps.getProperties()).filter((k) => k.startsWith('reqseen:')).sort();
+
+test('本人宛て（1回だけ）：同じ申請が翌日も承認待ちなら送らない。新しい申請が1件増えたらその1件だけ。承認された申請の記録は掃除される', () => {
+  const { g, ss } = setup({ DRY_RUN: 'false', REQUEST_SELF_NOTIFY: 'on' });
+  assert.equal(morning(g, 27, REQ).length, 2);                                  // 一郎さん（r1）・二郎さん（r2）
+  assert.deepEqual(seenKeys(g), ['reqseen:self:overtimes:r2', 'reqseen:self:timerecords:r1']);
+  assert.equal(morning(g, 28, REQ).length, 0);                                  // 翌日も同じ申請：送らない
+  const r5 = { type: 'schedules', date: '2026-10-30', requestedDate: '2026-10-29', employeeKey: 'k501', requestKey: 'r5', status: 'applying' };
+  const p = morning(g, 29, [...REQ, r5]);
+  assert.deepEqual(p.map((f) => f.body.to), [U(1)]);                             // 増えた1件だけ、一郎さんへ
+  const t = p[0].body.messages[0].text;
+  assert.match(t, /承認待ちのものが1件/); assert.match(t, /スケジュール（休暇など）申請（2026-10-30分/); assert.ok(!/2026-10-25分/.test(t));
+  const approved = REQ.map((q) => (q.requestKey === 'r1' ? { ...q, status: 'approved' } : q));
+  assert.equal(morning(g, 30, [...approved, r5]).length, 0);                    // r1 が承認された
+  assert.deepEqual(seenKeys(g), ['reqseen:self:overtimes:r2', 'reqseen:self:schedules:r5']);   // r1 の記録は消える
+  g.clock.now = DAY(30) + 10 * 86400e3; g.ctx.AC_cleanupSentKeys_(g.userProps, '2026-11-09');  // 8日の掃除では消えない
+  assert.equal(seenKeys(g).length, 2);
+  const rec = ss.getSheetByName('承認待ち本人通知').dump().slice(1).map((r) => [r[1], r[3], r[5]]);
+  assert.deepEqual(rec, [['90001', 1, '送信'], ['90002', 1, '送信'], ['90001', 1, '送信']]);
+});
+
+test('本人宛て（1回だけ）：record は送らずに1回だけ記録。on に切り替えた日に、まだ届いていない申請を1回だけ送る', () => {
+  const { g, ss } = setup({ DRY_RUN: 'false', REQUEST_SELF_NOTIFY: 'record' });
+  assert.equal(morning(g, 27, REQ).length, 0);
+  assert.equal(morning(g, 28, REQ).length, 0);
+  assert.equal(ss.getSheetByName('承認待ち本人通知').dump().length, 3);           // 2日目は新しい申請が無いので行も増えない
+  assert.deepEqual(seenKeys(g), ['reqseen:selfrec:overtimes:r2', 'reqseen:selfrec:timerecords:r1']);
+  g.scriptProps.setProperty('REQUEST_SELF_NOTIFY', 'on');
+  assert.equal(morning(g, 29, REQ).length, 2);                                  // record の記録では「知らせた」にしない
+  assert.equal(morning(g, 30, REQ).length, 0);
+  const res = ss.getSheetByName('承認待ち本人通知').dump().slice(1).map((r) => r[5]);
+  assert.deepEqual(res, ['記録のみ（送信しない）', '記録のみ（送信しない）', '送信', '送信']);
+});
+
+test('本人宛て（1回だけ）：送信に失敗した申請は記録せず翌日にもう一度。申請データの読み取りエラーの日は記録を消さない', () => {
+  const { g } = setup({ DRY_RUN: 'false', REQUEST_SELF_NOTIFY: 'on' });
+  g.line.pushFail.add(U(1));
+  assert.equal(morning(g, 27, REQ).filter((f) => f.body.to === U(2)).length, 1);
+  assert.deepEqual(seenKeys(g), ['reqseen:self:overtimes:r2']);
+  g.line.pushFail.clear();
+  assert.deepEqual(morning(g, 28, REQ).map((f) => f.body.to), [U(1)]);
+  assert.equal(morning(g, 29, [...REQ.filter((q) => q.requestKey !== 'r1'), { _error: 500 }]).length, 0);
+  assert.equal(seenKeys(g).length, 2);                                          // 読めなかった日は掃除しない
+});
+
+test('管理者の一覧（1回だけ）：新しく増えた申請だけ。新しい申請が無い日は送らない。承認された申請の記録は掃除される', () => {
+  const { g, ss } = setup({ DRY_RUN: 'false' });
+  const mv = ss.getSheetByName('従業員マスタ').dump();
+  const run = (d, requests) => {
+    g.clock.now = DAY(d);
+    const n = g.fetches.length;
+    g.ctx.AC_adminAttendanceChecks_({ employees: EMP, requests }, mv, ss, `2026-10-${d}`, g.scriptProps);
+    return g.fetches.slice(n).filter((f) => f.url.endsWith('/push'));
+  };
+  const p1 = run(27, REQ);
+  assert.deepEqual(p1.map((f) => f.body.to), [U(7)]);
+  assert.match(p1[0].body.messages[0].text, /新しく承認待ちになった申請が3件/);
+  assert.equal(run(28, REQ).length, 0);                                         // 同じ申請だけ：送らない
+  const r5 = { type: 'overtimes', date: '2026-10-28', requestedDate: '2026-10-28', employeeKey: 'k503', requestKey: 'r5', status: 'applying' };
+  const p3 = run(29, [...REQ, r5]);
+  const t = p3[0].body.messages[0].text;
+  assert.match(t, /新しく承認待ちになった申請が1件/); assert.match(t, /全部で4件/); assert.match(t, /残業申請（2026-10-28分/); assert.ok(!/2026-10-25分/.test(t));
+  run(30, REQ.filter((q) => q.requestKey !== 'r2').concat([r5]));             // r2 が承認・取消
+  assert.ok(!seenKeys(g).includes('reqseen:admin:overtimes:r2'));
+  assert.equal(seenKeys(g).filter((k) => k.startsWith('reqseen:admin:')).length, 3);
+  g.line.pushFail.add(U(7));                                                    // 送れなかった申請は記録しない
+  const r6 = { ...r5, requestKey: 'r6', date: '2026-10-29' };
+  g.clock.now = DAY(31);
+  g.ctx.AC_adminAttendanceChecks_({ employees: EMP, requests: [r5, r6] }, mv, ss, '2026-10-31', g.scriptProps);
+  assert.ok(!seenKeys(g).includes('reqseen:admin:overtimes:r6'));
 });

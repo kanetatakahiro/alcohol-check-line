@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-09b';
+var AC_CODE_VERSION = '2026-11-09c';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -504,11 +504,17 @@ function AC_adminAttendanceChecks_(R, mv, ss, today, props) {
   }
   // 承認待ちの申請
   if (Array.isArray(R.requests)) {
+    // 新しく増えた申請だけを知らせる（一度知らせた申請は、承認・取消されるまで知らせない）。新しい申請が無い日は送らない
     var pend = AC_pendingRequests(R.employees, R.requests);
-    if (pend.length) {
-      AC_adminNotice_('requests', ('【承認待ちの申請】TOTで承認待ちの申請が' + pend.length + '件あります。お手すきの際にご確認をお願いします😊\n\n'
-        + pend.slice(0, 20).map(function (p) { return '・' + nm(p.tot) + 'さん　' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
-        + (pend.length > 20 ? '\n…ほか' + (pend.length - 20) + '件' : '') + '\n\nいつもありがとうございます！').slice(0, 4900));
+    var reqOk = !R.requests.some(function (q) { return q && q._error; });
+    if (reqOk) AC_requestSeenSync_(state, 'admin', pend);
+    var freshReq = AC_newPendingRequests(pend, AC_requestSeenOf(state.getProperties(), 'admin'));
+    if (freshReq.length) {
+      var sentAdmin = AC_adminNotice_('requests', ('【承認待ちの申請】TOTで新しく承認待ちになった申請が' + freshReq.length + '件あります'
+        + (pend.length > freshReq.length ? '（承認待ちは全部で' + pend.length + '件。前にお知らせした分は省いています）' : '') + '。お手すきの際にご確認をお願いします😊\n\n'
+        + freshReq.slice(0, 20).map(function (p) { return '・' + nm(p.tot) + 'さん　' + p.type + '（' + p.date + '分／申請日 ' + p.requestedDate + '）'; }).join('\n')
+        + (freshReq.length > 20 ? '\n…ほか' + (freshReq.length - 20) + '件' : '') + '\n\nいつもありがとうございます！').slice(0, 4900));
+      if (sentAdmin) AC_requestSeenMark_(state, 'admin', freshReq, today);   // 送れなかったときは記録しない（翌朝に知らせる）
     }
     // 管理本部の本人へのお知らせ（自分の申請だけ）は、ここでは送らない。1時間ごとの処理（AC_selfNoticesHourly_）が
     // 保存済みの朝のデータから行う（Webアプリの版を変えずに動かすため）。管理者への一覧は上のまま
@@ -1092,10 +1098,43 @@ function AC_pendingRequests(employees, requests) {
     if (!r || r._error || r.status !== 'applying') return;
     var k = r.type + ':' + (r.requestKey || r.employeeKey + r.date);
     if (seen[k]) return; seen[k] = 1;
-    out.push({ tot: codeByKey[r.employeeKey] || '', type: label[r.type] || r.type, date: r.date, requestedDate: String(r.requestedDate || '').slice(0, 10) });
+    out.push({ tot: codeByKey[r.employeeKey] || '', type: label[r.type] || r.type, date: r.date, requestedDate: String(r.requestedDate || '').slice(0, 10), key: k });
   });
   out.sort(function (a, b) { return a.requestedDate < b.requestedDate ? -1 : a.requestedDate > b.requestedDate ? 1 : 0; });
   return out;
+}
+
+// ---------------- 承認待ちの申請：1つの申請につき1回だけ知らせる ----------------
+// 承認は月末にまとめて行うため、一度知らせた申請は2度目に知らせない（2026-11-09 安藤・社長 承認）。
+// 知らせた記録は 'reqseen:種類:申請のキー'（sent: とは別の名前。8日では消えない）。
+// 申請が承認・取消されて承認待ちの一覧から消えたら、その記録を消す（AC_requestSeenSync_）。
+// 種類：self＝本人へ送った／selfrec＝本人へ記録だけ（record・DRY_RUN）／admin＝管理者の一覧で送った
+var AC_REQSEEN_PREFIX = 'reqseen:';
+
+/** 純粋関数：まだ知らせていない申請だけ。seen：{ 申請のキー: 値 } */
+function AC_newPendingRequests(pend, seen) {
+  return (pend || []).filter(function (p) { return p && p.key && !(seen && seen[p.key]); });
+}
+/** 純粋関数：保存済みの記録（すべてのプロパティ）から、種類 ns の { 申請のキー: 値 } */
+function AC_requestSeenOf(all, ns) {
+  var pre = AC_REQSEEN_PREFIX + ns + ':', out = {};
+  Object.keys(all || {}).forEach(function (k) { if (k.indexOf(pre) === 0) out[k.slice(pre.length)] = all[k]; });
+  return out;
+}
+/** 純粋関数：承認待ちの一覧から消えた申請の記録のプロパティ名（消す対象） */
+function AC_requestSeenStale(all, ns, pend) {
+  var live = {}, pre = AC_REQSEEN_PREFIX + ns + ':';
+  (pend || []).forEach(function (p) { if (p && p.key) live[p.key] = 1; });
+  return Object.keys(AC_requestSeenOf(all, ns)).filter(function (k) { return !live[k]; }).map(function (k) { return pre + k; });
+}
+/** 消えた申請の記録を掃除する。申請データに読み取りエラーがあるときは呼ばない（消えたのか読めなかったのか分からないため） */
+function AC_requestSeenSync_(state, ns, pend) {
+  var stale = AC_requestSeenStale(state.getProperties(), ns, pend);
+  stale.forEach(function (k) { state.deleteProperty(k); });
+  return stale.length;
+}
+function AC_requestSeenMark_(state, ns, items, today) {
+  (items || []).forEach(function (p) { if (p && p.key) state.setProperty(AC_REQSEEN_PREFIX + ns + ':' + p.key, today); });
 }
 
 /**
@@ -1127,17 +1166,22 @@ function AC_selfRequestNotices_(pend, mv, ss, today, props) {
   var mode = String(props.getProperty('REQUEST_SELF_NOTIFY') || '').trim();
   if (mode !== 'record' && mode !== 'on') return;
   var live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
-  var list = AC_selfRequestNotices(pend, mv, today);
-  var pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date(), rows = [];
+  // 1つの申請につき1回だけ：まだ知らせていない申請だけを1通にする。record（と DRY_RUN）は別の記録（selfrec）を使うので、
+  // on に切り替えた最初の日に、まだ本人へ届いていない申請を1回だけ知らせる。新しい申請が無い人には送らない
+  var ns = live ? 'self' : 'selfrec', state = AC_state_();
+  AC_requestSeenSync_(state, ns, pend);   // 呼び出し元で申請データの読み取りエラーが無いことを確認済み
+  var list = AC_selfRequestNotices(AC_newPendingRequests(pend, AC_requestSeenOf(state.getProperties(), ns)), mv, today);
+  var pauseIdx = AC_pauseIndex_(), now = new Date(), rows = [];
   list.forEach(function (g) {
     var key = 'sent:' + today + ':reqself:' + g.code;   // 同じ人へは1回の取り込み（朝）につき1通
     var result;
     if (AC_isPaused(pauseIdx, g.code, today)) result = 'お知らせ停止中のため送らない';
     else if (typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('HR-01', g.code, today).send) result = 'お知らせ設定でOFFのため送らない';
     else if (state.getProperty(key)) result = '送信済みのため送らない';
-    else if (!live) result = '記録のみ（送信しない）';
+    else if (!live) { AC_requestSeenMark_(state, ns, g.items, today); result = '記録のみ（送信しない）'; }
     else {
-      try { AC_pushTo_(g.userId, g.text); state.setProperty(key, now.toISOString()); result = '送信'; } catch (e) { result = '送信失敗'; }
+      try { AC_pushTo_(g.userId, g.text); state.setProperty(key, now.toISOString()); AC_requestSeenMark_(state, ns, g.items, today); result = '送信'; }
+      catch (e) { result = '送信失敗'; }   // 記録しないので、翌日にもう一度知らせる
     }
     rows.push([now, "'" + g.code, g.name, g.items.length, g.text, result]);
   });
@@ -1149,7 +1193,7 @@ function AC_selfRequestNotices_(pend, mv, ss, today, props) {
     sh.setFrozenRows(1);
   }
   if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
-  Logger.log('本人への承認待ちのお知らせ（%s）：対象 %s人', mode, list.length);
+  Logger.log('本人への承認待ちのお知らせ（%s）：新しい申請のある人 %s人', mode, list.length);
 }
 
 /** 管理本部の本人へのお知らせの対象者（在籍・退職日前・LINE確認済み・TOTコードが1人に決まる人）。{ TOTコード: {code, name, userId} } */
@@ -1590,7 +1634,7 @@ var AC_SETTINGS_SHOWN = {
   TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
   AGREEMENT_START_MONTH: '未設定＝4月',
   FORM_LIVE_FROM: '未設定＝2026-10-20',
-  REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
+  REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信。どちらも1つの申請につき1回だけ）',
   PUNCH_SELF_NOTIFY: '未設定＝本人へ未申請の打刻漏れを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
   INQ_MODE: '未設定＝問い合わせ管理は動かない（record＝記録だけ／on＝利用開始）',
   INQ_NOTIFY_TO: '未設定＝問い合わせの通知は勤怠管理グループへ（admin＝管理者の個別LINEへ）',
@@ -2812,10 +2856,11 @@ function AC_planNotifications(missingNames, registry) {
 function AC_adminNotice_(kind, text) {
   try {
     var state = AC_state_(), key = 'sent:' + AC_today_() + ':notice:' + kind;
-    if (state.getProperty(key)) return;
+    if (state.getProperty(key)) return false;
     AC_pushLine_(text);
     state.setProperty(key, new Date().toISOString());
-  } catch (e) { Logger.log('管理者へのお知らせに失敗'); }
+    return true;
+  } catch (e) { Logger.log('管理者へのお知らせに失敗'); return false; }
 }
 
 function AC_pushLine_(text) {

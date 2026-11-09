@@ -558,7 +558,7 @@ test('GAS: 月別勤怠・承認待ちの申請・有給の取得状況を組み
     { type: 'timerecords', status: 'applying', employeeKey: 'k1', date: '2026-10-02', requestedDate: '2026-10-03T10:00:00+09:00', requestKey: 'r1' },
     { type: 'schedules', status: 'approved', employeeKey: 'k2', date: '2026-10-05', requestKey: 'r2' },
   ])));
-  assert.deepEqual(p, [{ tot: '0001', type: '打刻申請', date: '2026-10-02', requestedDate: '2026-10-03' }]);
+  assert.deepEqual(p, [{ tot: '0001', type: '打刻申請', date: '2026-10-02', requestedDate: '2026-10-03', key: 'timerecords:r1' }]);
   const st = JSON.parse(JSON.stringify(AC_paidLeaveStatus(emp, [
     { employeeKey: 'k1', date: '2026-10-05', days: 1 }, { employeeKey: 'k1', date: '2026-09-20', days: 1 }, { employeeKey: 'k1', date: '2026-10-06', days: 0.5 },
   ], '2026-10-14')));

@@ -1,5 +1,14 @@
 # 変更履歴
 
+## 2026-11-09 承認待ちの申請の通知を「1つの申請につき1回だけ」に（版 2026-11-09c・ブランチ feature/notification-settings・本番未導入）
+- 承認は月末にまとめて行うため、一度知らせた申請は2度目に知らせない（2026-11-09 安藤・社長 承認）
+- 本人への承認待ちのお知らせ（AC_selfRequestNotices_・REQUEST_SELF_NOTIFY）：まだ知らせていない申請（種類＋requestKey、無ければ employeeKey＋日付）がある人にだけ、その新しい申請だけを1通で。新しい申請が無い日は送らない。送信に失敗した申請は翌日にもう一度
+- 管理者の毎朝の承認待ちの一覧（AC_adminAttendanceChecks_）：新しく増えた申請だけ（全部の件数も添える）。新しい申請が無い日は送らない。受け口で動くため、Webアプリの版の公開の後に有効
+- 記録は reqseen:self／selfrec（record・DRY_RUN）／admin（sent: とは別。8日では消えない）。承認・取消で一覧から消えた申請の記録は自動で掃除（申請データの読み取りエラーの日は掃除しない）
+- AC_pendingRequests の結果に申請のキー（key）を追加。AC_adminNotice_ は送ったかどうかを返す
+- テスト：4件追加・既存2件を更新（全169件成功）。RELEASE-v1.md に指紋の更新と REQUEST_SELF_NOTIFY を on にする手順（手順8）を追記
+- 本番は変更なし
+
 ## 2026-11-09 REBIRTH全社通知管理 Ver.1（版 2026-11-09b・ブランチ feature/notification-settings・本番未導入）
 - 新規 gas/Notices.gs：お知らせ34項目（ATT-01〜10・HR-01〜11・SAF-01〜05・GEN-01〜08）と重要な通知4項目（CRIT-01〜04。一般の設定では止められない）
 - 「お知らせ設定」（1人1行・34のチェック）・「所属別お知らせ設定」・「お知らせ種類」・「お知らせ設定履歴」・「通知送信履歴」を作る関数 alcoholCheckSetupNoticeSettings。従業員マスタの A〜O 列と既存のシートは変更しない。初回は LEAVE_REQUEST_EXCLUDE_CODES を ATT-01 の OFF として引き継ぐ

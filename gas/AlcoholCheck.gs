@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-05a';
+var AC_CODE_VERSION = '2026-11-09a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1592,11 +1592,14 @@ var AC_SETTINGS_SHOWN = {
   INQ_MODE: '未設定＝問い合わせ管理は動かない（record＝記録だけ／on＝利用開始）',
   INQ_NOTIFY_TO: '未設定＝問い合わせの通知は勤怠管理グループへ（admin＝管理者の個別LINEへ）',
   INQ_REMIND_DAYS: '未設定＝問い合わせのリマインドは毎日（weekdays＝土日は送らない）',
+  LEAVE_REQUEST_NOTIFY: '未設定＝希望休の申請期限の案内をしない（record＝記録だけ／on＝毎月10日に送信）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
-  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'INQ_SPREADSHEET_ID'];
+  'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'INQ_SPREADSHEET_ID',
+  'LEAVE_REQUEST_EXCLUDE_CODES'];
 var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
-  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'INQ_remind'];
+  'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'INQ_remind',
+  'alcoholCheckLeaveRequestNotice'];
 
 /**
  * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
@@ -2371,6 +2374,10 @@ var AC_TEMPLATES = {
   follow: ['友だち追加ありがとうございます！😊\n\nREBIRTH管理本部です。\n\n各種お知らせをお届けするため、社員番号（数字のみ）を送信してください。\n\nよろしくお願いします！'],
   registered: ['社員番号：{code}\n\n登録を受け付けました！😊\n\n管理本部で確認後、各種お知らせが届くようになります。'],
   registeredSame: ['社員番号：{code}\n\nこちらの社員番号は、すでに登録済みです！😊'],
+  // 希望休の申請期限の案内（毎月10日 12:00・gas/LeaveRequest.gs）。{月} 翌月の数字、{期限} 今月15日（曜日つき）は LeaveRequest.gs が入れる
+  leaveRequest: ['【希望休の申請のお知らせ】\n{月}月分の希望休は、{期限}までにToTから申請をお願いします📅\n\n'
+    + '・希望休は月4日までです\n・土日のお休みは基本的に取れません\n　取得したい場合は、必ず上長の許可を取ったうえで、申請の理由と承認者の名前を入れて申請してください\n\n'
+    + '申請に漏れがないか確認をお願いします。\n（承認はシフト確定後になります）\n\nわからないことがあれば、このトークで気軽に聞いてくださいね。'],
   registeredCheck: ['社員番号：{code}\n\n登録を受け付けました！\n\n確認が必要なため、管理本部で内容を確認します。\n\n確認が完了次第、各種お知らせが届くようになります😊'],
   alcoholAlert: ['【アルコール検知のお知らせ】\nアルコールチェックにて、アルコールが検知されました。\n\n{time} {name}さん（{label}）\n測定結果：{result}\n\n'
     + '該当従業員の運転を開始・継続させず、測定結果および状況の確認をお願いいたします。\n速やかなご対応をお願いいたします。'],

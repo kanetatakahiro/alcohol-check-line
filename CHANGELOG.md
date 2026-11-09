@@ -1,5 +1,17 @@
 # 変更履歴
 
+## 2026-11-09 希望休の申請期限の案内（版 2026-11-09a・ブランチ feature/leave-request・本番未導入）
+- 新規 gas/LeaveRequest.gs：毎月10日 12時台に、在籍・LINE確認済みの全員（雇用形態・所属は問わない）へ、翌月分の希望休の申請期限（今月15日まで・ToTから申請）を1人1通で案内（alcoholCheckLeaveRequestNotice）
+- 除く人：お知らせ停止中（全部・勤怠のみ）、LEAVE_REQUEST_EXCLUDE_CODES の社員番号（出勤予定のない人）、同じLINEユーザーIDの2行目以降
+- LEAVE_REQUEST_NOTIFY（未設定／record＝「希望休案内」シートへ記録だけ／on＝送信。DRY_RUN=false のときだけ・10日だけ）
+- 二重送信の防止：送った人ごとに「leavereq:対象月:LINEユーザーID」を記録（既存の「sent:」は8日で消えるため別の名前。3か月で自動削除）。送れなかった人は再実行で送る。管理者へ件数だけを報告（氏名・社員番号なし）
+- トリガーの登録・削除：alcoholCheckSetupLeaveRequestTrigger／alcoholCheckRemoveLeaveRequestTrigger（このトリガーだけ）。確認用：alcoholCheckLeaveRequestPreview（送らず・書かない）
+- gas/AlcoholCheck.gs：文面 leaveRequest（「LINE文面」シートで上書き可・{月}・{期限}）、設定表示に LEAVE_REQUEST_NOTIFY（値）と LEAVE_REQUEST_EXCLUDE_CODES（あり／なしだけ）、AC_KNOWN_TRIGGERS に alcoholCheckLeaveRequestNotice、版 2026-11-09a
+- 受信処理（doPost）・既存のトリガー・既存の通知・有給の年5日の見守りは変更なし。Webアプリの版の公開は不要
+- テスト：test/leave-request.test.js 14件（架空データ）。test/helpers/gas-mock.js に月の日のトリガーと送信失敗の模擬を追加。npm test 全140件成功
+- 資料：docs/line-ai/RELEASE-leave-request.md（反映手順・戻し方）
+- 本番のApps Script・デプロイ・トリガー・スクリプトプロパティ・LINEは変更なし
+
 ## 2026-11-06 本番反映：項目0 先行公開（Webアプリ バージョン20）
 - 10:02 既存のウェブアプリのデプロイを編集し、新バージョンで公開（バージョン19 → 20、説明「先行公開 2026-10-27b（問い合わせ機能なし）」）。デプロイID・URLは変更なし。実行ユーザー「自分」・アクセス「全員」も変更なし
 - 公開前の確認：コード.gs の指紋 b99030f2af727b24（版 2026-10-27b）、tmpSetup.gs に doPost なし

@@ -107,7 +107,7 @@ export function createGas({ files, now, shared }) {
   const scriptProps = new Store(), userProps = new Store();
   const cache = {};
   const fetches = [];
-  const line = { members: {}, profiles: {} };
+  const line = { members: {}, profiles: {}, pushFail: new Set() };
   const logs = [];
   const triggers = [];
   const fmtDate = (d, tz, f) => {
@@ -169,6 +169,8 @@ export function createGas({ files, now, shared }) {
           else text = JSON.stringify({ displayName: line.profiles[pu] || '試験ユーザー' });
         } else if (/\/message\/reply$/.test(url) && rec.body && /^forged/.test(String(rec.body.replyToken))) {
           code = 400; text = '{"message":"Invalid reply token"}';   // LINEが発行していない返信トークン
+        } else if (/\/message\/push$/.test(url) && rec.body && line.pushFail.has(rec.body.to)) {
+          code = 500; text = '{"message":"fake failure"}';   // 送信の失敗（テストで指定した宛先だけ）
         } else if (!/api\.line\.me\/v2\/bot\/message\/(reply|push)$/.test(url)) {
           throw new Error(`想定外の通信先: ${url}`);
         }
@@ -180,8 +182,9 @@ export function createGas({ files, now, shared }) {
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i !== -1) triggers.splice(i, 1); },
       newTrigger: (fn) => {
-        const t = { fn, at: null, getHandlerFunction: () => fn, getEventType: () => 'CLOCK' };
+        const t = { fn, at: null, monthDay: null, getHandlerFunction: () => fn, getEventType: () => 'CLOCK' };
         const b = { timeBased: () => b, atHour: (h) => { t.at = h; return b; }, nearMinute: () => b, everyDays: () => b, everyHours: () => b,
+          onMonthDay: (d) => { t.monthDay = d; return b; }, everyMinutes: () => b,
           inTimezone: () => b, create: () => { triggers.push(t); return t; } };
         return b;
       },

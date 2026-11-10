@@ -353,3 +353,42 @@ test('INQ結合: ボタンの合言葉は先頭が英字（数字だけの合言
   assert.equal(t, 'a12345');
   for (let i = 0; i < 200; i++) assert.match(g.ctx.INQ_token_(), /^[a-f][0-9a-f]{5}$/);
 });
+
+test('INQ結合: 要注意の分類・ハラスメントは、受付時のお知らせとまとめに本文を出さない（分類名だけ）', () => {
+  const { g, book } = setup();
+  const bodies = ['上司からパワハラを受けていて相談したいです', '今月の給料がまだ振り込まれていません', '昨日から体調が悪くて病院に行きました'];
+  const n = g.fetches.length;
+  post(g, userMsg(U(1), bodies[0]));
+  post(g, userMsg(U(4), bodies[1]));   // 未登録の人（氏名不明）
+  const p = since(g, n).push;
+  assert.equal(p.length, 2);
+  const lines = (m) => [...m.contents.body.contents].map((x) => x.text);
+  assert.deepEqual(lines(p[0].body.messages[0]).slice(1), ['試験 一郎（部署A）', '状況：未対応', '要約：⚠ハラスメント・人間関係', '内容：（内容はチャットで確認してください）']);
+  assert.deepEqual(lines(p[1].body.messages[0]).slice(3), ['要約：⚠給与・明細', '内容：（内容はチャットで確認してください）']);
+  // 別の人の3件目（健康）：まとめは分類が空の行を先に埋めてから作る
+  g.line.profiles[U(5)] = 'ごろう';
+  post(g, userMsg(U(5), bodies[2]));
+  g.clock.now = new Date('2026-11-05T15:00:00+09:00').getTime();
+  const m = g.fetches.length;
+  g.ctx.INQ_remind();
+  const r = since(g, m).push;
+  assert.equal(r.length, 1);
+  const text = r[0].body.messages[0].text;
+  assert.match(text, /要約：⚠ハラスメント・人間関係\n内容：（内容はチャットで確認してください）/);
+  assert.match(text, /要約：⚠給与・明細\n内容：（内容はチャットで確認してください）/);
+  assert.match(text, /要約：⚠健康・体調\n内容：（内容はチャットで確認してください）/);
+  const sent = JSON.stringify(g.fetches.filter((f) => f.url.endsWith('/push')).map((f) => f.body));
+  for (const b of bodies) assert.ok(!sent.includes(b.slice(0, 6)), b);   // どの送信にも本文は出ない
+  for (const w of ['パワハラ', '給料', '病院', '振り込']) assert.ok(!sent.includes(w), w);   // 要点のキーワードも出ない（分類名の「体調」などは出てよい）
+  assert.equal(sheet(book, 'やりとり').dump()[1][3], bodies[0]);   // シート（管理本部だけが見る）には本文を残す
+});
+
+test('INQ結合: 要注意の分類でも、INQ_MODE=record の間は今までどおり送らない', () => {
+  const { g, book } = setup({ INQ_MODE: 'record' });
+  const n = g.fetches.length;
+  post(g, userMsg(U(1), 'パワハラの相談です'));
+  g.ctx.INQ_remind();
+  assert.equal(since(g, n).push.length, 0);
+  assert.equal(since(g, n).reply.length, 0);
+  assert.equal(cases(book).length, 1);
+});

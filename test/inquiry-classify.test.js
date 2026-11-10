@@ -118,7 +118,8 @@ test('INQ分類: まとめのお知らせはシートの「分類」「要点」
   book.getSheetByName('問い合わせ').getRange(3, 23).setValue('勤怠（手で修正）');
   const text = g.ctx.INQ_remindText(g.ctx.INQ_cases_(book.getSheetByName('問い合わせ')), new Date('2026-11-10T15:00:00+09:00'));
   assert.match(text, /^【問い合わせ 未完了2件】11\/10 15:00/);
-  assert.match(text, /要約：⚠給与・明細／給与／明細/);
+  assert.match(text, /要約：⚠給与・明細\n内容：（内容はチャットで確認してください）/);   // 要注意の分類：分類名だけ（2026-11-10c）
+  assert.ok(!text.includes('給与明細はいつ'));
   assert.match(text, /要約：勤怠（手で修正）／11\/8／退勤／打刻/);
   const n = g.fetches.length, l = g.logs.length;
   const res = g.ctx.INQ_remindPreview();
@@ -128,4 +129,25 @@ test('INQ分類: まとめのお知らせはシートの「分類」「要点」
   const log = g.logs.slice(l).join('\n');
   assert.match(log, /未完了 2件（未対応 2件・対応中 0件）／文字数 \d+/);
   assert.ok(!/試験|給与|打刻|ひょうじ/.test(log));
+});
+
+test('INQ分類: ハラスメント・人間関係（⚠・ほかの⚠と同数なら優先）と、要注意の分類の判定', () => {
+  const { g } = setup();
+  const c = (t) => g.ctx.INQ_classify(t).category;
+  for (const t of ['パワハラについて相談したいです', 'セクハラを受けました', 'モラハラかもしれません', '職場の人間関係で悩んでいます',
+    'いじめのような嫌がらせがあります', 'ハラスメントの相談窓口はどこですか', 'マタハラの相談']) {
+    assert.equal(c(t), '⚠ハラスメント・人間関係', t);
+  }
+  assert.equal(c('パワハラで体調が悪いです'), '⚠ハラスメント・人間関係');                       // 同数なら上の分類（ハラスメント）
+  for (const t of ['上司に怒られました', '仕事がきついです', '来月のシフトの希望休について', '体調が悪いので明日休みます']) {
+    assert.notEqual(c(t), '⚠ハラスメント・人間関係', t);                                        // 迷う言葉は入れていない
+  }
+  const s = g.ctx.INQ_isSensitiveCategory;
+  for (const k of ['⚠給与・明細', '⚠口座・マイナンバー', '⚠健康・体調', '⚠ハラスメント・人間関係', '健康・体調', 'ハラスメント・人間関係', '⚠手で付けた分類']) assert.equal(s(k), true, k);
+  for (const k of ['', null, 'その他', '勤怠・打刻', 'シフト・希望休', '車両・免許']) assert.equal(s(k), false, String(k));
+  assert.equal(g.ctx.INQ_summary({ category: '健康・体調', point: '体調' }), '健康・体調');          // 手で⚠を外しても要点は出さない
+  assert.equal(g.ctx.INQ_shownHead({ head: 'あいう' }, true), '（内容はチャットで確認してください）');
+  assert.equal(g.ctx.INQ_shownHead({ head: 'あいう', secret: true }, true), '機密を含むため、チャットで確認してください');   // 機密の表示が優先
+  assert.equal(g.ctx.INQ_shownHead({ head: 'あいう' }, false), '「あいう」');
+  assert.equal(g.ctx.INQ_VERSION, '2026-11-10c');
 });

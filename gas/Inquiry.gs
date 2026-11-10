@@ -22,11 +22,14 @@
  * 分類・要点（INQ_classifyFill_）：「問い合わせ」タブの末尾の「分類」「要点」の列を、キーワードで埋める（外部のAIは使わない）。
  *  1時間ごとの alcoholCheckImportTot から呼ぶ（Webアプリの版は変えない）。「分類」が空の行だけを埋め、入っている行は上書きしない。
  *
+ * 要注意の分類（⚠の付いた分類：ハラスメント・人間関係／給与・明細／口座・マイナンバー／健康・体調）は、受付時のお知らせ・まとめの
+ *  どちらでも分類名だけを出し、要点と内容は出さない（「（内容はチャットで確認してください）」）。版 2026-11-10c
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10b';
+var INQ_VERSION = '2026-11-10c';
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -53,13 +56,17 @@ var INQ_HEAD_LEN = 20;
 var INQ_APPEND_NOTICE_MS = 30 * 60 * 1000;
 var INQ_DEDUPE_ROWS = 2000;     // 受信記録の直近の行数（重複の確認に使う。Workersの再送は最長24時間）
 var INQ_SECRET_LABEL = '機密を含むため、チャットで確認してください';
+var INQ_SENSITIVE_LABEL = '（内容はチャットで確認してください）';   // 要注意の分類のとき、内容の代わりに出す
 var INQ_REMIND_HOURS = [9, 15];
 var INQ_TEXT_MAX = 4900;
 
 // 分類と、そのキーワード（上から順に優先。後から足すときは words に足すだけ）。
-// sensitive：給与・口座・マイナンバー・健康。分類の先頭に「⚠」を付け、ほかの分類より優先する（取り扱いに注意が要るため）
+// sensitive：ハラスメント・給与・口座・マイナンバー・健康。分類の先頭に「⚠」を付け、ほかの分類より優先する（取り扱いに注意が要るため）。
+//  お知らせには分類名だけを出し、要点・内容は出さない。当たりの数が同じなら上にあるもの（ハラスメントが先）
+// ハラスメント・人間関係（仕様書14章）：迷う言葉（怒られた・きつい・辞めたい など）は入れない。取りこぼしは手で分類を直す
 var INQ_CLASS_COLS = ['分類', '要点'];
 var INQ_CATEGORIES = [
+  { name: 'ハラスメント・人間関係', sensitive: true, words: ['ハラスメント', 'パワハラ', 'セクハラ', 'モラハラ', 'マタハラ', 'いじめ', 'イジメ', '嫌がらせ', '人間関係'] },
   { name: '給与・明細', sensitive: true, words: ['給与', '給料', '明細', '賞与', 'ボーナス', '振込', '振り込み', '支給', '手当', '源泉', '年末調整', '時給', '残業代', '交通費'] },
   { name: '口座・マイナンバー', sensitive: true, words: ['口座', 'マイナンバー', '個人番号', '銀行', '通帳', 'キャッシュカード'] },
   { name: '健康・体調', sensitive: true, words: ['体調', '発熱', '熱が', '病院', '通院', '診断', '怪我', 'ケガ', 'けが', '痛い', '痛み', '入院', '健康', 'コロナ', 'インフル', '感染', '具合'] },
@@ -294,8 +301,22 @@ function INQ_md_(d) {
   return Number(p[1]) + '/' + Number(p[2]) + '（' + '日月火水木金土'.charAt(INQ_dow_(d)) + '）';
 }
 
-/** 純粋関数：一覧・通知に出す内容（機密ありならチャットで確認） */
-function INQ_shownHead(c) { return c.secret ? INQ_SECRET_LABEL : '「' + (c.head || '') + '」'; }
+/** 純粋関数：一覧・通知に出す内容（機密ありならチャットで確認。要注意の分類なら「（内容はチャットで確認してください）」） */
+function INQ_shownHead(c, sensitive) {
+  if (c.secret) return INQ_SECRET_LABEL;
+  return sensitive ? INQ_SENSITIVE_LABEL : '「' + (c.head || '') + '」';
+}
+
+/**
+ * 純粋関数：要注意の分類か（先頭が「⚠」、または ⚠ を外した名前が INQ_CATEGORIES の sensitive の分類）。
+ * シートで手で直した分類（⚠ を付け忘れたもの）も要注意として扱う
+ */
+function INQ_isSensitiveCategory(category, categories) {
+  var cat = String(category == null ? '' : category).trim();
+  if (!cat) return false;
+  if (cat.charAt(0) === '⚠') return true;
+  return (categories || INQ_CATEGORIES).some(function (x) { return x.sensitive && x.name === cat; });
+}
 
 /** 「11/13 9:00」（曜日なし・時は0を付けない） */
 function INQ_mdhm_(d) {
@@ -314,14 +335,21 @@ function INQ_whoShort(c) {
  * 機密ありは分類だけ（要点は出さない）。内容が無ければ「－」
  */
 function INQ_summary(c) {
+  var s = INQ_summaryParts_(c);
+  if (!s.category) return '－';
+  return c.secret || INQ_isSensitiveCategory(s.category) || !s.point ? s.category : s.category + '／' + s.point;
+}
+
+/** 純粋関数：分類と要点（シートの値。分類が空なら内容（冒頭）から作る）。内容も無ければ category は空 */
+function INQ_summaryParts_(c) {
   var cat = String(c.category || '').trim(), pt = String(c.point || '').trim();
   if (!cat) {
     var src = String(c.head || '').replace(/…$/, '').trim();
-    if (!src) return '－';
+    if (!src) return { category: '', point: '' };
     var r = INQ_classify(src);
     cat = r.category; pt = pt || r.point;
   }
-  return c.secret || !pt ? cat : cat + '／' + pt;
+  return { category: cat, point: pt };
 }
 
 /** 純粋関数：状況（対応中なら担当。受付が今日より前なら「（前日から）」） */
@@ -332,7 +360,8 @@ function INQ_stateLabel(c, now) {
 
 /** 純粋関数：1件分の行（名前・状況・要約・内容） */
 function INQ_caseLines(c, now) {
-  return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c)];
+  var sensitive = INQ_isSensitiveCategory(INQ_summaryParts_(c).category);
+  return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c, sensitive)];
 }
 
 /**
@@ -709,6 +738,7 @@ function INQ_remind() {
       var dow = INQ_dow_(now);
       if (dow === 0 || dow === 6) return;
     }
+    INQ_classifyFill_();   // まだ分類が空の行を、本文の全体から先に埋める（要注意の分類を内容（冒頭）だけで判定しないため。エラーは外へ出さない）
     var cases = INQ_cases_(INQ_sheet_(INQ_book_(), INQ_SHEET_CASE, INQ_CASE_HEADER))
       .map(function (c) { c.who = INQ_caseWho(c); return c; });
     var text = INQ_remindText(cases, now);
@@ -819,5 +849,5 @@ if (typeof module !== 'undefined') {
     INQ_messageSummary: INQ_messageSummary, INQ_matchEmployee: INQ_matchEmployee, INQ_whoLabel: INQ_whoLabel,
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
-    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
+    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
 }

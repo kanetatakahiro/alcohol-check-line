@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-10a';
+var AC_CODE_VERSION = '2026-11-10c';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1335,6 +1335,93 @@ function AC_selfNoticesHourly_() {
   var master = AC_masterSheet_(), mv = master.getDataRange().getValues(), ss = master.getParent();
   try { AC_selfRequestNotices_(AC_pendingRequests(R.employees, R.requests), mv, ss, today, props); } catch (e) { Logger.log('本人への承認待ちのお知らせに失敗'); }
   try { AC_punchSelfNotices_(R, mv, ss, today, props); } catch (e) { Logger.log('本人への打刻漏れのお知らせに失敗'); }
+}
+
+/**
+ * 手動確認用：AC_selfNoticesHourly_ と同じ確認を上から順に行い、本番の処理が「どの確認で止まるか」を実行ログに出す。
+ * 送信・シートやドライブへの書き込み・selfnotice／reqseen の記録は一切しない（AC_state_ は古い記録の移し替えで書き込むため使わない）。
+ * ログに出すのは件数・array かどうか・日付・設定値だけ。氏名・LINE ID・申請の中身は出さない。
+ * 時間外・実行済みでも、診断は止めずに続ける（止まる箇所は最初の × ）。
+ */
+function alcoholCheckSelfNoticeDiagnose() {
+  Logger.log(AC_selfNoticeDiagnosis_().join('\n'));
+}
+
+function AC_selfNoticeDiagnosis_() {
+  var props = PropertiesService.getScriptProperties(), user = PropertiesService.getUserProperties();
+  var out = [], stop = '';
+  var check = function (label, ok, detail) {
+    out.push((ok ? '○ ' : '× ') + label + (detail ? '：' + detail : ''));
+    if (!ok && !stop) stop = label;
+    return ok;
+  };
+  var finish = function () {
+    out.push(stop ? '→ 本番の処理は「' + stop + '」で止まります（ログは残りません）' : '→ 本番の処理は最後まで進みます');
+    return out;
+  };
+  var val = function (k) { var v = props.getProperty(k); return v === null || v === undefined ? '未設定' : JSON.stringify(String(v)); };
+  var modeOf = function (k) { return String(props.getProperty(k) || '').trim(); };
+  var today = AC_today_(), hour = Number(Utilities.formatDate(new Date(), AC_TZ, 'HH'));
+  out.push('本人へのお知らせの診断（送信・書き込みなし）／版 ' + AC_CODE_VERSION + '／今日 ' + today + ' ' + hour + '時');
+
+  var rmode = modeOf('REQUEST_SELF_NOTIFY'), pmode = modeOf('PUNCH_SELF_NOTIFY');
+  var used = [rmode, pmode].some(function (m) { return m === 'record' || m === 'on'; });
+  check('1. 設定（REQUEST_SELF_NOTIFY・PUNCH_SELF_NOTIFY のどちらかが record／on）', used,
+    'REQUEST_SELF_NOTIFY=' + val('REQUEST_SELF_NOTIFY') + '／PUNCH_SELF_NOTIFY=' + val('PUNCH_SELF_NOTIFY') + '／DRY_RUN=' + val('DRY_RUN'));
+  check('2. 時刻（7〜11時台）', hour >= 7 && hour < 12, hour + '時（時間外でも診断は続けます）');
+  var done = user.getProperty('selfnotice:' + today);
+  check('3. 今日の実行済みの記録（selfnotice:' + today + '）が無い', !done,
+    !done ? 'なし' : done === 'skip' ? 'あり（skip＝申請・勤務データの読み取りエラーで見送り）' : 'あり（' + done + '）');
+
+  var file = AC_totLatestFile_();
+  if (!check('4. tot-latest.json がある', !!file)) return finish();
+  var updated = Utilities.formatDate(file.getLastUpdated(), AC_TZ, 'yyyy-MM-dd HH:mm');
+  check('5. tot-latest.json の更新日が今日', updated.slice(0, 10) === today, '更新 ' + updated);
+  var data = null;
+  try { data = JSON.parse(file.getBlob().getDataAsString('UTF-8')); } catch (e) { data = null; }
+  if (!check('6. tot-latest.json を読める（JSON）', !!data && typeof data === 'object')) return finish();
+
+  var R = (data && data.results) || {};
+  var shape = function (v) {
+    if (Array.isArray(v)) return 'array ' + v.length + '件';
+    if (v === undefined || v === null) return 'なし';
+    return (v && v._error ? 'エラー（' + String(v._error).slice(0, 10) + '）' : typeof v) + '（array ではない）';
+  };
+  check('7. データの日付（today）が今日', data.today === today, 'today=' + JSON.stringify(String(data.today || '')).slice(0, 20)
+    + '／取得 ' + (data.fetchedAt ? Utilities.formatDate(new Date(data.fetchedAt), AC_TZ, 'yyyy-MM-dd HH:mm') : 'なし'));
+  var arrays = Array.isArray(R.employees) && Array.isArray(R.requests) && Array.isArray(R.workings);
+  if (!check('8. employees・requests・workings が array', arrays,
+    'employees ' + shape(R.employees) + '／requests ' + shape(R.requests) + '／workings ' + shape(R.workings))) return finish();
+  var errs = function (a) { return a.filter(function (x) { return x && x._error; }).length; };
+  check('9. 申請・勤務データに読み取りエラーが無い', !errs(R.requests) && !errs(R.workings),
+    '申請のエラー ' + errs(R.requests) + '件／勤務のエラー ' + errs(R.workings) + '件（あると本番は skip を記録して見送り）');
+
+  // ここから先は AC_selfRequestNotices_ の中身（件数と人数だけ）
+  if (!check('10. REQUEST_SELF_NOTIFY が record／on', rmode === 'record' || rmode === 'on', val('REQUEST_SELF_NOTIFY'))) return finish();
+  var id = props.getProperty('EMPLOYEE_MASTER_ID');
+  if (!check('11. 従業員マスタの設定（EMPLOYEE_MASTER_ID）がある', !!id)) return finish();
+  var mss = SpreadsheetApp.openById(id), msh = mss.getSheetByName('従業員マスタ') || mss.getSheets()[0];
+  var mv = msh.getDataRange().getValues();
+  var live = rmode === 'on' && props.getProperty('DRY_RUN') === 'false', ns = live ? 'self' : 'selfrec';
+  var pend = AC_pendingRequests(R.employees, R.requests);
+  var fresh = AC_newPendingRequests(pend, AC_requestSeenOf(user.getProperties(), ns));
+  var list = AC_selfRequestNotices(fresh, mv, today);
+  var psh = mss.getSheetByName(AC_PAUSE_SHEET), pauseIdx = {};
+  try { if (psh) pauseIdx = AC_pauseIndex(psh.getDataRange().getValues(), AC_toDateFn_()); } catch (e) { pauseIdx = {}; }
+  var paused = 0, sent = 0;
+  list.forEach(function (g) {
+    if (AC_isPaused(pauseIdx, g.code, today)) paused++;
+    else if (user.getProperty('sent:' + today + ':reqself:' + g.code)) sent++;
+  });
+  out.push('・動き：' + (live ? '送信（記録は reqseen:self）' : '記録のみ（記録は reqseen:selfrec）'));
+  out.push('・承認待ちの申請 ' + pend.length + '件／そのうちまだ知らせていない申請 ' + fresh.length + '件');
+  out.push('・送る相手 ' + list.length + '人（うち お知らせ停止中 ' + paused + '人・今日送信済み ' + sent + '人は送らない）');
+  out.push('・お知らせ設定（NOTICE_SETTINGS）：' + AC_noticeModeOf_(props) + '（on のときは HR-01 が OFF の人へ送らない。診断では判定しない）');
+  return finish();
+}
+function AC_noticeModeOf_(props) {
+  var m = String(props.getProperty('NOTICE_SETTINGS') || '').trim();
+  return m === 'on' || m === 'record' ? m : 'off';
 }
 
 /** 純粋関数：有給の年5日（入社日・取得した有休の日から、一人ずつ） */

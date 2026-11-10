@@ -197,3 +197,68 @@ test('管理者の一覧（1回だけ）：新しく増えた申請だけ。新�
   g.ctx.AC_adminAttendanceChecks_({ employees: EMP, requests: [r5, r6] }, mv, ss, '2026-10-31', g.scriptProps);
   assert.ok(!seenKeys(g).includes('reqseen:admin:overtimes:r6'));
 });
+
+// ---------------- 止まった箇所の診断（alcoholCheckSelfNoticeDiagnose・2026-11-10c） ----------------
+function diagnose(g) {
+  const n = g.fetches.length, nl = g.logs.length;
+  const before = JSON.stringify([g.scriptProps.getProperties(), g.userProps.getProperties()]);
+  g.ctx.alcoholCheckSelfNoticeDiagnose();
+  assert.equal(g.fetches.length, n);                         // 送信なし
+  assert.equal(JSON.stringify([g.scriptProps.getProperties(), g.userProps.getProperties()]), before);   // 記録の書き込みなし
+  const text = g.logs.slice(nl).join('\n');
+  assert.ok(!/試験|U\d{32}|k50\d|r\d/.test(text), '氏名・LINE ID・申請の中身を出さない');
+  return text;
+}
+
+test('診断：送らず・書き込まずに、本番の処理が最後まで進むことと、件数・人数だけを出す', () => {
+  const { g, ss } = setup({ DRY_RUN: 'false', REQUEST_SELF_NOTIFY: 'on', NOTICE_SETTINGS: 'record' });
+  g.clock.now = DAY(27);
+  putLatest(g, { employees: EMP, requests: REQ, workings: [] });
+  const t = diagnose(g);
+  assert.match(t, /版 2026-11-10c/);
+  assert.ok(!/× /.test(t), t);
+  assert.match(t, /→ 本番の処理は最後まで進みます/);
+  assert.match(t, /employees array 3件／requests array 4件／workings array 0件/);
+  assert.match(t, /承認待ちの申請 3件／そのうちまだ知らせていない申請 3件/);
+  assert.match(t, /送る相手 2人/);
+  assert.match(t, /送信（記録は reqseen:self）/);
+  assert.equal(ss.getSheetByName('承認待ち本人通知'), null);
+  assert.equal(ss.getSheetByName('通知送信履歴'), null);
+  // 実際に送った後：まだ知らせていない申請は0件、実行済みの記録で止まる
+  assert.equal(hourly(g).length, 2);
+  const t2 = diagnose(g);
+  assert.match(t2, /× 3\. 今日の実行済みの記録/);
+  assert.match(t2, /まだ知らせていない申請 1件/);             // 対象外（他部署）の人の申請だけが残る
+  assert.match(t2, /送る相手 0人/);
+  assert.match(t2, /「3\. 今日の実行済みの記録.*」で止まります/);
+});
+
+test('診断：止まる箇所（設定値の誤り・時間外・前日のファイル・データの形・読み取りエラー・record）', () => {
+  const run = (props, { at = DAY(27), results = { employees: EMP, requests: REQ, workings: [] }, day = '2026-10-27', upd = '2026-10-27T07:05:30+09:00' } = {}) => {
+    const { g } = setup({ DRY_RUN: 'false', ...props });
+    g.clock.now = at;
+    putLatest(g, results, day, upd);
+    return diagnose(g);
+  };
+  assert.match(run({ REQUEST_SELF_NOTIFY: 'ON' }), /で止まります/);
+  assert.match(run({ REQUEST_SELF_NOTIFY: 'ON' }), /× 1\. 設定.*REQUEST_SELF_NOTIFY="ON"／PUNCH_SELF_NOTIFY=未設定/);
+  assert.match(run({ REQUEST_SELF_NOTIFY: 'ON', PUNCH_SELF_NOTIFY: 'record' }), /× 10\. REQUEST_SELF_NOTIFY が record／on/);
+  const late = run({ REQUEST_SELF_NOTIFY: 'on' }, { at: DAY(27, '12:30') });
+  assert.match(late, /「2\. 時刻（7〜11時台）」で止まります/);
+  assert.match(late, /送る相手 2人/);                        // 時間外でも先まで診断する
+  const old = run({ REQUEST_SELF_NOTIFY: 'on' }, { day: '2026-10-26', upd: '2026-10-26T22:30:00+09:00' });
+  assert.match(old, /× 5\. .*更新 2026-10-26 22:30/);
+  assert.match(old, /× 7\. .*today="2026-10-26"/);
+  assert.match(old, /「5\. tot-latest\.json の更新日が今日」で止まります/);
+  const night = run({ REQUEST_SELF_NOTIFY: 'on' }, { results: { employees: EMP, workings: { _error: 503 } } });
+  assert.match(night, /× 8\. .*requests なし／workings エラー（503）（array ではない）/);
+  assert.ok(!/× 9\./.test(night) && !/送る相手/.test(night));
+  assert.match(run({ REQUEST_SELF_NOTIFY: 'on' }, { results: { employees: EMP, requests: [...REQ, { _error: 500 }], workings: [] } }),
+    /× 9\. .*申請のエラー 1件／勤務のエラー 0件/);
+  const rec = run({ REQUEST_SELF_NOTIFY: 'record' });
+  assert.match(rec, /記録のみ（記録は reqseen:selfrec）/);
+  assert.match(rec, /最後まで進みます/);
+  const { g } = setup({ DRY_RUN: 'false', REQUEST_SELF_NOTIFY: 'on' });   // ファイルなし
+  g.clock.now = DAY(27);
+  assert.match(diagnose(g), /「4\. tot-latest\.json がある」で止まります/);
+});

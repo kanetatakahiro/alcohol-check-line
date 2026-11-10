@@ -171,7 +171,7 @@ test('夜の本人向け：設定の表示と版', () => {
   const { g } = setup({ ATTENDANCE_NOTIFY: 'record' });
   const t = [...g.ctx.AC_settingsReport({ ATTENDANCE_NOTIFY: 'record' }, [], { version: g.ctx.AC_CODE_VERSION })].join('\n');
   assert.match(t, /ATTENDANCE_NOTIFY：record/);
-  assert.match(t, /コードの版：2026-11-09d/);
+  assert.match(t, /コードの版：2026-11-(09d|1\d[a-z])/);   // 2026-11-09d 以降
   assert.equal(g.ctx.AC_attNotifyMode_({ getProperty: () => 'true' }), 'on');
   assert.equal(g.ctx.AC_attNotifyMode_({ getProperty: () => null }), '');
 });

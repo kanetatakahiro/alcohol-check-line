@@ -16,12 +16,16 @@
  *  INQ_NOTIFY_TO      未設定＝勤怠管理グループへ／admin＝管理者の個別LINEへ（試験用）
  *  INQ_REMIND_DAYS    未設定・all＝毎日／weekdays＝土日は送らない
  *  INQ_ROUTINE_WORDS・INQ_SECRET_WORDS  定型連絡・機密の言葉の追加（「、」区切り・任意）
+ *  INQ_CLASSIFY       未設定＝分類・要点を埋める／off＝埋めない（問い合わせの記録・通知はそのまま）
+ *
+ * 分類・要点（INQ_classifyFill_）：「問い合わせ」タブの末尾の「分類」「要点」の列を、キーワードで埋める（外部のAIは使わない）。
+ *  1時間ごとの alcoholCheckImportTot から呼ぶ（Webアプリの版は変えない）。「分類」が空の行だけを埋め、入っている行は上書きしない。
  *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-05a';
+var INQ_VERSION = '2026-11-10a';
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -49,9 +53,98 @@ var INQ_APPEND_NOTICE_MS = 30 * 60 * 1000;
 var INQ_DEDUPE_ROWS = 2000;     // 受信記録の直近の行数（重複の確認に使う。Workersの再送は最長24時間）
 var INQ_SECRET_LABEL = '（内容はチャットで確認）';
 
+// 分類と、そのキーワード（上から順に優先。後から足すときは words に足すだけ）。
+// sensitive：給与・口座・マイナンバー・健康。分類の先頭に「⚠」を付け、ほかの分類より優先する（取り扱いに注意が要るため）
+var INQ_CLASS_COLS = ['分類', '要点'];
+var INQ_CATEGORIES = [
+  { name: '給与・明細', sensitive: true, words: ['給与', '給料', '明細', '賞与', 'ボーナス', '振込', '振り込み', '支給', '手当', '源泉', '年末調整', '時給', '残業代', '交通費'] },
+  { name: '口座・マイナンバー', sensitive: true, words: ['口座', 'マイナンバー', '個人番号', '銀行', '通帳', 'キャッシュカード'] },
+  { name: '健康・体調', sensitive: true, words: ['体調', '発熱', '熱が', '病院', '通院', '診断', '怪我', 'ケガ', 'けが', '痛い', '痛み', '入院', '健康', 'コロナ', 'インフル', '感染', '具合'] },
+  { name: 'アルコールチェック', words: ['アルコール', 'チェッカー', '飲酒', '検知', '呼気'] },
+  { name: '車両・免許', words: ['車両', '社用車', '免許', '事故', '給油', 'ガソリン', '駐車', 'タイヤ', '運転'] },
+  { name: '勤怠・打刻', words: ['打刻', '打ち忘れ', '押し忘れ', '勤怠', 'タイムカード', 'touch on time', 'tot', '遅刻', '早退', '残業', '休憩', '出勤', '退勤'] },
+  { name: 'シフト・希望休', words: ['シフト', '希望休', '公休', '勤務日', '出勤日'] },
+  { name: '有給・休み', words: ['有給', '有休', '休暇', '欠勤', '休み', '休む', '休ませ', '忌引'] },
+  { name: '書類・手続き', words: ['書類', '手続', '証明', '申請書', '提出', '住所', '扶養', '保険証', '年金', '雇用保険', '社会保険', '契約'] },
+];
+var INQ_OTHER = 'その他';
+var INQ_POINT_LEN = 30, INQ_FIRST_LEN = 20;
+
 // ======================================================================
 // 純粋関数（Node.js のテストから使う）
 // ======================================================================
+
+/**
+ * 純粋関数：本文から分類と要点。{ category, point }
+ *  分類：当てはまったキーワードの多い分類（同じ数なら INQ_CATEGORIES の順）。⚠の分類が1つでも当てはまればそちらを優先。無ければ「その他」
+ *  要点：日付（11/8・11月8日 → 11/8）と、当てはまったキーワード（本文に出てくる順に最大3つ）を「／」でつなぐ（30文字以内）。
+ *        キーワードが無ければ、本文の最初の一文を20文字に切る
+ */
+function INQ_classify(text, categories) {
+  var cats = categories || INQ_CATEGORIES;
+  var t = INQ_nfkc(text).replace(/\s+/g, ' ').trim(), low = t.toLowerCase();
+  var best = null, bestSens = null, found = [];
+  cats.forEach(function (c, ci) {
+    var hits = 0;
+    c.words.forEach(function (w) {
+      var i = low.indexOf(INQ_nfkc(w).toLowerCase());
+      if (i === -1) return;
+      if (/^[a-z]+$/.test(w) && /[a-z0-9]/.test(low.charAt(i - 1) + low.charAt(i + w.length))) return;   // 英字は単語のときだけ
+      hits++;
+      if (!found.some(function (f) { return f.w === w || (f.i <= i && i < f.i + f.w.length) || (i <= f.i && f.i < i + w.length); })) found.push({ w: w, i: i });
+    });
+    if (!hits) return;
+    var cand = { name: (c.sensitive ? '⚠' : '') + c.name, hits: hits, order: ci };
+    if (!best || hits > best.hits) best = cand;
+    if (c.sensitive && (!bestSens || hits > bestSens.hits)) bestSens = cand;
+  });
+  var cat = bestSens || best;
+  if (!cat) return { category: INQ_OTHER, point: INQ_firstSentence(t, INQ_FIRST_LEN) };
+  var dates = [];
+  var re = /(\d{1,2})\s*(?:\/|月)\s*(\d{1,2})\s*日?/g, m;
+  while ((m = re.exec(t)) && dates.length < 2) {
+    var mo = Number(m[1]), d = Number(m[2]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+    var ds = mo + '/' + d;
+    if (dates.indexOf(ds) === -1) dates.push(ds);
+  }
+  var words = found.sort(function (a, b) { return a.i - b.i; }).slice(0, 3).map(function (f) { return f.w; });
+  return { category: cat.name, point: Array.from(dates.concat(words).join('／')).slice(0, INQ_POINT_LEN).join('') };
+}
+
+/** 純粋関数：最初の一文（。！？!? 改行まで）を n 文字に切る */
+function INQ_firstSentence(text, n) {
+  var t = String(text == null ? '' : text).trim();
+  var first = t.split(/[。．！？!?\n]/).map(function (x) { return x.trim(); }).filter(Boolean)[0] || t;
+  return Array.from(first.replace(/^「|」$/g, '')).slice(0, n || INQ_FIRST_LEN).join('');
+}
+
+/**
+ * 純粋関数：問い合わせタブ・やりとりタブの値から、埋める行。
+ * 戻り値 { cols: { category, point }（0始まりの列。無ければ末尾に足す位置）, addHeader, fills: [{ row（0始まり）, category, point }] }
+ * 「分類」が空の行だけ。要点が手で入っていれば要点はそのまま（point: null）
+ */
+function INQ_classifyPlan(caseValues, logValues, categories) {
+  var head = (caseValues && caseValues[0]) || [];
+  var width = Math.max(head.length, INQ_CASE_HEADER.length);
+  var ci = head.indexOf(INQ_CLASS_COLS[0]), pi = head.indexOf(INQ_CLASS_COLS[1]), addHeader = [];
+  if (ci === -1) { ci = width; addHeader.push({ col: ci, name: INQ_CLASS_COLS[0] }); width++; }
+  if (pi === -1) { pi = Math.max(width, ci + 1); addHeader.push({ col: pi, name: INQ_CLASS_COLS[1] }); }
+  var firstBody = {};
+  (logValues || []).forEach(function (r, i) {
+    if (i === 0 || !r[1] || r[2] !== '受付' || firstBody[r[1]] != null) return;
+    firstBody[r[1]] = String(r[3] == null ? '' : r[3]);
+  });
+  var fills = [];
+  for (var i = 1; i < (caseValues || []).length; i++) {
+    var r = caseValues[i], id = r[INQ_C.id];
+    if (!id || String(r[ci] == null ? '' : r[ci]).trim()) continue;
+    var body = firstBody[id] != null ? firstBody[id] : String(r[INQ_C.head] || '').replace(/^「|」$/g, '');
+    var res = INQ_classify(body, categories);
+    fills.push({ row: i, category: res.category, point: String(r[pi] == null ? '' : r[pi]).trim() ? null : res.point });
+  }
+  return { cols: { category: ci, point: pi }, addHeader: addHeader, fills: fills };
+}
 
 /** 全角英数字・記号を半角に（NFKC）。null は空文字 */
 function INQ_nfkc(text) {
@@ -575,6 +668,41 @@ function INQ_remind() {
   } catch (err) { INQ_fail_('リマインド', err); }
 }
 
+// ---- 1時間ごと（alcoholCheckImportTot から）：分類・要点を埋める ----
+/** 「分類」が空の行だけを埋める（入っている行は上書きしない）。INQ_MODE が off・記録先が未設定なら何もしない。エラーは外へ出さない */
+function INQ_classifyFill_() {
+  try {
+    if (INQ_mode_() === 'off' || !INQ_props_().getProperty('INQ_SPREADSHEET_ID')) return 0;
+    if (String(INQ_props_().getProperty('INQ_CLASSIFY') || '').trim() === 'off') return 0;   // 分類・要点だけを止める
+    var ss = INQ_book_(), sh = ss.getSheetByName(INQ_SHEET_CASE);
+    if (!sh || sh.getLastRow() < 2) return 0;
+    var log = ss.getSheetByName(INQ_SHEET_LOG);
+    var plan = INQ_classifyPlan(sh.getDataRange().getValues(), log ? log.getDataRange().getValues() : []);
+    plan.addHeader.forEach(function (h) { sh.getRange(1, h.col + 1).setValue(h.name).setFontWeight('bold'); });
+    plan.fills.forEach(function (f) {
+      sh.getRange(f.row + 1, plan.cols.category + 1).setValue(f.category);
+      if (f.point !== null) sh.getRange(f.row + 1, plan.cols.point + 1).setValue(f.point);
+    });
+    if (plan.fills.length) Logger.log('問い合わせの分類・要点：%s件を埋めました', plan.fills.length);
+    return plan.fills.length;
+  } catch (err) { Logger.log('問い合わせの分類・要点の処理に失敗（次の回にやり直します）：%s', err && err.message ? err.message : ''); return 0; }   // 管理者へは知らせない（受信の処理ではないため）
+}
+
+/** 手動確認用：分類・要点を埋めるとしたら何件・どの分類か（シートに書かない。本文・氏名・要点はログに出さない） */
+function inqClassifyPreview() {
+  var ss = INQ_book_(), sh = ss.getSheetByName(INQ_SHEET_CASE);
+  if (!sh) { Logger.log('「問い合わせ」タブがありません'); return null; }
+  var log = ss.getSheetByName(INQ_SHEET_LOG);
+  var plan = INQ_classifyPlan(sh.getDataRange().getValues(), log ? log.getDataRange().getValues() : []);
+  var by = {};
+  plan.fills.forEach(function (f) { by[f.category] = (by[f.category] || 0) + 1; });
+  var lines = ['問い合わせの分類・要点（確認だけ・書き込みなし。版 ' + INQ_VERSION + '）',
+    '埋める行：' + plan.fills.length + '件' + (plan.addHeader.length ? '（列の見出し「' + plan.addHeader.map(function (h) { return h.name; }).join('」「') + '」を末尾に足します）' : ''),
+    '内訳：' + (Object.keys(by).map(function (k) { return k + ' ' + by[k] + '件'; }).join('／') || 'なし')];
+  Logger.log(lines.join('\n'));
+  return { count: plan.fills.length, byCategory: by };
+}
+
 // ---- 将来のAI自動返信用：その人に未対応・対応中の案件があるか ----
 function INQ_activeCaseFor(userId) {
   if (!INQ_props_().getProperty('INQ_SPREADSHEET_ID')) return null;
@@ -628,5 +756,5 @@ if (typeof module !== 'undefined') {
     INQ_messageSummary: INQ_messageSummary, INQ_matchEmployee: INQ_matchEmployee, INQ_whoLabel: INQ_whoLabel,
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
-    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
+    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
 }

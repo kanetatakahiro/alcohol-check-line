@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-09d';
+var AC_CODE_VERSION = '2026-11-10a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -174,6 +174,7 @@ function alcoholCheckImportTot() {
     if (!done) Logger.log('新しいCSVはありません');
     // 管理本部の本人へのお知らせ（朝のTOTデータから。Webアプリの版を変えずに動かすため、ここから呼ぶ）
     try { AC_selfNoticesHourly_(); } catch (e) { Logger.log('本人へのお知らせの処理に失敗：%s', e && e.message); }
+    if (typeof INQ_classifyFill_ === 'function') INQ_classifyFill_();   // 問い合わせの分類・要点（gas/Inquiry.gs。エラーは外へ出さない）
   } finally { lock.releaseLock(); }
 }
 

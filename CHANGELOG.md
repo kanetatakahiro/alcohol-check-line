@@ -1,5 +1,14 @@
 # 変更履歴
 
+## 2026-11-10 「問い合わせ」タブの列を見出しの名前で探す（Inquiry.gs 版 2026-11-10e・ブランチ feature/notification-settings・本番未導入）
+- 管理本部が列を並べ替え・非表示にできるように。列の固定の位置（INQ_C の番号）をやめ、毎回1行目の見出しから位置を求める（INQ_caseCols・INQ_caseSheet_・INQ_newCaseRow・INQ_setCell_）
+- 対象：受付・追記（INQ_receive_）、ボタン（INQ_button_。担当者・担当者ID・対応開始日時などが離れた列でもよい）、まとめ（INQ_remind）、分類と要点の記入（INQ_classifyPlan・INQ_classifyFill_・inqClassifyPreview）、INQ_setup（見出しの確認を実行ログへ）
+- 見出しが足りない・必要な見出しが2つあるときは、その処理だけをやめてエラーを記録（受付は本文を「やりとり」に保留で残す・管理者へ1日1回）。doPost は止めない
+- 見出しの名前を変えると止まる（並べ替え・非表示は可）。本番に入れる前に inqClassifyPreview で見出しの確認ができる（読み取りだけ）
+- 指紋：Inquiry.gs `6a128fc12d5ba779`（版 2026-11-10e・10c・10d の内容を含む）。コード.gs・LeaveRequest.gs・Notices.gs は変更なし
+- テスト：test/inquiry-columns.test.js 6件追加（列を入れ替えた架空のシート）、既存1件を更新（全199件成功）
+- 本番は変更なし
+
 ## 2026-11-10 FAQ回答マスターを作る準備用の関数 INQ_setupFaq（Inquiry.gs 版 2026-11-10d・ブランチ feature/notification-settings・本番未導入）
 - 問い合わせ管理シートに「FAQ回答マスター」タブを作る（計画書 5-2 の列・34行）。回答文は仕様書の【文面案】そのまま（11/10 会社の確認済み）
 - 会社の決定を優先：TOT-03（打刻修正の承認は翌月3日まで）、PL-04（有給の取消はToTのスケジュール申請から・記事8301）。希望休（TOT-05）は仕様書に文面案が無いため空

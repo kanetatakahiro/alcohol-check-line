@@ -115,7 +115,7 @@ test('INQ FAQ: INQ_setupFaq でタブを作る（チェックボックス3列）
   assert.equal(v.length, 35);
   assert.deepEqual(v[0], [...g.ctx.INQ_FAQ_HEADER]);
   assert.deepEqual(v.slice(1).map((r) => r[0]), IDS);
-  assert.equal(g.ctx.INQ_VERSION, '2026-11-10d');
+  assert.ok(g.ctx.INQ_VERSION >= '2026-11-10d');   // 10d 以降の版に含まれる
   for (const r of v.slice(1)) for (const c of [1, 7, 8]) assert.equal(typeof r[c], 'boolean', r[0] + ' 列' + (c + 1));
   assert.equal(v.find((r) => r[0] === 'TOT-05')[1], false);
   assert.equal(v.find((r) => r[0] === 'TOT-02')[1], true);

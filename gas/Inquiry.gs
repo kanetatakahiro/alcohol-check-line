@@ -28,20 +28,28 @@
  * FAQ回答マスター（INQ_setupFaq・版 2026-11-10d）：問い合わせ管理シートに「FAQ回答マスター」タブを作る準備用の関数（手動で1回）。
  *  回答文は仕様書（docs/REBIRTH_support_spec.md）の【文面案】。タブがあれば何もしない。今は読まれるだけで、受付・返信の動きは変えない。
  *
+ * 列の位置（版 2026-11-10e）：「問い合わせ」タブは、毎回1行目の見出しの名前から列の位置を求める（INQ_C は「見出しの名前」の対応表）。
+ *  管理本部が列を並べ替え・非表示にしても動く。見出しが見つからない・同じ見出しが2つある列があれば、その処理だけをやめてエラーを記録する
+ *  （受付は本文を「やりとり」に「受付（保留：列の見出し）」で残し、管理者へ1日1回知らせる。doPost は止めない）。
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10d';
+var INQ_VERSION = '2026-11-10e';
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
 var INQ_CASE_HEADER = ['案件番号', '状態', '社員番号', '氏名', '所属', '紐付け', 'LINEユーザーID', 'LINE表示名', '受付日時',
   '内容（冒頭）', '機密あり', '最終受信日時', '追記の回数', '担当者', '担当者ID', '対応開始日時', '完了者', '完了者ID', '完了日時',
   '最後の追記通知', '合言葉', '作成時のイベント番号'];
-var INQ_C = { id: 0, state: 1, code: 2, name: 3, dept: 4, link: 5, userId: 6, lineName: 7, at: 8, head: 9, secret: 10,
-  lastAt: 11, appends: 12, staff: 13, staffId: 14, takenAt: 15, doneBy: 16, doneById: 17, doneAt: 18, appendNoticeAt: 19,
-  token: 20, eventId: 21 };
+// 「問い合わせ」タブの列：名前 → 見出し（列の位置は毎回 1行目の見出しから求める：INQ_caseCols。並べ替え・非表示でも動く）
+var INQ_C = { id: '案件番号', state: '状態', code: '社員番号', name: '氏名', dept: '所属', link: '紐付け', userId: 'LINEユーザーID',
+  lineName: 'LINE表示名', at: '受付日時', head: '内容（冒頭）', secret: '機密あり', lastAt: '最終受信日時', appends: '追記の回数',
+  staff: '担当者', staffId: '担当者ID', takenAt: '対応開始日時', doneBy: '完了者', doneById: '完了者ID', doneAt: '完了日時',
+  appendNoticeAt: '最後の追記通知', token: '合言葉', eventId: '作成時のイベント番号' };
+// 無くてもよい列（分類・要点。無ければ INQ_classifyFill_ が末尾に足す）。位置は -1
+var INQ_C_OPTIONAL = { category: '分類', point: '要点' };
 var INQ_SHEET_LOG = 'やりとり';
 var INQ_LOG_HEADER = ['日時', '案件番号', '種類', '内容', 'LINEユーザーID', 'イベント番号', 'メッセージ番号'];
 var INQ_SHEET_ROUTINE = '定型連絡';
@@ -139,8 +147,10 @@ function INQ_firstSentence(text, n) {
  */
 function INQ_classifyPlan(caseValues, logValues, categories) {
   var head = (caseValues && caseValues[0]) || [];
-  var width = Math.max(head.length, INQ_CASE_HEADER.length);
-  var ci = head.indexOf(INQ_CLASS_COLS[0]), pi = head.indexOf(INQ_CLASS_COLS[1]), addHeader = [];
+  var cols = INQ_caseCols(head);
+  if (!cols.ok) return { error: INQ_colsMessage(cols), cols: { category: -1, point: -1 }, addHeader: [], fills: [] };   // 列の見出しに問題：何も書かない
+  var C = cols.col, width = head.length;
+  var ci = C.category, pi = C.point, addHeader = [];
   if (ci === -1) { ci = width; addHeader.push({ col: ci, name: INQ_CLASS_COLS[0] }); width++; }
   if (pi === -1) { pi = Math.max(width, ci + 1); addHeader.push({ col: pi, name: INQ_CLASS_COLS[1] }); }
   var firstBody = {};
@@ -150,9 +160,9 @@ function INQ_classifyPlan(caseValues, logValues, categories) {
   });
   var fills = [];
   for (var i = 1; i < (caseValues || []).length; i++) {
-    var r = caseValues[i], id = r[INQ_C.id];
+    var r = caseValues[i], id = r[C.id];
     if (!id || String(r[ci] == null ? '' : r[ci]).trim()) continue;
-    var body = firstBody[id] != null ? firstBody[id] : String(r[INQ_C.head] || '').replace(/^「|」$/g, '');
+    var body = firstBody[id] != null ? firstBody[id] : String(r[C.head] || '').replace(/^「|」$/g, '');
     var res = INQ_classify(body, categories);
     fills.push({ row: i, category: res.category, point: String(r[pi] == null ? '' : r[pi]).trim() ? null : res.point });
   }
@@ -420,15 +430,61 @@ function INQ_remindText(cases, now) {
   return [head].concat(kept).concat(['…ほか' + (body.length - kept.length) + '件はシートで確認']).join('\n\n');
 }
 
-/** 純粋関数：シートの1行 → 案件 */
-function INQ_rowToCase(r, i) {
+/**
+ * 純粋関数：1行目の見出しから列の位置（0始まり）。{ ok, col: { 名前: 位置 }, missing: [見出し], dup: [見出し], width }
+ * 見出しの前後の空白は無視。必要な列（INQ_C）が無い、または必要な列・分類・要点の見出しが2つ以上あれば ok=false。
+ * 分類・要点（INQ_C_OPTIONAL）は無くてもよい（位置は -1）。ほかの見出しの列（管理本部が足した列など）は読まない・書かない
+ */
+function INQ_caseCols(head) {
+  var pos = {}, seen = {}, dup = [], col = {}, missing = [];
+  (head || []).forEach(function (h, i) {
+    var n = String(h == null ? '' : h).trim();
+    if (!n) return;
+    if (Object.prototype.hasOwnProperty.call(seen, n)) { if (dup.indexOf(n) === -1) dup.push(n); return; }
+    seen[n] = true; pos[n] = i;
+  });
+  var has = function (n) { return Object.prototype.hasOwnProperty.call(pos, n); };
+  Object.keys(INQ_C).forEach(function (k) { if (has(INQ_C[k])) col[k] = pos[INQ_C[k]]; else missing.push(INQ_C[k]); });
+  Object.keys(INQ_C_OPTIONAL).forEach(function (k) { col[k] = has(INQ_C_OPTIONAL[k]) ? pos[INQ_C_OPTIONAL[k]] : -1; });
+  var known = Object.keys(INQ_C).map(function (k) { return INQ_C[k]; }).concat(Object.keys(INQ_C_OPTIONAL).map(function (k) { return INQ_C_OPTIONAL[k]; }));
+  dup = dup.filter(function (n) { return known.indexOf(n) !== -1; });
+  return { ok: !missing.length && !dup.length, col: col, missing: missing, dup: dup, width: (head || []).length };
+}
+
+/** 純粋関数：列の見出しの問題の説明（見出しの名前だけ。シートの中身は出さない） */
+function INQ_colsMessage(cols) {
+  var parts = [];
+  if (cols.missing.length) parts.push('見つからない見出し：' + cols.missing.join('、'));
+  if (cols.dup.length) parts.push('2つ以上ある見出し：' + cols.dup.join('、'));
+  return '「' + INQ_SHEET_CASE + '」タブの列の見出しに問題があります（' + parts.join('／') + '）';
+}
+
+/** 今までの並び（INQ_CASE_HEADER の順）の列の位置。テストや、列の位置を渡さない呼び出し用 */
+var INQ_DEFAULT_COLS = INQ_caseCols(INQ_CASE_HEADER).col;
+
+/** 純粋関数：新しい行（見出しの位置に値を入れる。ほかの列は空）。values：{ 名前: 値 } */
+function INQ_newCaseRow(col, width, values) {
+  var w = width || 0;
+  Object.keys(values).forEach(function (k) { if (col[k] >= 0) w = Math.max(w, col[k] + 1); });
+  var row = [];
+  for (var i = 0; i < w; i++) row.push('');
+  Object.keys(values).forEach(function (k) { if (col[k] >= 0) row[col[k]] = values[k]; });
+  return row;
+}
+
+/** 純粋関数：シートの1行 → 案件。col：列の位置（INQ_caseCols の col。省略時は今までの並び） */
+function INQ_rowToCase(r, i, col) {
+  var C = col || INQ_DEFAULT_COLS;
   var d = function (v) { return v instanceof Date ? v : (v ? new Date(v) : null); };
-  return { row: i + 1, id: String(r[INQ_C.id] || ''), state: String(r[INQ_C.state] || ''), code: AC_cellCode_(r[INQ_C.code]),
-    name: String(r[INQ_C.name] || ''), dept: String(r[INQ_C.dept] || ''), link: String(r[INQ_C.link] || ''),
-    userId: String(r[INQ_C.userId] || ''), lineName: String(r[INQ_C.lineName] || ''), at: d(r[INQ_C.at]), head: String(r[INQ_C.head] || ''),
-    secret: r[INQ_C.secret] === true, appends: Number(r[INQ_C.appends]) || 0, staff: String(r[INQ_C.staff] || ''),
-    appendNoticeAt: d(r[INQ_C.appendNoticeAt]), token: String(r[INQ_C.token] || ''), who: '',
-    doneBy: String(r[INQ_C.doneBy] || ''), doneAt: d(r[INQ_C.doneAt]) };
+  var cell = function (k) { return C[k] >= 0 ? r[C[k]] : ''; };
+  return { row: i + 1, id: String(cell('id') || ''), state: String(cell('state') || ''), code: AC_cellCode_(cell('code')),
+    name: String(cell('name') || ''), dept: String(cell('dept') || ''), link: String(cell('link') || ''),
+    userId: String(cell('userId') || ''), lineName: String(cell('lineName') || ''), at: d(cell('at')), head: String(cell('head') || ''),
+    secret: cell('secret') === true, appends: Number(cell('appends')) || 0, staff: String(cell('staff') || ''),
+    appendNoticeAt: d(cell('appendNoticeAt')), token: String(cell('token') || ''), who: '',
+    doneBy: String(cell('doneBy') || ''), doneAt: d(cell('doneAt')),
+    category: C.category >= 0 ? String(r[C.category] == null ? '' : r[C.category]).trim() : '',
+    point: C.point >= 0 ? String(r[C.point] == null ? '' : r[C.point]).trim() : '' };
 }
 
 /** 純粋関数：案件の表示名（シートの値から） */
@@ -474,18 +530,24 @@ function INQ_sheet_(ss, name, header) {
   return sh;
 }
 
-function INQ_cases_(sh) {
-  var v = sh.getDataRange().getValues(), out = [];
-  var head = v[0] || [], ci = head.indexOf(INQ_CLASS_COLS[0]), pi = head.indexOf(INQ_CLASS_COLS[1]);   // 分類・要点（末尾の列。無ければ空）
+/**
+ * 「問い合わせ」タブを読む：{ cols（INQ_caseCols）, cases }。列の位置は1行目の見出しから（非表示の列も読む）。
+ * 見出しに問題があれば、エラー（inqCols=true）を出す（呼び出し側でその処理だけをやめる）
+ */
+function INQ_caseSheet_(sh) {
+  var v = sh.getDataRange().getValues(), cols = INQ_caseCols(v[0] || []), out = [];
+  if (!cols.ok) { var e = AC_error_(INQ_colsMessage(cols)); e.inqCols = true; throw e; }
   for (var i = 1; i < v.length; i++) {
-    if (!v[i][INQ_C.id]) continue;
-    var c = INQ_rowToCase(v[i], i);
-    c.category = ci === -1 ? '' : String(v[i][ci] == null ? '' : v[i][ci]).trim();
-    c.point = pi === -1 ? '' : String(v[i][pi] == null ? '' : v[i][pi]).trim();
-    out.push(c);
+    if (!v[i][cols.col.id]) continue;
+    out.push(INQ_rowToCase(v[i], i, cols.col));
   }
-  return out;
+  return { cols: cols, cases: out };
 }
+
+function INQ_cases_(sh) { return INQ_caseSheet_(sh).cases; }
+
+/** 1つのセルに書く（列の位置は見出しから求めたもの） */
+function INQ_setCell_(sh, row, col, key, value) { sh.getRange(row, col[key] + 1).setValue(value); }
 
 /** 受信記録の直近の行に、このイベント番号があるか */
 function INQ_seenInSheet_(sh, eventId) {
@@ -617,13 +679,21 @@ function INQ_receive_(ev, mode) {
       return;
     }
     var sh = INQ_sheet_(ss, INQ_SHEET_CASE, INQ_CASE_HEADER), log = INQ_sheet_(ss, INQ_SHEET_LOG, INQ_LOG_HEADER);
-    var cases = INQ_cases_(sh), open = INQ_openCaseOf(cases, uid);
+    var cs;
+    try { cs = INQ_caseSheet_(sh); } catch (ce) {
+      if (ce && ce.inqCols) {   // 列の見出しに問題：案件にはせず、本文を「やりとり」に残してから、エラーとして管理者へ（INQ_fail_）
+        log.appendRow([now, '', '受付（保留：列の見出し）', stored, uid, ev.webhookEventId || '', "'" + mid]);
+        INQ_markSeen_(ev, received, '保留（列の見出し）');
+      }
+      throw ce;
+    }
+    var C = cs.cols.col, cases = cs.cases, open = INQ_openCaseOf(cases, uid);
     if (open) {
       var notify = INQ_shouldNotifyAppend(open.state, open.appendNoticeAt ? open.appendNoticeAt.getTime() : 0, now.getTime());
-      sh.getRange(open.row, INQ_C.lastAt + 1).setValue(now);
-      sh.getRange(open.row, INQ_C.appends + 1).setValue(open.appends + 1);
-      if (secret && !open.secret) sh.getRange(open.row, INQ_C.secret + 1).setValue(true);
-      if (notify && mode === 'on') sh.getRange(open.row, INQ_C.appendNoticeAt + 1).setValue(now);
+      INQ_setCell_(sh, open.row, C, 'lastAt', now);
+      INQ_setCell_(sh, open.row, C, 'appends', open.appends + 1);
+      if (secret && !open.secret) INQ_setCell_(sh, open.row, C, 'secret', true);
+      if (notify && mode === 'on') INQ_setCell_(sh, open.row, C, 'appendNoticeAt', now);
       log.appendRow([now, open.id, '追記', stored, uid, ev.webhookEventId || '', "'" + mid]);
       INQ_markSeen_(ev, received, '追記 ' + open.id);
       open.who = INQ_caseWho(open);
@@ -634,12 +704,10 @@ function INQ_receive_(ev, mode) {
         head: INQ_head(stored), secret: secret, token: INQ_token_(),
         name: match.name ? match.name + (match.retired ? '（退職）' : '') : '', dept: match.dept || '', link: INQ_LINK_LABEL[match.link],
         lineName: displayName, category: cls.category, point: cls.point };
-      var row = INQ_CASE_HEADER.map(function () { return ''; });
-      row[INQ_C.id] = c.id; row[INQ_C.state] = c.state; row[INQ_C.code] = match.code ? "'" + match.code : '';
-      row[INQ_C.name] = match.name ? match.name + (match.retired ? '（退職）' : '') : ''; row[INQ_C.dept] = match.dept || '';
-      row[INQ_C.link] = INQ_LINK_LABEL[match.link]; row[INQ_C.userId] = uid; row[INQ_C.lineName] = displayName;
-      row[INQ_C.at] = now; row[INQ_C.head] = c.head; row[INQ_C.secret] = secret; row[INQ_C.lastAt] = now; row[INQ_C.appends] = 0;
-      row[INQ_C.token] = c.token; row[INQ_C.eventId] = ev.webhookEventId || '';
+      var row = INQ_newCaseRow(C, cs.cols.width, { id: c.id, state: c.state, code: match.code ? "'" + match.code : '',
+        name: match.name ? match.name + (match.retired ? '（退職）' : '') : '', dept: match.dept || '', link: INQ_LINK_LABEL[match.link],
+        userId: uid, lineName: displayName, at: now, head: c.head, secret: secret, lastAt: now, appends: 0,
+        token: c.token, eventId: ev.webhookEventId || '' });
       sh.appendRow(row);
       log.appendRow([now, c.id, '受付', stored, uid, ev.webhookEventId || '', "'" + mid]);
       INQ_markSeen_(ev, received, '受付 ' + c.id);
@@ -695,25 +763,31 @@ function INQ_onAdminPostback_(ev) {
 
 function INQ_button_(ev, p, uid, name) {
   var ss = INQ_book_(), received = INQ_sheet_(ss, INQ_SHEET_RECEIVED, INQ_RECEIVED_HEADER);
-  var reply = null, now = new Date();
+  var reply = null, now = new Date(), colsErr = null;
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     if (INQ_isDuplicate_(ev, received)) return;
     var sh = INQ_sheet_(ss, INQ_SHEET_CASE, INQ_CASE_HEADER), log = INQ_sheet_(ss, INQ_SHEET_LOG, INQ_LOG_HEADER);
-    var c = INQ_cases_(sh).filter(function (x) { return x.id === p.id; })[0];
+    var cs;
+    try { cs = INQ_caseSheet_(sh); } catch (ce) {
+      if (ce && ce.inqCols) colsErr = ce;   // 列の見出しに問題：押した人へ返信してから、エラーとして管理者へ
+      throw ce;
+    }
+    var C = cs.cols.col, c = cs.cases.filter(function (x) { return x.id === p.id; })[0];
     if (!c || !c.token || c.token !== p.token) {
       INQ_markSeen_(ev, received, 'ボタン拒否（合言葉の不一致）');
       reply = 'このボタンは使えません。新しい通知のボタンを押してください。';
     } else {
       var d = INQ_decide(c.state, p.action);
       if (d.changed) {
-        sh.getRange(c.row, INQ_C.state + 1).setValue(d.next);
+        INQ_setCell_(sh, c.row, C, 'state', d.next);
+        var who3 = function (keys) { keys.forEach(function (k, j) { INQ_setCell_(sh, c.row, C, k, [name, uid, now][j]); }); };   // 列が離れていてもよい
         if (d.reason === 'taken') {
-          sh.getRange(c.row, INQ_C.staff + 1, 1, 3).setValues([[name, uid, now]]);
+          who3(['staff', 'staffId', 'takenAt']);
         } else {
-          if (!c.staff) sh.getRange(c.row, INQ_C.staff + 1, 1, 3).setValues([[name, uid, now]]);
-          sh.getRange(c.row, INQ_C.doneBy + 1, 1, 3).setValues([[name, uid, now]]);
+          if (!c.staff) who3(['staff', 'staffId', 'takenAt']);
+          who3(['doneBy', 'doneById', 'doneAt']);
         }
         log.appendRow([now, c.id, d.reason === 'taken' ? '対応開始' : '対応済み', '', uid, ev.webhookEventId || '', '']);
       }
@@ -727,6 +801,9 @@ function INQ_button_(ev, p, uid, name) {
         alreadyDone: what + 'は対応済みです（' + when(c.doneAt) + '・' + (c.doneBy || '担当者') + 'さん）。',
       }[d.reason];
     }
+  } catch (err) {
+    if (colsErr) AC_reply_(ev.replyToken, 'シートの列の見出しに問題があるため、受け付けできませんでした。管理者へ知らせました。');
+    throw err;
   } finally { lock.releaseLock(); }
   if (reply) AC_reply_(ev.replyToken, reply);
 }
@@ -761,6 +838,7 @@ function INQ_classifyFill_() {
     if (!sh || sh.getLastRow() < 2) return 0;
     var log = ss.getSheetByName(INQ_SHEET_LOG);
     var plan = INQ_classifyPlan(sh.getDataRange().getValues(), log ? log.getDataRange().getValues() : []);
+    if (plan.error) { Logger.log('問い合わせの分類・要点：%s（書き込みをやめました。次の回にやり直します）', plan.error); return 0; }
     plan.addHeader.forEach(function (h) { sh.getRange(1, h.col + 1).setValue(h.name).setFontWeight('bold'); });
     plan.fills.forEach(function (f) {
       sh.getRange(f.row + 1, plan.cols.category + 1).setValue(f.category);
@@ -777,6 +855,7 @@ function inqClassifyPreview() {
   if (!sh) { Logger.log('「問い合わせ」タブがありません'); return null; }
   var log = ss.getSheetByName(INQ_SHEET_LOG);
   var plan = INQ_classifyPlan(sh.getDataRange().getValues(), log ? log.getDataRange().getValues() : []);
+  if (plan.error) { Logger.log('問い合わせの分類・要点（確認だけ）：%s', plan.error); return { count: 0, byCategory: {}, error: plan.error }; }
   var by = {};
   plan.fills.forEach(function (f) { by[f.category] = (by[f.category] || 0) + 1; });
   var lines = ['問い合わせの分類・要点（確認だけ・書き込みなし。版 ' + INQ_VERSION + '）',
@@ -801,6 +880,8 @@ function INQ_setup() {
   else { ss = SpreadsheetApp.create('従業員問い合わせ管理'); props.setProperty('INQ_SPREADSHEET_ID', ss.getId()); }
   [[INQ_SHEET_CASE, INQ_CASE_HEADER], [INQ_SHEET_LOG, INQ_LOG_HEADER], [INQ_SHEET_ROUTINE, INQ_ROUTINE_HEADER],
     [INQ_SHEET_RECEIVED, INQ_RECEIVED_HEADER], [INQ_SHEET_GUIDED, INQ_GUIDED_HEADER]].forEach(function (s) { INQ_sheet_(ss, s[0], s[1]); });
+  var cols = INQ_caseCols(ss.getSheetByName(INQ_SHEET_CASE).getRange(1, 1, 1, Math.max(1, ss.getSheetByName(INQ_SHEET_CASE).getLastColumn())).getValues()[0]);
+  Logger.log('「%s」タブの列の見出し：%s', INQ_SHEET_CASE, cols.ok ? 'OK（並べ替え・非表示でも動きます）' : INQ_colsMessage(cols));   // 見出しは直さない（管理本部が確認）
   var first = ss.getSheetByName('シート1');
   if (first && ss.getSheets().length > 1 && first.getLastRow() === 0) ss.deleteSheet(first);
   Logger.log('問い合わせの準備：完了（版 %s）。INQ_MODE=%s。記録先：%s', INQ_VERSION, props.getProperty('INQ_MODE') || '未設定', ss.getUrl());
@@ -997,5 +1078,6 @@ if (typeof module !== 'undefined') {
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
     INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho,
+    INQ_C: INQ_C, INQ_caseCols: INQ_caseCols, INQ_colsMessage: INQ_colsMessage, INQ_newCaseRow: INQ_newCaseRow, INQ_rowToCase: INQ_rowToCase,
     INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows });
 }

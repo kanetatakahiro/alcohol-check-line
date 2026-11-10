@@ -109,3 +109,23 @@ test('INQ分類: Inquiry.gs が無くても1時間ごとの処理はエラーに
   g.ctx.alcoholCheckImportTot();
   assert.ok(true);
 });
+
+test('INQ分類: まとめのお知らせはシートの「分類」「要点」を使う。確認用の関数は件数と文字数だけ（氏名・本文は出さない）', () => {
+  const { g, book } = setup({ INQ_MODE: 'record' });
+  post(g, msg(U(1), '今月の給与明細はいつ見られますか？'));
+  post(g, msg(U(2), '11/8の退勤の打刻を忘れてしまいました'));
+  g.ctx.alcoholCheckImportTot();
+  book.getSheetByName('問い合わせ').getRange(3, 23).setValue('勤怠（手で修正）');
+  const text = g.ctx.INQ_remindText(g.ctx.INQ_cases_(book.getSheetByName('問い合わせ')), new Date('2026-11-10T15:00:00+09:00'));
+  assert.match(text, /^【問い合わせ 未完了2件】11\/10 15:00/);
+  assert.match(text, /要約：⚠給与・明細／給与／明細/);
+  assert.match(text, /要約：勤怠（手で修正）／11\/8／退勤／打刻/);
+  const n = g.fetches.length, l = g.logs.length;
+  const res = g.ctx.INQ_remindPreview();
+  g.ctx.INQ_remind();                                                                         // record の間は送らない
+  assert.equal(g.fetches.length, n);
+  assert.equal(res.count, 2);
+  const log = g.logs.slice(l).join('\n');
+  assert.match(log, /未完了 2件（未対応 2件・対応中 0件）／文字数 \d+/);
+  assert.ok(!/試験|給与|打刻|ひょうじ/.test(log));
+});

@@ -113,38 +113,45 @@ test('INQ: 対応中への追記の通知は30分に1回まで（未対応・対
   assert.equal(X.INQ_shouldNotifyAppend(S.done, 0, t0), false);
 });
 
-test('INQ: 新しい問い合わせの通知（冒頭・機密・ボタン2つ）', () => {
-  const c = { id: 'Q-20261105-003', who: '試験 一郎（部署A）', at: jst('2026-11-05T14:12:00'), head: '明日のシフトの件で確認したいことがあり…', secret: false, state: '未対応', token: 'a1b2c3' };
+test('INQ: 新しい問い合わせの通知（名前・状況・要約・内容・ボタン2つ。案件番号は本文に出さない）', () => {
+  const c = { id: 'Q-20261105-003', at: jst('2026-11-05T14:12:00'), head: '明日のシフトの件で確認したいことがあり…', secret: false, state: '未対応', token: 'a1b2c3',
+    name: '試験 一郎', dept: '部署A', link: '登録済み', lineName: 'いちろう', category: 'シフト・希望休', point: 'シフト' };
   const m = X.INQ_newCaseMessage(c);
   assert.equal(m.type, 'flex');
   const texts = [...m.contents.body.contents].map((x) => x.text);
-  assert.deepEqual(texts, ['【問い合わせ】Q-20261105-003', '従業員：試験 一郎（部署A）', '受付：11/5（木） 14:12',
-    '内容：「明日のシフトの件で確認したいことがあり…」', '状況：未対応']);
+  assert.deepEqual(texts, ['【問い合わせ】11/5 14:12', '試験 一郎（部署A）', '状況：未対応', '要約：シフト・希望休／シフト', '内容：「明日のシフトの件で確認したいことがあり…」']);
+  assert.ok(!m.altText.includes('Q-'));
   const acts = [...m.contents.footer.contents].map((b) => b.action);
   assert.deepEqual(acts.map((a) => [a.type, a.label, a.data]), [['postback', '対応します', 'inq|1|take|Q-20261105-003|a1b2c3'],
-    ['postback', '対応済みにする', 'inq|1|done|Q-20261105-003|a1b2c3']]);
+    ['postback', '対応済みにする', 'inq|1|done|Q-20261105-003|a1b2c3']]);   // ボタンの中身は今までどおり
   for (const a of acts) assert.ok(!/^(入社|退社|取消|部門登録|承認|却下)/.test(a.displayText));   // ほかの機能が反応する形にしない
   const s = X.INQ_newCaseMessage({ ...c, secret: true });
-  assert.equal(s.contents.body.contents[3].text, '内容：（内容はチャットで確認）');
-  assert.ok(X.INQ_newCaseText({ ...c, secret: true }).includes('（内容はチャットで確認）'));
+  assert.equal(s.contents.body.contents[3].text, '要約：シフト・希望休');
+  assert.equal(s.contents.body.contents[4].text, '内容：機密を含むため、チャットで確認してください');
+  assert.equal(X.INQ_newCaseText({ ...c, secret: true }), ['【問い合わせ】11/5 14:12', '試験 一郎（部署A）', '状況：未対応', '要約：シフト・希望休', '内容：機密を含むため、チャットで確認してください'].join('\n'));
 });
 
-test('INQ: リマインドの文（並び順・前日から継続・0件はなし）', () => {
+test('INQ: まとめのお知らせ（並び順・前日から・対応中の担当・機密・未登録・要約が空・0件はなし・案件番号なし）', () => {
   const now = jst('2026-11-06T09:00:00');
   assert.equal(X.INQ_remindText([], now), null);
-  assert.equal(X.INQ_remindText([{ id: 'Q-20261105-001', state: '対応済み', who: 'a', at: now, head: 'x' }], now), null);
+  assert.equal(X.INQ_remindText([{ id: 'Q-20261105-001', state: '対応済み', link: '登録済み', name: 'a', at: now, head: 'x' }], now), null);
+  const reg = (name, dept) => ({ link: '登録済み', name, dept });
   const t = X.INQ_remindText([
-    { id: 'Q-20261105-001', state: '対応中', who: '試験 二郎（部署B）', at: jst('2026-11-05T09:00:00'), head: '有給の残りを教えてください', staff: '担当A' },
-    { id: 'Q-20261106-001', state: '未対応', who: '未登録（たろう）', at: jst('2026-11-06T08:10:00'), head: '＊＊＊', secret: true },
-    { id: 'Q-20261105-003', state: '未対応', who: '試験 一郎（部署A）', at: jst('2026-11-05T14:12:00'), head: '明日のシフト' },
-    { id: 'Q-20261104-001', state: '対応済み', who: 'x', at: jst('2026-11-04T09:00:00'), head: 'x' },
+    { id: 'Q-20261105-001', state: '対応中', ...reg('試験 二郎', '部署B'), at: jst('2026-11-05T09:00:00'), head: '有給の残りを教えてください', staff: '担当A', category: '有給・休み', point: '有給' },
+    { id: 'Q-20261106-001', state: '未対応', link: '未登録', lineName: 'たろう', at: jst('2026-11-06T08:10:00'), head: '口座＊＊＊', secret: true, category: '⚠口座・マイナンバー', point: '口座' },
+    { id: 'Q-20261105-003', state: '未対応', ...reg('試験 一郎', '部署A'), at: jst('2026-11-05T14:12:00'), head: '11月8日の退勤の打刻を押し忘れて…', category: '', point: '' },
+    { id: 'Q-20261106-002', state: '未対応', link: '確認待ち', lineName: '', at: jst('2026-11-06T08:30:00'), head: '' },
+    { id: 'Q-20261104-001', state: '対応済み', ...reg('x', 'y'), at: jst('2026-11-04T09:00:00'), head: 'x' },
   ], now);
-  assert.equal(t, ['【問い合わせ・未完了 3件】11/6（金） 09:00',
-    '・Q-20261105-003 試験 一郎（部署A） 未対応【前日から継続】', '  「明日のシフト」',
-    '・Q-20261106-001 未登録（たろう） 未対応', '  （内容はチャットで確認）',
-    '・Q-20261105-001 試験 二郎（部署B） 対応中：担当A【前日から継続】', '  「有給の残りを教えてください」'].join('\n'));
-  const many = Array.from({ length: 300 }, (_, i) => ({ id: 'Q-20261105-' + String(i).padStart(3, '0'), state: '未対応', who: '試験 太郎（部署A）', at: now, head: 'あ'.repeat(20) + '…' }));
+  assert.equal(t, ['【問い合わせ 未完了4件】11/6 9:00',
+    '① 試験 一郎（部署A）\n状況：未対応（前日から）\n要約：勤怠・打刻／11/8／退勤／打刻／押し忘れ\n内容：「11月8日の退勤の打刻を押し忘れて…」',   // 要約が空 → その場で作る
+    '② 氏名不明（たろう）\n状況：未対応\n要約：⚠口座・マイナンバー\n内容：機密を含むため、チャットで確認してください',             // 機密：分類だけ
+    '③ 氏名不明（表示名なし）\n状況：未対応\n要約：－\n内容：「」',
+    '④ 試験 二郎（部署B）\n状況：対応中（担当：担当A）（前日から）\n要約：有給・休み／有給\n内容：「有給の残りを教えてください」'].join('\n\n'));
+  assert.ok(!t.includes('Q-'));
+  const many = Array.from({ length: 300 }, (_, i) => ({ id: 'Q-20261105-' + String(i).padStart(3, '0'), state: '未対応', ...reg('試験 太郎', '部署A'), at: now, head: 'あ'.repeat(20) + '…', category: 'その他', point: 'あ'.repeat(20) }));
   const long = X.INQ_remindText(many, now);
   assert.ok(long.length <= 4900);
-  assert.match(long, /…ほか\d+件/);
+  assert.match(long, /…ほか\d+件はシートで確認$/);
+  assert.match(long, /⑳ 試験 太郎/); assert.match(long, /\(21\) 試験 太郎/);
 });

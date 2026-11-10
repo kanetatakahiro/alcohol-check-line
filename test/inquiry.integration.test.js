@@ -66,8 +66,10 @@ test('INQ結合: 登録済みの従業員の問い合わせ → 受付・勤怠�
   assert.equal(push[0].body.to, GROUP);
   const msg = push[0].body.messages[0];
   assert.equal(msg.type, 'flex');
-  assert.equal(msg.contents.body.contents[1].text, '従業員：試験 一郎（部署A）');
-  assert.equal(msg.contents.body.contents[3].text, '内容：「明日のシフトの件で確認したいことがありま…」');
+  assert.deepEqual([...msg.contents.body.contents].map((x) => x.text), ['【問い合わせ】11/5 14:12', '試験 一郎（部署A）', '状況：未対応',
+    '要約：シフト・希望休／シフト', '内容：「明日のシフトの件で確認したいことがありま…」']);
+  assert.ok(!JSON.stringify(msg.contents.body).includes('Q-'));   // 本文に案件番号は出さない
+  assert.equal(msg.contents.footer.contents[0].action.displayText, '対応します（試験 一郎（部署A））');
   assert.match(dataOf(msg, 0), /^inq\|1\|take\|Q-20261105-001\|[0-9a-f]{6}$/);
   const c = cases(book);
   assert.equal(c.length, 1);
@@ -127,7 +129,8 @@ test('INQ結合: 機密を含むときは通知に内容を出さず、シート
   const n = g.fetches.length;
   post(g, userMsg(U(1), '給与の振込口座を変えたいです。口座番号は1234567です'));
   const msg = since(g, n).push[0].body.messages[0];
-  assert.equal(msg.contents.body.contents[3].text, '内容：（内容はチャットで確認）');
+  assert.equal(msg.contents.body.contents[3].text, '要約：⚠給与・明細');                  // 機密ありは分類だけ
+  assert.equal(msg.contents.body.contents[4].text, '内容：機密を含むため、チャットで確認してください');
   assert.ok(!JSON.stringify(msg).includes('1234567'));
   const c = cases(book)[0];
   assert.equal(c[10], true);
@@ -136,12 +139,13 @@ test('INQ結合: 機密を含むときは通知に内容を出さず、シート
   assert.equal(sheet(book, 'やりとり').dump()[1][3], '給与の振込口座＊＊＊');
 });
 
-test('INQ結合: 未登録の人は「未登録（表示名）」で受け付け、社員番号の案内は1回だけ返信', () => {
+test('INQ結合: 未登録の人は「氏名不明（表示名）」で受け付け、社員番号の案内は1回だけ返信', () => {
   const { g, book } = setup();
   const n = g.fetches.length;
   post(g, userMsg(U(4), '面接の日程について'));
   let s = since(g, n);
-  assert.equal(s.push[0].body.messages[0].contents.body.contents[1].text, '従業員：未登録（よんちゃん）');
+  assert.equal(s.push[0].body.messages[0].contents.body.contents[1].text, '氏名不明（よんちゃん）');
+  assert.equal(cases(book)[0][5], '未登録');                                                 // シートの紐付けは今までどおり
   assert.equal(s.reply.length, 1);
   assert.match(s.reply[0].body.messages[0].text, /社員番号/);
   // 対応済みにした後の新しい問い合わせでも、案内は繰り返さない
@@ -161,7 +165,7 @@ test('INQ結合: LINE確認済みでない人は「確認待ち」（推測で�
   const n = g.fetches.length;
   post(g, userMsg(U(2), '質問があります'));
   const s = since(g, n);
-  assert.equal(s.push[0].body.messages[0].contents.body.contents[1].text, '従業員：確認待ち（じろう）');
+  assert.equal(s.push[0].body.messages[0].contents.body.contents[1].text, '氏名不明（じろう）');
   assert.equal(s.reply.length, 0);
   assert.deepEqual([cases(book)[0][2], cases(book)[0][3], cases(book)[0][5]], ['', '', '確認待ち']);
 });
@@ -190,8 +194,9 @@ test('INQ結合: ボタン（対応します → 二重押し → 対応済み �
   assert.equal(cases(book)[0][16], '管理者');
   post(g, press(`inq|1|take|${id}|${token}`));
   assert.equal(cases(book)[0][1], '対応済み');
-  assert.deepEqual(replies(), [`${id} を 担当Aさんが対応中にしました。`, `${id} は 担当Aさんが対応中です。`,
-    `${id} を対応済みにしました（管理者さん）。`, `${id} は対応済みです（11/5（木） 15:12・管理者さん）。`]);
+  const w = '試験 一郎（部署A）の問い合わせ';   // 案件番号は出さない
+  assert.deepEqual(replies(), [`${w}を、担当Aさんが対応中にしました。`, `${w}は、担当Aさんが対応中です。`,
+    `${w}を対応済みにしました（管理者さん）。`, `${w}は対応済みです（11/5（木） 15:12・管理者さん）。`]);
   assert.equal(g.fetches.filter((f) => f.url.endsWith('/push')).length, 1);   // ボタンの結果は返信だけ（送信数に数えない）
   const kinds = sheet(book, 'やりとり').dump().slice(1).map((r) => r[2]);
   assert.deepEqual(kinds, ['受付', '対応開始', '対応済み']);
@@ -231,7 +236,7 @@ test('INQ結合: 同じ人の追記（未対応は通知しない／対応中は
   g.clock.now += 21 * 60000; post(g, userMsg(U(1), '5通目（31分後）'));
   const pushes = since(g, n1).push.map((p) => p.body.messages[0].text);
   assert.equal(pushes.length, 2);
-  assert.equal(pushes[0], `【問い合わせ・追記】${id} 試験 一郎（部署A）から追記があります。チャットをご確認ください（担当：担当A）`);
+  assert.equal(pushes[0], '【問い合わせ・追記】試験 一郎（部署A）から追記があります。チャットをご確認ください（担当：担当A）');
   assert.equal(cases(book)[0][12], 4);
   assert.equal(sheet(book, 'やりとり').dump().filter((r) => r[2] === '追記').length, 4);
   // 対応済みの後は新しい案件
@@ -252,7 +257,7 @@ test('INQ結合: リマインド（未完了だけ・前日から継続・0件�
   const p = since(g, n).push;
   assert.equal(p.length, 1);
   assert.equal(p[0].body.to, GROUP);
-  assert.equal(p[0].body.messages[0].text, '【問い合わせ・未完了 1件】11/7（土） 09:00\n・Q-20261106-001 試験 一郎（部署A） 未対応【前日から継続】\n  「金曜の相談」');
+  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（前日から）\n要約：その他／金曜の相談\n内容：「金曜の相談」');
   g.scriptProps.setProperty('INQ_REMIND_DAYS', 'weekdays');
   const m = g.fetches.length;
   g.ctx.INQ_remind();
@@ -304,12 +309,13 @@ test('INQ結合: グループの部門登録・普段の会話・社員管理AI�
   assert.equal(book.getSheetByName('問い合わせ'), null);
 });
 
-test('INQ結合: リマインドのトリガーは2つ（2回作っても増えない・既存のトリガーには触れない）', () => {
+test('INQ結合: まとめのトリガーは9時台・15時台の2つ（何度作っても増えない・既存のトリガーには触れない）', () => {
   const { g } = setup();
   g.ctx.ScriptApp.newTrigger('alcoholCheckMorning').timeBased().atHour(8).create();
-  g.ctx.INQ_setupTriggers(); g.ctx.INQ_setupTriggers();
-  assert.deepEqual(g.triggers.map((t) => [t.fn, t.at]), [['alcoholCheckMorning', 8], ['INQ_remind', 9], ['INQ_remind', 17]]);
-  g.ctx.INQ_removeTriggers();
+  g.ctx.ScriptApp.newTrigger('INQ_remind').timeBased().atHour(17).create();                   // 以前の17時のトリガーがあっても
+  g.ctx.INQ_setupRemindTriggers(); g.ctx.INQ_setupRemindTriggers(); g.ctx.INQ_setupTriggers();
+  assert.deepEqual(g.triggers.map((t) => [t.fn, t.at]), [['alcoholCheckMorning', 8], ['INQ_remind', 9], ['INQ_remind', 15]]);
+  g.ctx.INQ_removeRemindTriggers();
   assert.deepEqual(g.triggers.map((t) => t.fn), ['alcoholCheckMorning']);
 });
 

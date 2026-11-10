@@ -3,7 +3,8 @@
  *
  * 従業員が公式LINEに1対1で送った「社員番号以外」のメッセージを、問い合わせとして受け付け、
  * 問い合わせ専用のスプレッドシートに記録し、勤怠管理グループへ知らせる（ボタン：対応します／対応済みにする）。
- * 9:00・17:00 に未対応・対応中の案件をまとめて知らせる（INQ_remind・時刻指定のトリガー）。
+ * 9:00・15:00 に未対応・対応中の案件をまとめて知らせる（INQ_remind・時刻指定のトリガー。INQ_setupRemindTriggers で登録）。
+ * 勤怠管理グループへのお知らせには案件番号を出さない（名前・所属・状況・要約・内容）。ボタンの中身には案件番号と合言葉が入る（表示されない）。
  *
  * 既存の「コード.gs」からの呼び出しは3か所だけ：
  *  - AC_handleEvent_：文字以外のメッセージ・postback、社員番号ではない文字 → INQ_onUserEvent_
@@ -25,7 +26,7 @@
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10a';
+var INQ_VERSION = '2026-11-10b';
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -51,7 +52,9 @@ var INQ_SECRET_WORDS = ['パスワード', 'パスコード', '暗証番号', '�
 var INQ_HEAD_LEN = 20;
 var INQ_APPEND_NOTICE_MS = 30 * 60 * 1000;
 var INQ_DEDUPE_ROWS = 2000;     // 受信記録の直近の行数（重複の確認に使う。Workersの再送は最長24時間）
-var INQ_SECRET_LABEL = '（内容はチャットで確認）';
+var INQ_SECRET_LABEL = '機密を含むため、チャットで確認してください';
+var INQ_REMIND_HOURS = [9, 15];
+var INQ_TEXT_MAX = 4900;
 
 // 分類と、そのキーワード（上から順に優先。後から足すときは words に足すだけ）。
 // sensitive：給与・口座・マイナンバー・健康。分類の先頭に「⚠」を付け、ほかの分類より優先する（取り扱いに注意が要るため）
@@ -294,63 +297,95 @@ function INQ_md_(d) {
 /** 純粋関数：一覧・通知に出す内容（機密ありならチャットで確認） */
 function INQ_shownHead(c) { return c.secret ? INQ_SECRET_LABEL : '「' + (c.head || '') + '」'; }
 
+/** 「11/13 9:00」（曜日なし・時は0を付けない） */
+function INQ_mdhm_(d) {
+  var p = INQ_ymd_(d).split('-');
+  return Number(p[1]) + '/' + Number(p[2]) + ' ' + Number(Utilities.formatDate(d, AC_TZ, 'HH')) + ':' + Utilities.formatDate(d, AC_TZ, 'mm');
+}
+
+/** 純粋関数：お知らせに出す名前。登録済みなら「氏名（所属）」、それ以外は「氏名不明（LINE表示名）」。c はシートの値の形（link は「登録済み」など） */
+function INQ_whoShort(c) {
+  if (c.link === '登録済み') return (c.name || '氏名未入力') + '（' + (c.dept || '所属未設定') + '）';
+  return '氏名不明（' + (c.lineName || '表示名なし') + '）';
+}
+
 /**
- * 純粋関数：新しい問い合わせの通知（Flex Message：本文＋ボタン2つ）。
- * c：{ id, who, at(Date), head, secret, state, token }
+ * 純粋関数：要約（分類／要点）。シートの「分類」「要点」が空なら、内容（冒頭）から同じ分類の関数で作る。
+ * 機密ありは分類だけ（要点は出さない）。内容が無ければ「－」
+ */
+function INQ_summary(c) {
+  var cat = String(c.category || '').trim(), pt = String(c.point || '').trim();
+  if (!cat) {
+    var src = String(c.head || '').replace(/…$/, '').trim();
+    if (!src) return '－';
+    var r = INQ_classify(src);
+    cat = r.category; pt = pt || r.point;
+  }
+  return c.secret || !pt ? cat : cat + '／' + pt;
+}
+
+/** 純粋関数：状況（対応中なら担当。受付が今日より前なら「（前日から）」） */
+function INQ_stateLabel(c, now) {
+  var st = c.state === INQ_STATE.doing ? INQ_STATE.doing + '（担当：' + (c.staff || '未設定') + '）' : c.state;
+  return st + (now && c.at && INQ_ymd_(c.at) < INQ_ymd_(now) ? '（前日から）' : '');
+}
+
+/** 純粋関数：1件分の行（名前・状況・要約・内容） */
+function INQ_caseLines(c, now) {
+  return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c)];
+}
+
+/**
+ * 純粋関数：新しい問い合わせの通知（Flex Message：本文＋ボタン2つ）。案件番号は本文に出さない（ボタンの中身にだけ入る）。
+ * c：{ id, at(Date), head, secret, state, token, name, dept, link, lineName, category, point }
  */
 function INQ_newCaseMessage(c) {
-  var lines = ['従業員：' + c.who, '受付：' + INQ_md_(c.at) + ' ' + INQ_hm_(c.at), '内容：' + INQ_shownHead(c), '状況：' + c.state];
-  var title = '【問い合わせ】' + c.id;
+  var title = '【問い合わせ】' + INQ_mdhm_(c.at), who = INQ_whoShort(c);
   var btn = function (label, action, shown) {
     return { type: 'button', style: action === 'take' ? 'primary' : 'secondary', height: 'sm',
-      action: { type: 'postback', label: label, data: INQ_postbackData(action, c.id, c.token), displayText: shown + '（' + c.id + '）' } };
+      action: { type: 'postback', label: label, data: INQ_postbackData(action, c.id, c.token), displayText: (shown + '（' + who + '）').slice(0, 300) } };
   };
   return {
-    type: 'flex', altText: (title + ' ' + c.who).slice(0, 400),
+    type: 'flex', altText: (title + ' ' + who).slice(0, 400),
     contents: { type: 'bubble',
       body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [{ type: 'text', text: title, weight: 'bold', wrap: true }]
-        .concat(lines.map(function (l) { return { type: 'text', text: l, wrap: true, size: 'sm' }; })) },
+        .concat(INQ_caseLines(c, c.at).map(function (l) { return { type: 'text', text: l, wrap: true, size: 'sm' }; })) },
       footer: { type: 'box', layout: 'horizontal', spacing: 'sm', contents: [btn('対応します', 'take', '対応します'), btn('対応済みにする', 'done', '対応済みにします')] } },
   };
 }
 
 /** 純粋関数：新しい問い合わせの通知の文字だけの版（ボタンを送れないときの管理者向け） */
 function INQ_newCaseText(c) {
-  return ['【問い合わせ】' + c.id, '従業員：' + c.who, '受付：' + INQ_md_(c.at) + ' ' + INQ_hm_(c.at),
-    '内容：' + INQ_shownHead(c), '状況：' + c.state].join('\n');
+  return ['【問い合わせ】' + INQ_mdhm_(c.at)].concat(INQ_caseLines(c, c.at)).join('\n');
 }
 
 /** 純粋関数：対応中の案件への追記の短い通知 */
 function INQ_appendText(c) {
-  return '【問い合わせ・追記】' + c.id + ' ' + c.who + 'から追記があります。チャットをご確認ください（担当：' + (c.staff || '未設定') + '）';
+  return '【問い合わせ・追記】' + INQ_whoShort(c) + 'から追記があります。チャットをご確認ください（担当：' + (c.staff || '未設定') + '）';
 }
 
 /**
- * 純粋関数：リマインドの文（0件なら null）。cases：[{ id, state, who, at(Date), head, secret, staff }]
- * 未対応 → 対応中、それぞれ受付の古い順。受付日が今日より前なら「前日から継続」。
+ * 純粋関数：まとめのお知らせの文（0件なら null）。cases：シートの案件（INQ_cases_）
+ * 未対応 → 対応中、それぞれ受付の古い順。案件番号は出さない。4,900文字を超えたら途中で切り「ほか○件はシートで確認」
  */
 function INQ_remindText(cases, now) {
   var list = (cases || []).filter(function (c) { return c.state === INQ_STATE.open || c.state === INQ_STATE.doing; });
   if (!list.length) return null;
-  var today = INQ_ymd_(now);
   list.sort(function (a, b) {
     if (a.state !== b.state) return a.state === INQ_STATE.open ? -1 : 1;
     return a.at.getTime() - b.at.getTime();
   });
-  var out = ['【問い合わせ・未完了 ' + list.length + '件】' + INQ_md_(now) + ' ' + INQ_hm_(now)];
-  var body = [];
-  list.forEach(function (c) {
-    body.push('・' + c.id + ' ' + c.who + ' ' + c.state + (c.state === INQ_STATE.doing ? '：' + (c.staff || '担当未設定') : '')
-      + (INQ_ymd_(c.at) < today ? '【前日から継続】' : '') + '\n  ' + INQ_shownHead(c));
-  });
-  var text = out.concat(body).join('\n');
-  if (text.length <= 4900) return text;
-  var kept = [], len = out[0].length;
+  var mark = function (i) { return i < 20 ? String.fromCharCode(0x2460 + i) : '(' + (i + 1) + ')'; };
+  var head = '【問い合わせ 未完了' + list.length + '件】' + INQ_mdhm_(now);
+  var body = list.map(function (c, i) { var l = INQ_caseLines(c, now); l[0] = mark(i) + ' ' + l[0]; return l.join('\n'); });
+  var text = [head].concat(body).join('\n\n');
+  if (text.length <= INQ_TEXT_MAX) return text;
+  var kept = [], len = head.length;
   for (var i = 0; i < body.length; i++) {
-    if (len + body[i].length + 30 > 4900) break;
-    kept.push(body[i]); len += body[i].length + 1;
+    if (len + 2 + body[i].length + 40 > INQ_TEXT_MAX) break;
+    kept.push(body[i]); len += 2 + body[i].length;
   }
-  return out.concat(kept).concat(['…ほか' + (body.length - kept.length) + '件（「問い合わせ」シートをご覧ください）']).join('\n');
+  return [head].concat(kept).concat(['…ほか' + (body.length - kept.length) + '件はシートで確認']).join('\n\n');
 }
 
 /** 純粋関数：シートの1行 → 案件 */
@@ -409,7 +444,14 @@ function INQ_sheet_(ss, name, header) {
 
 function INQ_cases_(sh) {
   var v = sh.getDataRange().getValues(), out = [];
-  for (var i = 1; i < v.length; i++) if (v[i][INQ_C.id]) out.push(INQ_rowToCase(v[i], i));
+  var head = v[0] || [], ci = head.indexOf(INQ_CLASS_COLS[0]), pi = head.indexOf(INQ_CLASS_COLS[1]);   // 分類・要点（末尾の列。無ければ空）
+  for (var i = 1; i < v.length; i++) {
+    if (!v[i][INQ_C.id]) continue;
+    var c = INQ_rowToCase(v[i], i);
+    c.category = ci === -1 ? '' : String(v[i][ci] == null ? '' : v[i][ci]).trim();
+    c.point = pi === -1 ? '' : String(v[i][pi] == null ? '' : v[i][pi]).trim();
+    out.push(c);
+  }
   return out;
 }
 
@@ -551,8 +593,11 @@ function INQ_receive_(ev, mode) {
       open.who = INQ_caseWho(open);
       after = { kind: 'append', c: open, notify: notify };
     } else {
+      var cls = INQ_classify(stored);
       var c = { id: INQ_nextId(cases.map(function (x) { return x.id; }), today), state: INQ_STATE.open, who: who, at: now,
-        head: INQ_head(stored), secret: secret, token: INQ_token_() };
+        head: INQ_head(stored), secret: secret, token: INQ_token_(),
+        name: match.name ? match.name + (match.retired ? '（退職）' : '') : '', dept: match.dept || '', link: INQ_LINK_LABEL[match.link],
+        lineName: displayName, category: cls.category, point: cls.point };
       var row = INQ_CASE_HEADER.map(function () { return ''; });
       row[INQ_C.id] = c.id; row[INQ_C.state] = c.state; row[INQ_C.code] = match.code ? "'" + match.code : '';
       row[INQ_C.name] = match.name ? match.name + (match.retired ? '（退職）' : '') : ''; row[INQ_C.dept] = match.dept || '';
@@ -623,7 +668,7 @@ function INQ_button_(ev, p, uid, name) {
     var c = INQ_cases_(sh).filter(function (x) { return x.id === p.id; })[0];
     if (!c || !c.token || c.token !== p.token) {
       INQ_markSeen_(ev, received, 'ボタン拒否（合言葉の不一致）');
-      reply = 'このボタンは使えません（' + p.id + '）。新しい通知のボタンを押してください。';
+      reply = 'このボタンは使えません。新しい通知のボタンを押してください。';
     } else {
       var d = INQ_decide(c.state, p.action);
       if (d.changed) {
@@ -638,18 +683,19 @@ function INQ_button_(ev, p, uid, name) {
       }
       INQ_markSeen_(ev, received, 'ボタン ' + p.action + ' ' + c.id + ' ' + d.reason);
       var when = function (dt) { return dt ? INQ_md_(dt) + ' ' + INQ_hm_(dt) : ''; };
+      var what = INQ_whoShort(c) + 'の問い合わせ';   // 案件番号は出さない
       reply = {
-        taken: c.id + ' を ' + name + 'さんが対応中にしました。',
-        done: c.id + ' を対応済みにしました（' + name + 'さん）。',
-        alreadyDoing: c.id + ' は ' + (c.staff || '担当者') + 'さんが対応中です。',
-        alreadyDone: c.id + ' は対応済みです（' + when(c.doneAt) + '・' + (c.doneBy || '担当者') + 'さん）。',
+        taken: what + 'を、' + name + 'さんが対応中にしました。',
+        done: what + 'を対応済みにしました（' + name + 'さん）。',
+        alreadyDoing: what + 'は、' + (c.staff || '担当者') + 'さんが対応中です。',
+        alreadyDone: what + 'は対応済みです（' + when(c.doneAt) + '・' + (c.doneBy || '担当者') + 'さん）。',
       }[d.reason];
     }
   } finally { lock.releaseLock(); }
   if (reply) AC_reply_(ev.replyToken, reply);
 }
 
-// ---- 時刻指定：リマインド（9:00・17:00） ----
+// ---- 時刻指定：まとめのお知らせ（9:00・15:00・土日も。INQ_REMIND_DAYS=weekdays なら土日は送らない） ----
 function INQ_remind() {
   try {
     var mode = INQ_mode_();
@@ -663,7 +709,7 @@ function INQ_remind() {
       .map(function (c) { c.who = INQ_caseWho(c); return c; });
     var text = INQ_remindText(cases, now);
     if (!text) return;
-    if (mode !== 'on') { Logger.log('問い合わせのリマインド（記録のみのため送らない）：未完了 %s件', text.split('\n・').length - 1); return; }
+    if (mode !== 'on') { Logger.log('問い合わせのまとめ（記録のみのため送らない）：%s文字', text.length); return; }
     INQ_send_([{ type: 'text', text: text }], text);
   } catch (err) { INQ_fail_('リマインド', err); }
 }
@@ -723,16 +769,29 @@ function INQ_setup() {
   Logger.log('問い合わせの準備：完了（版 %s）。INQ_MODE=%s。記録先：%s', INQ_VERSION, props.getProperty('INQ_MODE') || '未設定', ss.getUrl());
 }
 
-/** 9:00・17:00 のリマインドのトリガーを作る（既存のトリガーには触れない。2回実行しても増えない） */
-function INQ_setupTriggers() {
-  INQ_removeTriggers();
-  [9, 17].forEach(function (h) { ScriptApp.newTrigger('INQ_remind').timeBased().atHour(h).nearMinute(0).everyDays(1).inTimezone(AC_TZ).create(); });
-  Logger.log('問い合わせのリマインドのトリガーを作りました（9:00・17:00）');
+/** まとめのお知らせのトリガーを 9時台・15時台の2本だけにする（既存のほかのトリガーには触れない。何度実行しても増えない） */
+function INQ_setupRemindTriggers() {
+  INQ_removeRemindTriggers();
+  INQ_REMIND_HOURS.forEach(function (h) { ScriptApp.newTrigger('INQ_remind').timeBased().atHour(h).nearMinute(0).everyDays(1).inTimezone(AC_TZ).create(); });
+  Logger.log('問い合わせのまとめのお知らせのトリガーを作りました（%s時台）', INQ_REMIND_HOURS.join('時台・'));
 }
-
 /** INQ_remind のトリガーだけを消す */
-function INQ_removeTriggers() {
+function INQ_removeRemindTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'INQ_remind') ScriptApp.deleteTrigger(t); });
+}
+/** 以前の名前（同じ動き） */
+function INQ_setupTriggers() { INQ_setupRemindTriggers(); }
+function INQ_removeTriggers() { INQ_removeRemindTriggers(); }
+
+/** 手動確認用：今のシートで、まとめのお知らせの件数と文字数だけを実行ログに出す（送らない。氏名・本文は出さない） */
+function INQ_remindPreview() {
+  var cases = INQ_cases_(INQ_sheet_(INQ_book_(), INQ_SHEET_CASE, INQ_CASE_HEADER));
+  var open = cases.filter(function (c) { return c.state === INQ_STATE.open; }).length;
+  var doing = cases.filter(function (c) { return c.state === INQ_STATE.doing; }).length;
+  var text = INQ_remindText(cases, new Date());
+  Logger.log('問い合わせのまとめ（確認だけ・送信なし。版 ' + INQ_VERSION + '・INQ_MODE=' + INQ_mode_() + '）：未完了 ' + (open + doing) + '件（未対応 ' + open
+    + '件・対応中 ' + doing + '件）／文字数 ' + (text ? text.length : 0) + '（上限 ' + INQ_TEXT_MAX + '）' + (text && /…ほか\d+件はシートで確認$/.test(text) ? '／途中で切ります' : ''));
+  return { count: open + doing, length: text ? text.length : 0 };
 }
 
 /** すぐに止める（記録・送信・返信をすべてしない）。トリガーは残るが何もしない */
@@ -756,5 +815,5 @@ if (typeof module !== 'undefined') {
     INQ_messageSummary: INQ_messageSummary, INQ_matchEmployee: INQ_matchEmployee, INQ_whoLabel: INQ_whoLabel,
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
-    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
+    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
 }

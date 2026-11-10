@@ -70,7 +70,7 @@ test('INQ結合: 登録済みの従業員の問い合わせ → 受付・勤怠�
     '要約：シフト・希望休／シフト', '内容：「明日のシフトの件で確認したいことがありま…」']);
   assert.ok(!JSON.stringify(msg.contents.body).includes('Q-'));   // 本文に案件番号は出さない
   assert.equal(msg.contents.footer.contents[0].action.displayText, '対応します（試験 一郎（部署A））');
-  assert.match(dataOf(msg, 0), /^inq\|1\|take\|Q-20261105-001\|[0-9a-f]{6}$/);
+  assert.match(dataOf(msg, 0), /^inq\|1\|take\|Q-20261105-001\|[a-f][0-9a-f]{5}$/);   // 先頭は英字（数字だけだとシートで数値に変わるため）
   const c = cases(book);
   assert.equal(c.length, 1);
   assert.deepEqual([c[0][0], c[0][1], c[0][2], c[0][3], c[0][4], c[0][5]], ['Q-20261105-001', '未対応', '90001', '試験 一郎', '部署A', '登録済み']);
@@ -341,4 +341,15 @@ test('INQ結合: 設定表示に問い合わせの項目とトリガーが出る
   assert.match(text, /INQ_SPREADSHEET_ID：設定あり/);
   assert.match(text, /・INQ_remind（時間主導）$/m);
   assert.ok(!text.includes(g.scriptProps.getProperty('INQ_SPREADSHEET_ID') + '）'));
+});
+
+test('INQ結合: ボタンの合言葉は先頭が英字（数字だけの合言葉がシートで数値に変わってボタンが使えなくなるのを防ぐ）', () => {
+  const { g } = setup();
+  const orig = g.ctx.Utilities.getUuid;
+  g.ctx.Utilities.getUuid = () => '01234567-89ab-cdef-0123-456789abcdef';   // 以前なら「012345」になる
+  const t = g.ctx.INQ_token_();
+  g.ctx.Utilities.getUuid = orig;
+  assert.match(t, /^[a-f][0-9a-f]{5}$/);
+  assert.equal(t, 'a12345');
+  for (let i = 0; i < 200; i++) assert.match(g.ctx.INQ_token_(), /^[a-f][0-9a-f]{5}$/);
 });

@@ -481,7 +481,11 @@ function INQ_markSeen_(ev, received, result) {
   if (id) CacheService.getScriptCache().put(INQ_cacheKey_(id), '1', 21600);
 }
 
-function INQ_token_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 6).toLowerCase(); }
+// 先頭を必ず英字（a〜f）にする：数字だけの合言葉（例 012345）はスプレッドシートが数値に変えて先頭の0が消え、ボタンが使えなくなるため
+function INQ_token_() {
+  var h = Utilities.getUuid().replace(/-/g, '').toLowerCase();
+  return 'abcdef'.charAt(parseInt(h.charAt(0), 16) % 6) + h.slice(1, 6);
+}
 
 /** 送り先：INQ_NOTIFY_TO=admin なら管理者の個別LINE、それ以外は勤怠管理グループ（無ければ管理者） */
 function INQ_targets_() {

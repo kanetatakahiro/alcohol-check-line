@@ -25,11 +25,14 @@
  * 要注意の分類（⚠の付いた分類：ハラスメント・人間関係／給与・明細／口座・マイナンバー／健康・体調）は、受付時のお知らせ・まとめの
  *  どちらでも分類名だけを出し、要点と内容は出さない（「（内容はチャットで確認してください）」）。版 2026-11-10c
  *
+ * FAQ回答マスター（INQ_setupFaq・版 2026-11-10d）：問い合わせ管理シートに「FAQ回答マスター」タブを作る準備用の関数（手動で1回）。
+ *  回答文は仕様書（docs/REBIRTH_support_spec.md）の【文面案】。タブがあれば何もしない。今は読まれるだけで、受付・返信の動きは変えない。
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10c';
+var INQ_VERSION = '2026-11-10d';
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -803,6 +806,150 @@ function INQ_setup() {
   Logger.log('問い合わせの準備：完了（版 %s）。INQ_MODE=%s。記録先：%s', INQ_VERSION, props.getProperty('INQ_MODE') || '未設定', ss.getUrl());
 }
 
+// ---- FAQ回答マスター（版 2026-11-10d。計画書 docs/REBIRTH_support_PLAN.md 5-2） ----
+// 今は「タブを作るだけ」。問い合わせの受付・返信・お知らせはこのタブを読まない（返信は計画書の手順4・5で作る）。
+// 回答文は仕様書 docs/REBIRTH_support_spec.md の【文面案】そのまま（11/10 会社の確認済み）。段落の間は空行。
+// 会社の決定（11/10）で直した行：TOT-03（承認は翌月3日まで）、PL-04（取消はToTのスケジュール申請から・記事8301）。
+// 仕様書に文面案の無い行は、回答文を空にして「有効」をオフにする（管理本部が文面を入れてからオンにする）。
+// spec：文面案の場所（仕様書の節番号／見出し）。テストで仕様書の原文と同じかを確かめる
+var INQ_SHEET_FAQ = 'FAQ回答マスター';
+var INQ_FAQ_HEADER = ['FAQ番号', '有効', '分類', 'キーワード', '除外キーワード', '回答文', 'ボタン', '必ず引き継ぐ', '緊急', '最終更新日', '更新者'];
+var INQ_FAQ_CHECK_COLS = [2, 8, 9];   // チェックボックスの列（有効・必ず引き継ぐ・緊急。1始まり）
+var INQ_FAQ_ROWS = [
+  // ToTにログインできない（追加の質問：画面・ログイン・エラー）4-1・2-5（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "TOT-01", category: "勤怠・打刻", words: "ログインできない、ログイン、パスワード、入れない", exclude: "打刻申請、打刻忘れ", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // 打刻忘れ・打刻間違い 4-2
+  { id: "TOT-02", category: "勤怠・打刻", words: "打刻忘れ、打ち忘れ、押し忘れ、打刻間違い、打刻ミス、打刻申請、打刻の修正", exclude: "承認、申請中", button: "解決確認", handoff: false, urgent: false, spec: "4-2/LINE回答例",
+    text: "お問い合わせありがとうございます！😊\n\n打刻忘れや打刻間違いは、Touch On Timeから修正申請をお願いいたします。\n\n操作方法はこちらをご確認ください。\n\nhttps://help.touchontime.com/totfaq/s/article/8301\n\n操作がわからない場合は、お気軽にお知らせください！" },
+  // 打刻修正が承認されない 4-3（承認は翌月3日まで：会社の決定）
+  { id: "TOT-03", category: "勤怠・打刻", words: "承認されない、承認されてない、申請中、承認", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "4-3/LINE回答例",
+    text: "お問い合わせありがとうございます！😊\n\n打刻修正の申請は、翌月3日までに承認処理を行っています。\n\nそれまでは「申請中」の状態になっていれば問題ございませんので、そのままお待ちください。\n\n申請ができていない場合や、操作方法がわからない場合はお知らせください！" },
+  // 遅刻・欠勤 4-4
+  { id: "TOT-04", category: "勤怠・打刻", words: "遅刻、欠勤、遅れます、休みます", exclude: "有給", button: "", handoff: false, urgent: false, spec: "4-4/LINE回答例",
+    text: "遅刻・欠勤のご連絡は、以下の勤怠連絡フォームからお願いいたします。\n\nhttps://docs.google.com/forms/d/e/1FAIpQLSfMc6SWJkjnJfqPfobUJt1NDvzQTuSjir97IMW_YTOctLJvFw/viewform\n\n体調不良による欠勤の場合は、事前に直属の上長の了承を得てからご入力ください。" },
+  // 希望休 4-5（月4日まで・土日は原則不可：会社の決定）（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "TOT-05", category: "シフト・希望休", words: "希望休", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // シフト変更 4-5（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "TOT-06", category: "シフト・希望休", words: "シフト変更、シフトを変え、シフトの変更", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // スケジュール申請 4-6（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "TOT-07", category: "シフト・希望休", words: "スケジュール申請、スケジュール", exclude: "有給", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // 残業申請 4-7
+  { id: "TOT-08", category: "勤怠・打刻", words: "残業、時間外、残業申請", exclude: "残業代", button: "解決確認", handoff: false, urgent: false, spec: "4-7/LINE回答例",
+    text: "お問い合わせありがとうございます！😊\n\n残業・時間外勤務の申請は、Touch On Timeからお願いいたします。\n\n操作方法はこちらをご確認ください。\n\nhttps://help.touchontime.com/totfaq/s/article/5201\n\n操作がわからない場合は、お気軽にお知らせください！" },
+  // Myレコーダーで打刻できない 4-8（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "TOT-09", category: "勤怠・打刻", words: "Myレコーダー、マイレコーダー、打刻できない", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // 有給の申請 5
+  { id: "PL-01", category: "有給・休み", words: "有給、有休、有給申請、有給休暇", exclude: "取消、取り消、期限、過ぎ、承認、残り、残日数", button: "解決確認", handoff: false, urgent: false, spec: "5-2/有給申請",
+    text: "お問い合わせありがとうございます！😊\n\n有給休暇はTouch On Timeから申請をお願いいたします。\n\n申請期限は、取得希望月の前月15日までとなっています。\n\n操作方法はこちらをご確認ください。\n\nhttps://help.touchontime.com/totfaq/s/article/6301" },
+  // 有給の期限超過 5
+  { id: "PL-02", category: "有給・休み", words: "期限を過ぎ、期限が過ぎ、期限切れ、間に合わ", exclude: "", button: "", handoff: true, urgent: false, spec: "5-2/申請期限を過ぎた場合",
+    text: "有給休暇の申請期限は前月15日までとなっています。\n\n期限を過ぎている場合は、管理本部で個別に確認いたします。\n\nご希望の取得日をお知らせください。" },
+  // 有給が承認されない 5
+  { id: "PL-03", category: "有給・休み", words: "承認されない、未承認、承認されてない", exclude: "打刻", button: "解決確認", handoff: false, urgent: false, spec: "5-2/未承認の場合",
+    text: "有給休暇の申請は、申請期限後に順次確認しています。\n\nシフト確定前の場合は、承認処理をお待ちください。\n\nシフト確定後も未承認の場合は、管理本部へ確認を引き継ぎます。" },
+  // 有給の取消 5（スケジュール申請・記事8301：会社の決定）
+  { id: "PL-04", category: "有給・休み", words: "取消、取り消し、取り消、キャンセル", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "5-2/取消できない場合",
+    text: "有給休暇の申請取消についてですね。\n\n有給休暇の取消は、Touch On Timeの「スケジュール申請」から行えます。\n\n操作方法はこちらをご確認ください。\n\nhttps://help.touchontime.com/totfaq/s/article/8301\n\n操作できない場合は、どの画面で進めなくなったかお知らせください。\n\n解決しない場合は管理本部へ引き継ぎます。" },
+  // 有給の残日数（給与明細で確認）5（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "PL-05", category: "有給・休み", words: "残り、残日数、何日残", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // 給与明細 6
+  { id: "PAY-01", category: "給与・明細", words: "給与明細、明細、ネットde顧問", exclude: "金額、違う、控除、ログイン、表示されない、入っていない、振り込まれていない", button: "解決確認", handoff: false, urgent: false, spec: "6-3/給与明細",
+    text: "お問い合わせありがとうございます！😊\n\n給与明細は「ネットde顧問」からご確認いただけます。\n\nhttps://www1.shalom-house.jp/komon/login.aspx\n\nログインできない場合や明細が表示されない場合は、お知らせください。" },
+  // 給与の支給日 6
+  { id: "PAY-02", category: "給与・明細", words: "支給日、給料日、給与日、いつ振り込", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "6-3/給与支給日",
+    text: "給与のお支払いは翌月末となっています。\n\n月末が土日祝日の場合は、その前の営業日が支給日となります。" },
+  // 明細のログイン・表示・金額・控除 6（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "PAY-03", category: "給与・明細", words: "金額が違う、金額、控除、ログインできない、表示されない", exclude: "", button: "", handoff: true, urgent: false, spec: "",
+    text: "" },
+  // 給与未入金 6
+  { id: "PAY-04", category: "給与・明細", words: "入っていない、入金されていない、振り込まれていない、未入金、届いていない", exclude: "", button: "", handoff: true, urgent: true, spec: "6-3/給与未入金",
+    text: "給与のお振込みが確認できないとのこと、承知いたしました。\n\n管理本部へ確認を引き継ぎます。\n\n確認対象の給与月をお知らせください。" },
+  // 住所変更 7
+  { id: "DOC-001", category: "書類・手続き", words: "住所変更、引っ越し、住所が変わ", exclude: "", button: "", handoff: true, urgent: false, spec: "7-2/住所変更",
+    text: "お問い合わせありがとうございます！😊\n\n住所が変更になった場合は、管理本部へLINEでご連絡ください。\n\n必要なお手続きについて担当者からご案内いたします。" },
+  // 扶養家族の変更 7
+  { id: "DOC-002", category: "書類・手続き", words: "扶養", exclude: "", button: "", handoff: true, urgent: false, spec: "7-2/扶養家族の変更",
+    text: "扶養家族の追加・変更については、管理本部で確認いたします。\n\n担当者へ引き継ぎますので、必要なお手続きについては管理本部からの案内をお待ちください。" },
+  // 在職・就労証明書 7
+  { id: "DOC-003", category: "書類・手続き", words: "在職証明、就労証明、証明書", exclude: "", button: "", handoff: true, urgent: false, spec: "7-2/在職・就労証明書",
+    text: "在職証明書・就労証明書の発行についてですね。\n\n管理本部で対応いたします。\n\n必要な書類の種類と提出先、希望期限がわかればお知らせください。" },
+  // 退職希望（まず上長へ）7
+  { id: "DOC-004", category: "書類・手続き", words: "退職、辞めたい、やめたい", exclude: "", button: "", handoff: false, urgent: false, spec: "7-2/退職希望",
+    text: "退職についてのご相談ですね。\n\nまずは直属の上長へご相談をお願いいたします。\n\n退職が決まった後のお手続きについては、別途ご案内いたします。" },
+  // 氏名・銀行口座等の変更 7
+  { id: "DOC-005", category: "口座・マイナンバー", words: "口座変更、口座、氏名変更、名字が変わ、苗字が変わ", exclude: "", button: "", handoff: true, urgent: false, spec: "7-2/氏名・口座変更",
+    text: "氏名や給与振込口座の変更については、管理本部へ直接ご連絡ください。\n\n口座番号などの詳細情報は、このチャットには送信せず、管理本部からの案内に従ってください。" },
+  // アルコールチェック忘れ 8
+  { id: "ALC-01", category: "アルコールチェック", words: "チェック忘れ、忘れ、し忘れ、実施漏れ", exclude: "故障、壊れ", button: "", handoff: false, urgent: false, spec: "8-3/アルコールチェック忘れ",
+    text: "アルコールチェックの実施漏れについてですね。\n\n必要な確認を行い、所定の方法で報告してください。\n\n運転前のチェックができていない場合は、必要な確認が完了するまで運転しないでください。" },
+  // チェッカーの故障 8
+  { id: "ALC-02", category: "アルコールチェック", words: "故障、壊れ、動かない、反応しない、不具合", exclude: "", button: "", handoff: true, urgent: false, spec: "8-3/チェッカー故障",
+    text: "アルコールチェッカーの不具合について、管理本部へ確認を引き継ぎます。\n\n機器の状態を確認するため、どのような不具合が発生しているかお知らせください。" },
+  // 免許証の紛失・運転資格の問題 9-1（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "LIC-01", category: "車両・免許", words: "免許証をなくし、免許証を紛失、免許の紛失、免許停止、免停", exclude: "", button: "", handoff: true, urgent: false, spec: "",
+    text: "" },
+  // 社用車の事故・故障 10
+  { id: "CAR-01", category: "車両・免許", words: "事故、故障、ぶつけ、追突、パンク", exclude: "保険会社", button: "", handoff: true, urgent: true, spec: "10-3/事故・故障",
+    text: "社用車の事故・故障が発生した場合は、まず直属の上長へ速やかに報告してください。\n\n事故の場合は、安全確保・負傷者の救護・警察への連絡など、必要な対応を優先してください。\n\n保険に関する対応は管理本部が担当します。\n\n保険会社への事故状況の説明や交渉、補償に関する約束などを、自己判断で進めないでください。\n\n管理本部または上長の指示に従って対応をお願いいたします。" },
+  // 上長に連絡がつかない 10
+  { id: "CAR-02", category: "車両・免許", words: "上長に連絡がつかない、連絡がつかない、つながらない", exclude: "", button: "", handoff: true, urgent: false, spec: "10-3/上長に連絡がつかない",
+    text: "直属の上長に連絡がつかない場合は、別の責任者へ速やかに連絡してください。\n\n事故現場では、安全確保・負傷者の救護・警察への連絡など、必要な対応を優先してください。\n\n保険に関する対応は、管理本部の指示に従ってください。" },
+  // 保険会社から連絡があった 10
+  { id: "CAR-03", category: "車両・免許", words: "保険会社", exclude: "", button: "", handoff: true, urgent: false, spec: "10-3/保険会社から連絡があった",
+    text: "保険会社から直接連絡があった場合は、まず管理本部へ報告してください。\n\n管理本部から指示があった場合に限り、ご本人で対応をお願いいたします。\n\n自己判断で事故状況の説明や補償に関する交渉・約束を進めないようお願いいたします。" },
+  // 入社時の初期設定（LINE・ToT）11（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "NEW-01", category: "その他", words: "初期設定、入社、ログインのやり方、登録のやり方", exclude: "", button: "解決確認", handoff: false, urgent: false, spec: "",
+    text: "" },
+  // 制服・備品の追加・交換 12-3（仕様書に文面案なし：回答文は空・有効はオフ）
+  { id: "UNI-01", category: "その他", words: "制服、備品、交換、追加でほしい", exclude: "", button: "", handoff: true, urgent: false, spec: "",
+    text: "" },
+  // 勤務中のケガ 13
+  { id: "INJ-01", category: "健康・体調", words: "ケガ、けが、怪我、負傷、骨折", exclude: "", button: "", handoff: true, urgent: true, spec: "13-2",
+    text: "勤務中のおケガについてですね。\n\nまずは安全を確保し、必要に応じて医療機関を受診してください。\n\n直属の上長へ速やかに報告し、管理本部にもご連絡をお願いいたします。" },
+  // 人間関係・ハラスメント 14（「管理本部」を選んだときだけ引き継ぐ）
+  { id: "HAR-01", category: "ハラスメント・人間関係", words: "ハラスメント、パワハラ、セクハラ、モラハラ、いじめ、嫌がらせ、人間関係", exclude: "", button: "相談先", handoff: false, urgent: false, spec: "14-2",
+    text: "ご相談ありがとうございます。\n\n職場の人間関係やハラスメントに関するご相談は、ご本人が相談先を選ぶことができます。\n\n管理本部、直属の上長、別の責任者への相談のほか、以下のフォームからもご相談いただけます。\n\nhttps://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_ILLnQk0R7Q/viewform?usp=header\n\nご希望の相談方法をお知らせください。" },
+  // 要望・改善提案 15
+  { id: "REQ-01", category: "その他", words: "要望、改善、提案、意見", exclude: "", button: "", handoff: false, urgent: false, spec: "15-2",
+    text: "会社へのご意見や改善提案については、専用フォームから受け付けています！😊\n\nこちらからご入力をお願いいたします。\n\nhttps://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_ILLnQk0R7Q/viewform?usp=header" },
+];
+
+/** 純粋関数：FAQ回答マスターの初期の行（見出しを除く）。有効は回答文があるときだけ */
+function INQ_faqSheetRows(today) {
+  return INQ_FAQ_ROWS.map(function (f) {
+    return [f.id, !!f.text, f.category, f.words, f.exclude, f.text, f.button, f.handoff, f.urgent, today, 'INQ_setupFaq（初期値）'];
+  });
+}
+
+/**
+ * 準備用（エディタから手動で実行）：問い合わせ管理シートに「FAQ回答マスター」タブを作り、初期の行を入れる。
+ * タブがすでにあれば何もしない（上書き・行の追加をしない。何度実行しても同じ）。送信・返信はしない
+ */
+function INQ_setupFaq() {
+  var ss = INQ_book_(), lock = LockService.getScriptLock(), made = null;
+  lock.waitLock(20000);
+  try {
+    if (!ss.getSheetByName(INQ_SHEET_FAQ)) {
+      var rows = INQ_faqSheetRows(INQ_ymd_(new Date())), w = INQ_FAQ_HEADER.length;
+      var sh = ss.insertSheet(INQ_SHEET_FAQ);
+      sh.getRange(1, 1, 1, w).setValues([INQ_FAQ_HEADER]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+      INQ_FAQ_CHECK_COLS.forEach(function (c) { sh.getRange(2, c, rows.length, 1).insertCheckboxes(); });
+      sh.getRange(2, 1, rows.length, w).setValues(rows);
+      made = { rows: rows.length, active: rows.filter(function (r) { return r[1] === true; }).length };
+    }
+  } finally { lock.releaseLock(); }
+  if (!made) { Logger.log('「%s」タブはすでにあるため、何もしませんでした（版 %s）', INQ_SHEET_FAQ, INQ_VERSION); return { created: false, rows: 0, active: 0 }; }
+  Logger.log('「%s」タブを作りました（版 %s）：%s行（有効 %s行・回答文が空で有効オフ %s行）', INQ_SHEET_FAQ, INQ_VERSION, made.rows, made.active, made.rows - made.active);
+  return { created: true, rows: made.rows, active: made.active };
+}
+
 /** まとめのお知らせのトリガーを 9時台・15時台の2本だけにする（既存のほかのトリガーには触れない。何度実行しても増えない） */
 function INQ_setupRemindTriggers() {
   INQ_removeRemindTriggers();
@@ -849,5 +996,6 @@ if (typeof module !== 'undefined') {
     INQ_messageSummary: INQ_messageSummary, INQ_matchEmployee: INQ_matchEmployee, INQ_whoLabel: INQ_whoLabel,
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
-    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho });
+    INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho,
+    INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows });
 }

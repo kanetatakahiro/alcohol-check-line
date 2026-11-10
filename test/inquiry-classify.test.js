@@ -149,5 +149,5 @@ test('INQ分類: ハラスメント・人間関係（⚠・ほかの⚠と同数
   assert.equal(g.ctx.INQ_shownHead({ head: 'あいう' }, true), '（内容はチャットで確認してください）');
   assert.equal(g.ctx.INQ_shownHead({ head: 'あいう', secret: true }, true), '機密を含むため、チャットで確認してください');   // 機密の表示が優先
   assert.equal(g.ctx.INQ_shownHead({ head: 'あいう' }, false), '「あいう」');
-  assert.equal(g.ctx.INQ_VERSION, '2026-11-10c');
+  assert.ok(g.ctx.INQ_VERSION >= '2026-11-10c');   // 10c 以降の版に含まれる
 });

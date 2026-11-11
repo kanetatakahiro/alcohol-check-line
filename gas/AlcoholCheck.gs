@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-11a';
+var AC_CODE_VERSION = '2026-11-11b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1935,10 +1935,10 @@ function AC_nightSelfMessage(items, today) {
   var parts = ['お疲れ様です😊\n勤怠のお知らせです。'];
   if (punch.length) {
     parts.push('【打刻】\n' + punch.join('\n') + '\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。'
-      + (form ? '\n→ お休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームからご連絡をお願いいたします。\n' + AC_FORM_URL : ''));
+      + (form ? '\n→ お休みに変更となった場合は、Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。' : ''));
   }
   if (ot.length) parts.push('【今月の残業】\n' + ot.join('\n'));
-  parts.push('遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。');
+  parts.push(form ? 'ご対応のほどよろしくお願いいたします！' : '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。');   // 当日の出勤打刻なしがあるときは締めを変える
   return parts.join('\n\n').slice(0, 4900);
 }
 

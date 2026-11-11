@@ -76,7 +76,8 @@ test('夜の本人向け：on で1人1通。4項目が重なっても1通／チ�
   assert.match(t1, /本日11\/12（木）の退勤打刻がまだ確認できません。/); assert.match(t1, /・11\/10（火）の打刻が確認できません。/); assert.match(t1, /・11\/11（水）の打刻が確認できません。/);
   assert.match(t1, /45時間に達しました（現在 46\.0時間）/); assert.match(t1, /Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」/);
   assert.ok(!/30時間/.test(t1));
-  assert.match(text(self[1]), /出勤予定ですが、出勤打刻が確認できません。/); assert.match(text(self[1]), /勤怠連絡フォーム/); assert.match(text(self[1]), /30時間を超えました（現在 31\.0時間）/);
+  assert.match(text(self[1]), /出勤予定ですが、出勤打刻が確認できません。/); assert.match(text(self[1]), /Touch On Timeから欠勤の申請/); assert.ok(!/勤怠連絡フォーム|docs\.google/.test(text(self[1])));
+  assert.ok(text(self[1]).endsWith('ご対応のほどよろしくお願いいたします！')); assert.ok(t1.endsWith('体調にはお気をつけください。')); assert.match(text(self[1]), /30時間を超えました（現在 31\.0時間）/);
   const t3 = text(self[2]);
   assert.match(t3, /30時間を超えました/); assert.ok(!/打刻/.test(t3));            // 打刻漏れ（ATT-02）は除く
   assert.ok(!/試験|9000/.test(self.map(text).join('')));                           // 文面に氏名・社員番号は入れない
@@ -192,10 +193,31 @@ test('夜の本人向け：文面（打刻だけ／打刻＋残業30時間／残
   const d = X.AC_nightSelfMessage([{ kind: 'noClockIn' }, { kind: 'noClockOut' }], '2026-11-12');
   assert.equal(d, [head, '【打刻】\n・本日11/12（木）の退勤打刻がまだ確認できません。勤務中の場合は、退勤時に打刻をお願いいたします。\n'
     + '・本日11/12（木）は出勤予定ですが、出勤打刻が確認できません。\n' + guide
-    + '\n→ お休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームからご連絡をお願いいたします。\n' + X.AC_FORM_URL, tail].join('\n\n'));
-  for (const s of [a, b, c, d]) {
-    assert.ok(!/くださいね|してね|ましょうね/.test(s), s);                 // 「〜くださいね」は使わない
-    assert.ok(s.includes('遅くまでお疲れ様でした。'));                       // 労いは残す
+    + '\n→ お休みに変更となった場合は、Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。', 'ご対応のほどよろしくお願いいたします！'].join('\n\n'));
+  for (const s of [a, b, c, d]) assert.ok(!/くださいね|してね|ましょうね/.test(s), s);   // 「〜くださいね」は使わない
+  for (const s of [a, b, c]) assert.ok(s.endsWith(tail));                                 // 出勤打刻なしが無いときは労いの締め
+  assert.ok(X.AC_CODE_VERSION >= '2026-11-11b');
+});
+
+// 2026-11-11b：当日の出勤打刻なし（noClockIn）が1つでもあれば締めを「ご対応のほどよろしくお願いいたします！」に。勤怠連絡フォームのURLは出さない
+test('夜の本人向け：締めの切り替え（出勤打刻なしあり／なし）', () => {
+  const X = createGas({ files: FILES, now: '2026-11-12T22:31:00+09:00' }).ctx;
+  const care = '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。', ask = 'ご対応のほどよろしくお願いいたします！';
+  const cases = [
+    [[{ kind: 'noClockIn' }], ask],
+    [[{ kind: 'noClockIn' }, { kind: 'punch', date: '2026-11-10' }, { kind: 'ot45', min: 2760 }], ask],
+    [[{ kind: 'ot30', min: 1860 }, { kind: 'noClockIn' }], ask],
+    [[{ kind: 'noClockOut' }], care],
+    [[{ kind: 'punch', date: '2026-11-10' }], care],
+    [[{ kind: 'punch', date: '2026-11-10' }, { kind: 'ot30', min: 1860 }], care],
+    [[{ kind: 'ot45', min: 2760 }], care],
+  ];
+  for (const [items, end] of cases) {
+    const s = X.AC_nightSelfMessage(items, '2026-11-12');
+    assert.ok(s.endsWith('\n\n' + end), JSON.stringify(items));
+    assert.equal(s.includes(ask), end === ask);
+    assert.equal(s.includes('遅くまでお疲れ様でした。'), end === care);
+    assert.ok(!s.includes(X.AC_FORM_URL) && !s.includes('勤怠連絡フォーム'));
+    assert.equal(s.includes('Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。'), end === ask);
   }
-  assert.equal(X.AC_CODE_VERSION, '2026-11-11a');
 });

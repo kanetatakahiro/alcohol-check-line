@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-10c';
+var AC_CODE_VERSION = '2026-11-11a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1926,19 +1926,19 @@ function AC_nightSelfMessage(items, today) {
   var list = (items || []).slice().sort(function (a, b) { return (order[a.kind] - order[b.kind]) || ((a.date || '') < (b.date || '') ? -1 : (a.date || '') > (b.date || '') ? 1 : 0); });
   var punch = [], ot = [], form = false;
   list.forEach(function (it) {
-    if (it.kind === 'noClockOut') punch.push('・今日' + md(today) + 'の退勤の打刻が、まだありません。勤務中の方は、終わったときに打刻してください');
-    else if (it.kind === 'noClockIn') { punch.push('・今日' + md(today) + 'は出勤の予定ですが、打刻がありません'); form = true; }
-    else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の打刻が確認できません');
-    else if (it.kind === 'ot30') ot.push('・今月の残業が30時間をこえました（いま ' + h(it.min) + '時間）。無理のないようにしてくださいね');
-    else if (it.kind === 'ot45') ot.push('・今月の残業が45時間に達しました（いま ' + h(it.min) + '時間）。これからの業務の量について、上長に相談してください');
+    if (it.kind === 'noClockOut') punch.push('・本日' + md(today) + 'の退勤打刻がまだ確認できません。勤務中の場合は、退勤時に打刻をお願いいたします。');
+    else if (it.kind === 'noClockIn') { punch.push('・本日' + md(today) + 'は出勤予定ですが、出勤打刻が確認できません。'); form = true; }
+    else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の打刻が確認できません。');
+    else if (it.kind === 'ot30') ot.push('・今月の残業時間が30時間を超えました（現在 ' + h(it.min) + '時間）。無理のない働き方を心がけてください。');
+    else if (it.kind === 'ot45') ot.push('・今月の残業時間が45時間に達しました（現在 ' + h(it.min) + '時間）。今後の業務量について、上長にご相談ください。');
   });
-  var parts = ['お疲れ様です😊 勤怠のお知らせです。'];
+  var parts = ['お疲れ様です😊\n勤怠のお知らせです。'];
   if (punch.length) {
-    parts.push('【打刻】\n' + punch.join('\n') + '\n→ Touch On Time で確かめて、打刻がもれていたら「打刻修正の申請」をお願いします。'
-      + (form ? '\n→ お休みに変わった場合は、上長の承認のうえ、勤怠連絡フォームでお知らせください。\n' + AC_FORM_URL : ''));
+    parts.push('【打刻】\n' + punch.join('\n') + '\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。'
+      + (form ? '\n→ お休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームからご連絡をお願いいたします。\n' + AC_FORM_URL : ''));
   }
   if (ot.length) parts.push('【今月の残業】\n' + ot.join('\n'));
-  parts.push('遅くまでお疲れ様でした。ゆっくり休んでくださいね。');
+  parts.push('遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。');
   return parts.join('\n\n').slice(0, 4900);
 }
 

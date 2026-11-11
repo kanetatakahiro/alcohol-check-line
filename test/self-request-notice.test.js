@@ -215,7 +215,7 @@ test('診断：送らず・書き込まずに、本番の処理が最後まで�
   g.clock.now = DAY(27);
   putLatest(g, { employees: EMP, requests: REQ, workings: [] });
   const t = diagnose(g);
-  assert.match(t, /版 2026-11-10c/);
+  assert.match(t, /版 2026-11-1\d[a-z]/);   // 2026-11-10c 以降
   assert.ok(!/× /.test(t), t);
   assert.match(t, /→ 本番の処理は最後まで進みます/);
   assert.match(t, /employees array 3件／requests array 4件／workings array 0件/);

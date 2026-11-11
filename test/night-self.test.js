@@ -73,12 +73,12 @@ test('夜の本人向け：on で1人1通。4項目が重なっても1通／チ�
   const self = toSelf(p);
   assert.deepEqual(self.map((f) => f.body.to), [U(1), U(2), U(3)]);              // 四郎さん（全部OFF）・五郎さん（LINE未登録）には送らない
   const t1 = text(self[0]);
-  assert.match(t1, /退勤の打刻が、まだありません/); assert.match(t1, /11\/10（火）の打刻/); assert.match(t1, /11\/11（水）の打刻/);
-  assert.match(t1, /45時間に達しました（いま 46\.0時間）/); assert.match(t1, /Touch On Time.*打刻修正の申請/);
+  assert.match(t1, /本日11\/12（木）の退勤打刻がまだ確認できません。/); assert.match(t1, /・11\/10（火）の打刻が確認できません。/); assert.match(t1, /・11\/11（水）の打刻が確認できません。/);
+  assert.match(t1, /45時間に達しました（現在 46\.0時間）/); assert.match(t1, /Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」/);
   assert.ok(!/30時間/.test(t1));
-  assert.match(text(self[1]), /出勤の予定ですが、打刻がありません/); assert.match(text(self[1]), /勤怠連絡フォーム/); assert.match(text(self[1]), /30時間をこえました（いま 31\.0時間）/);
+  assert.match(text(self[1]), /出勤予定ですが、出勤打刻が確認できません。/); assert.match(text(self[1]), /勤怠連絡フォーム/); assert.match(text(self[1]), /30時間を超えました（現在 31\.0時間）/);
   const t3 = text(self[2]);
-  assert.match(t3, /30時間をこえました/); assert.ok(!/打刻/.test(t3));            // 打刻漏れ（ATT-02）は除く
+  assert.match(t3, /30時間を超えました/); assert.ok(!/打刻/.test(t3));            // 打刻漏れ（ATT-02）は除く
   assert.ok(!/試験|9000/.test(self.map(text).join('')));                           // 文面に氏名・社員番号は入れない
   assert.equal(p.filter((f) => f.body.to === ADMIN).length, 1);                    // 管理者への45時間の通知は今までどおり
   const rows = logRows(mf);
@@ -174,4 +174,28 @@ test('夜の本人向け：設定の表示と版', () => {
   assert.match(t, /コードの版：2026-11-(09d|1\d[a-z])/);   // 2026-11-09d 以降
   assert.equal(g.ctx.AC_attNotifyMode_({ getProperty: () => 'true' }), 'on');
   assert.equal(g.ctx.AC_attNotifyMode_({ getProperty: () => null }), '');
+});
+
+// 口調のルール（docs/TONE_RULES.md・2026-11-11）：文面だけを直した（版 2026-11-11a）。全文で確かめる
+test('夜の本人向け：文面（打刻だけ／打刻＋残業30時間／残業45時間／当日の打刻なし）と口調のルール', () => {
+  const X = createGas({ files: FILES, now: '2026-11-12T22:31:00+09:00' }).ctx;
+  const head = 'お疲れ様です😊\n勤怠のお知らせです。';
+  const tail = '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。';
+  const guide = '→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。';
+  const a = X.AC_nightSelfMessage([{ kind: 'punch', date: '2026-11-09' }], '2026-11-12');
+  assert.equal(a, [head, '【打刻】\n・11/9（月）の打刻が確認できません。\n' + guide, tail].join('\n\n'));
+  const b = X.AC_nightSelfMessage([{ kind: 'ot30', min: 1860 }, { kind: 'punch', date: '2026-11-10' }, { kind: 'punch', date: '2026-11-09' }], '2026-11-12');
+  assert.equal(b, [head, '【打刻】\n・11/9（月）の打刻が確認できません。\n・11/10（火）の打刻が確認できません。\n' + guide,
+    '【今月の残業】\n・今月の残業時間が30時間を超えました（現在 31.0時間）。無理のない働き方を心がけてください。', tail].join('\n\n'));
+  const c = X.AC_nightSelfMessage([{ kind: 'ot45', min: 2760 }], '2026-11-12');
+  assert.equal(c, [head, '【今月の残業】\n・今月の残業時間が45時間に達しました（現在 46.0時間）。今後の業務量について、上長にご相談ください。', tail].join('\n\n'));
+  const d = X.AC_nightSelfMessage([{ kind: 'noClockIn' }, { kind: 'noClockOut' }], '2026-11-12');
+  assert.equal(d, [head, '【打刻】\n・本日11/12（木）の退勤打刻がまだ確認できません。勤務中の場合は、退勤時に打刻をお願いいたします。\n'
+    + '・本日11/12（木）は出勤予定ですが、出勤打刻が確認できません。\n' + guide
+    + '\n→ お休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームからご連絡をお願いいたします。\n' + X.AC_FORM_URL, tail].join('\n\n'));
+  for (const s of [a, b, c, d]) {
+    assert.ok(!/くださいね|してね|ましょうね/.test(s), s);                 // 「〜くださいね」は使わない
+    assert.ok(s.includes('遅くまでお疲れ様でした。'));                       // 労いは残す
+  }
+  assert.equal(X.AC_CODE_VERSION, '2026-11-11a');
 });

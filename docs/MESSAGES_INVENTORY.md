@@ -38,7 +38,7 @@
 | ATTENDANCE_NOTIFY | on（11/11 22:30 から送信開始） | 本番の設定（11/11 12:03 確認） |
 | ATTENDANCE_TEST | 未設定（削除済み） | 本番の設定（11/11 12:03 確認） |
 | TEST_CODES | 未設定 | 本番の設定（11/10 確認） |
-| INQ_MODE | record（11/13 8:15 に on の予定） | CHANGELOG 11/10 |
+| INQ_MODE | record（11/13 10:15 に on の予定） | CHANGELOG 11/10 |
 
 ---
 

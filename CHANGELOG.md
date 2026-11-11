@@ -1,5 +1,12 @@
 # 変更履歴
 
+## 2026-11-11 12:03 本番反映（版 2026-11-11b）
+- コード.gs を da4d77b5ef8f2c08（版2026-11-11b）に差し替え（反映前 ac28964c796aacd9 を確認）
+- Webアプリ バージョン25 を既存デプロイの編集で公開（説明：夜の勤怠通知 2026-11-11b（欠勤の案内・締めの切り替え））
+- alcoholCheckShowSettings：版2026-11-11b、ATTENDANCE_NOTIFY=on、ATTENDANCE_TEST 未設定
+- alcoholCheckNightSelfPreview：15人・打刻漏れ23件、フォームURLなし・「くださいね」なし
+- 戻し方：コード.gs を ac28964c796aacd9（11a）に戻し、Webアプリを再公開。緊急停止は ATTENDANCE_NOTIFY を削除
+
 ## 2026-11-11 夜の本人向けの勤怠のお知らせ：出勤打刻なしの案内と締めの文（コード.gs 版 2026-11-11b・ブランチ feature/notification-settings・本番未導入）
 - 11/11 安藤さんの指示。AC_nightSelfMessage の文面だけを変更
 - 当日の出勤打刻なし（noClockIn）の案内：勤怠連絡フォームの案内とURLをやめ、「→ お休みに変更となった場合は、Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。」に

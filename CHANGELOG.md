@@ -1,5 +1,13 @@
 # 変更履歴
 
+## 2026-11-12 11:14 VPS 反映（src/tot-relay.js）
+- さくらのVPS（rocky@os3-385-25745、~/alcohol-check-line、main efe846b）の src/tot-relay.js を、コミット 7df26f1 の版に置き換え
+- 置き換え前：sha256 60cfe72a…（指紋 0cac0e2109df88df）。置き換え後：sha256 808e422b…（指紋 82e456a1a4feae56）
+- バックアップ：~/tot-relay.js.bak-20261112
+- plan('2026-11-12','night')：10行（うち /requests/ 6行）。node --env-file の手動実行・cron の変更はしていない
+- 注意：VPS の作業ツリーは main と差分あり（src/tot-relay.js）。feature/notification-settings を main に入れるまで、VPS で git pull はしない
+- 戻し方：cp ~/tot-relay.js.bak-20261112 ~/alcohol-check-line/src/tot-relay.js（コード.gs を先に戻すこと）
+
 ## 2026-11-12 10:48 本番設定変更：お知らせ設定を有効化（NOTICE_SETTINGS=on）
 - 確認：通知送信履歴に「お知らせ設定でOFF（記録のみ）」の記録は0件（11/9の record 開始以降、チェックなしの人への送信なし）
 - スクリプトプロパティ NOTICE_SETTINGS を record → on。alcoholCheckShowSettings で確認（コードの版 2026-11-12a）

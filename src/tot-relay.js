@@ -20,7 +20,7 @@ export function addDays(date, n) {
 /**
  * 取得する範囲。
  *  朝（morning）：シフトは今日から31日先まで、勤務実績は前月1日から昨日まで（シフト反映・勤怠チェック表）
- *  夜（night、20時以降）：上に加えて、今日の予定と打刻（当日の勤怠状況のお知らせ用）
+ *  夜（night、20時以降）：上に加えて、今日の予定と打刻（当日の勤怠状況のお知らせ用）。申請（今月と前月）も取る（申請済みの日に打刻漏れを送らないため）
  *  毎月28日以降の朝：翌月1日〜末日のシフトも取る（翌月分のシフトを管理シートへ反映するため）
  */
 export function nextMonthRange(today) {
@@ -46,13 +46,13 @@ export function plan(today, mode = 'morning', opts = {}) {
     const r = nextMonthRange(today);
     items.push({ name: 'nextSchedules', path: `/daily-schedules?start=${r.start}&end=${r.end}` });
   }
+  // 申請：今月と前月（朝は承認待ちの見守り、夜は申請済みの日を打刻漏れのお知らせから外すため）
+  for (const t of ['timerecords', 'schedules', 'overtimes']) {
+    for (let i = 0; i < 2; i++) items.push({ name: 'requests', group: true, type: t, path: `/requests/${t}/${addMonths(today.slice(0, 7), -i)}` });
+  }
   if (!night) {
     // 36協定：今月と過去11か月の月別勤怠（時間外・休日労働）
     for (let i = 0; i < 12; i++) items.push({ name: 'monthlies', group: true, path: `/monthly-workings/${addMonths(today.slice(0, 7), -i)}` });
-    // 未承認の申請：今月と前月
-    for (const t of ['timerecords', 'schedules', 'overtimes']) {
-      for (let i = 0; i < 2; i++) items.push({ name: 'requests', group: true, type: t, path: `/requests/${t}/${addMonths(today.slice(0, 7), -i)}` });
-    }
     // 有給の年5日：月曜の朝だけ、過去1年分の日別勤怠から有休の日だけを取り出す（61日ずつ）
     if (opts.leaves || new Date(`${today}T00:00:00Z`).getUTCDay() === 1) {
       for (let i = 0; i < 6; i++) {

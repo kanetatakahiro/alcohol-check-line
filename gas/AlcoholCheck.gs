@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-11b';
+var AC_CODE_VERSION = '2026-11-12a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -452,7 +452,7 @@ function AC_processTotRaw_(body) {
     if (night && attMode) {
       var ns = AC_nightSelfRun_(R, mv, today, { mode: attMode, live: live, test: test, names: names, withToday: Array.isArray(R.timerecord) });
       sent += ns.counts.sent; unreg += ns.counts.unreg; testLines = testLines.concat(ns.testLines);
-      Logger.log('夜の本人向け（%s）：送信 %s通／記録 %s人／除外 %s件／送信失敗 %s人', attMode, ns.counts.sent, ns.counts.recorded, ns.counts.excluded, ns.counts.failed);
+      Logger.log('夜の本人向け（%s）：送信 %s通／記録 %s人／除外 %s件／送信失敗 %s人／申請があったので送らない %s件', attMode, ns.counts.sent, ns.counts.recorded, ns.counts.excluded, ns.counts.failed, ns.counts.requested);
     }
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
@@ -1227,17 +1227,32 @@ function AC_selfNoticeTargets(masterValues, today) {
   return out;
 }
 
+/** 申請があれば打刻のお知らせを送らない状態（申請中・承認済み）。却下・取消などの状態の値は本番のデータで未確認のため、この2つだけ */
+var AC_REQUESTED_STATUSES = { applying: 1, approved: 1 };
+
+/**
+ * 純粋関数：申請のある日（同じ人・同じ日に、指定した種類の申請が「申請中」「承認済み」）。
+ * types：申請の種類（timerecords＝打刻申請／schedules＝スケジュール申請（欠勤・有給など）／overtimes＝残業申請）
+ * 戻り値：{ ok（申請のデータがあり、読み取りエラーが無い）, days: { 'TOTコード:YYYY-MM-DD': true } }
+ */
+function AC_requestedDays(R, types) {
+  var ok = Array.isArray(R && R.requests) && !R.requests.some(function (q) { return q && q._error; });
+  var codeByKey = AC_totCodeByKey_((R && R.employees) || []), days = {}, want = {};
+  (types || []).forEach(function (x) { want[x] = true; });
+  ((R && R.requests) || []).forEach(function (q) {
+    if (!q || q._error || !want[q.type] || !AC_REQUESTED_STATUSES[q.status]) return;
+    var tot = codeByKey[q.employeeKey];
+    if (tot && q.date) days[AC_totKey(tot) + ':' + String(q.date).slice(0, 10)] = true;
+  });
+  return { ok: ok, days: days };
+}
+
 /**
  * 純粋関数：未申請の打刻漏れ（TOTのエラー勤務のうち、同じ人・同じ日の打刻申請が「承認待ち」「承認済み」でない日）。
  * 対象は AC_attendanceFindings と同じ（昨日から7日前まで）。戻り値：[{ tot, date }]（日付順）
  */
 function AC_unrequestedPunchErrors(R, today) {
-  var codeByKey = AC_totCodeByKey_(R.employees), requested = {};
-  (R.requests || []).forEach(function (q) {
-    if (!q || q._error || q.type !== 'timerecords' || (q.status !== 'applying' && q.status !== 'approved')) return;
-    var tot = codeByKey[q.employeeKey];
-    if (tot && q.date) requested[AC_totKey(tot) + ':' + String(q.date).slice(0, 10)] = true;
-  });
+  var requested = AC_requestedDays(R, ['timerecords']).days;
   var seen = {};
   return AC_attendanceFindings(R, today).punchErrors.filter(function (p) {
     var k = AC_totKey(p.tot) + ':' + p.date;
@@ -1310,7 +1325,8 @@ function AC_punchSelfNotices_(R, mv, ss, today, props) {
 
 /**
  * 1時間ごと（alcoholCheckImportTot から）：朝のTOT受信で保存された tot-latest.json を使い、管理本部の本人へのお知らせを1日1回行う。
- * Webアプリの版（デプロイ）を変えずに動かすための入口。夜のデータ（申請データなし）・前日のデータ・7〜12時以外では動かない。
+ * Webアプリの版（デプロイ）を変えずに動かすための入口。前日のデータ（夜22:30のデータは翌朝には前日のデータ）・7〜12時以外では動かない。
+ * VPS の中継の更新（2026-11-12）から夜のデータにも申請が入るが、夜の後のこの時間帯（22〜23時）は上の時刻の条件で動かない。
  */
 function AC_selfNoticesHourly_() {
   var props = PropertiesService.getScriptProperties();
@@ -1896,17 +1912,35 @@ function AC_attNotifyMode_(props) {
   return v === 'on' || v === 'true' ? 'on' : v === 'record' ? 'record' : '';
 }
 
-/** 純粋関数：夜の本人向けの項目。[{ tot, kind（noClockOut／noClockIn／punch／ot30／ot45）, nid, key, date, min }] */
-function AC_nightSelfItems(R, today, withToday) {
+/** 夜の本人向けで、申請があれば打刻の項目を外す申請の種類（打刻申請・スケジュール申請（欠勤・有給など）） */
+var AC_NIGHT_REQUEST_TYPES = ['timerecords', 'schedules'];
+
+/**
+ * 純粋関数：夜の本人向けの項目。[{ tot, kind（noClockOut／noClockIn／punch／ot30／ot45）, nid, key, date, min }]
+ * 打刻の項目（当日の退勤・出勤の打刻なし、打刻漏れ）は、同じ人・同じ日に打刻申請かスケジュール申請（申請中・承認済み）があれば外す。
+ * 申請のデータが無い・読み取りエラーがあるとき（中継の更新前など）は、申請済みの人に誤って依頼を送らないため、打刻の項目を全部外す。
+ * info（任意）：{ requested（申請があったので外した件数）, noRequests（申請のデータが無いので打刻の項目を外したか）, noRequestsSkipped（その件数） }
+ */
+function AC_nightSelfItems(R, today, withToday, info) {
+  info = info || {};
+  info.requested = 0; info.noRequests = false; info.noRequestsSkipped = 0;
   var f = AC_attendanceFindings(R, today), month = today.slice(0, 7), out = [], seen = {};
+  var req = AC_requestedDays(R, AC_NIGHT_REQUEST_TYPES);
+  if (!req.ok) info.noRequests = true;
   var add = function (it) { if (!seen[it.key]) { seen[it.key] = 1; out.push(it); } };
+  var addPunch = function (it, date) {   // 打刻の項目：申請があれば外す（同じ項目は1回だけ数える）
+    if (seen[it.key]) return;
+    if (!req.ok) { seen[it.key] = 1; info.noRequestsSkipped++; return; }
+    if (req.days[AC_totKey(it.tot) + ':' + date]) { seen[it.key] = 1; info.requested++; return; }
+    add(it);
+  };
   if (withToday && Array.isArray(R.timerecord)) {
     AC_todayStatus(R, today).forEach(function (t) {
-      add({ tot: t.tot, kind: t.kind, nid: 'ATT-02', key: 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), date: null });
+      addPunch({ tot: t.tot, kind: t.kind, nid: 'ATT-02', key: 'att:' + today + ':today:' + t.kind + ':' + AC_totKey(t.tot), date: null }, today);
     });
   }
   f.punchErrors.forEach(function (p) {
-    add({ tot: p.tot, kind: 'punch', nid: 'ATT-02', key: 'att:' + p.date + ':punch:' + AC_totKey(p.tot), date: p.date });
+    addPunch({ tot: p.tot, kind: 'punch', nid: 'ATT-02', key: 'att:' + p.date + ':punch:' + AC_totKey(p.tot), date: p.date }, p.date);
   });
   Object.keys(f.overtime).forEach(function (tot) {
     var min = f.overtime[tot];
@@ -1938,7 +1972,7 @@ function AC_nightSelfMessage(items, today) {
       + (form ? '\n→ お休みに変更となった場合は、Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。' : ''));
   }
   if (ot.length) parts.push('【今月の残業】\n' + ot.join('\n'));
-  parts.push(form ? 'ご対応のほどよろしくお願いいたします！' : '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。');   // 当日の出勤打刻なしがあるときは締めを変える
+  parts.push(form ? 'ご対応のほどよろしくお願いいたします！' : 'ご確認のほどよろしくお願いいたします！');   // 当日の出勤打刻なしがあるときは締めを変える
   return parts.join('\n\n').slice(0, 4900);
 }
 
@@ -1950,9 +1984,12 @@ function AC_nightSelfMessage(items, today) {
 function AC_nightSelfRun_(R, mv, today, o) {
   o = o || {};
   var preview = o.mode === 'preview', sendLive = o.mode === 'on' && o.live === true;
-  var items = AC_nightSelfItems(R, today, o.withToday);
+  var itemInfo = {};
+  var items = AC_nightSelfItems(R, today, o.withToday, itemInfo);
   var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
-  var counts = { people: 0, sent: 0, recorded: 0, excluded: 0, unreg: 0, failed: 0, kinds: {}, reasons: {} };
+  var counts = { people: 0, sent: 0, recorded: 0, excluded: 0, unreg: 0, failed: 0, kinds: {}, reasons: {},
+    requested: itemInfo.requested, noRequests: itemInfo.noRequests, noRequestsSkipped: itemInfo.noRequestsSkipped };
+  if (itemInfo.noRequests) Logger.log('夜の本人向け：申請のデータが無い（または読み取りエラー）ため、打刻の項目 %s件を送りません（残業の項目は送ります）', itemInfo.noRequestsSkipped);
   var people = [], testLines = [], logs = [];
   var setOn = function (id, code) {
     if (typeof AC_noticeEffective !== 'function' || typeof AC_noticeIndex_ !== 'function') return true;   // Notices.gs が無いとき
@@ -2047,6 +2084,8 @@ function alcoholCheckNightSelfPreview() {
     '送る人数：' + c.people + '人（1人1通。うち LINE未登録で届かない ' + c.unreg + '人）',
     '項目：退勤の打刻なし ' + (k.noClockOut || 0) + '件／出勤の打刻なし ' + (k.noClockIn || 0) + '件／打刻漏れ ' + (k.punch || 0) + '件／残業30時間 ' + (k.ot30 || 0) + '人／残業45時間 ' + (k.ot45 || 0) + '人',
     '除外：' + reasons,
+    '申請があったので送らない：' + (c.requested || 0) + '件（打刻申請・スケジュール申請が申請中・承認済みの日）'
+      + (c.noRequests ? '／申請のデータが無い（または読み取りエラー）ため、打刻の項目 ' + c.noRequestsSkipped + '件を送らない' : ''),
   ];
   res.people.filter(function (p) { return p.line; }).slice(0, 3).forEach(function (p, i) { lines.push('―― 文面の例' + (i + 1) + '（' + p.kinds.length + '項目）――\n' + p.text); });
   Logger.log(lines.join('\n'));
@@ -3629,7 +3668,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

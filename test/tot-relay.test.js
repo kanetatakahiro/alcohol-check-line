@@ -57,7 +57,13 @@ test('TOT中継: 朝は月別勤怠12か月と申請（今月・前月）、月�
   assert.equal(pl.length, 6);
   assert.ok(pl[0].path.endsWith('start=2026-08-12&end=2026-10-11'));
   assert.ok(mon[0].path.includes('additionalFields=hiredDate'));
-  assert.equal(plan('2026-10-12', 'night').filter(x => x.group).length, 0);
+  // 夜は申請（今月・前月）だけを取る（2026-11-12a）。月別勤怠・有休は取らない
+  const nightGroups = plan('2026-10-12', 'night').filter(x => x.group);
+  assert.deepEqual(nightGroups.map(x => x.name + ':' + x.type), ['timerecords', 'timerecords', 'schedules', 'schedules', 'overtimes', 'overtimes'].map(t => 'requests:' + t));
+  assert.ok(nightGroups[0].path.endsWith('/requests/timerecords/2026-10') && nightGroups[1].path.endsWith('/requests/timerecords/2026-09'));
+  assert.equal(plan('2026-10-12', 'night').length, 10);   // 夜のAPIの呼び出しは4回 → 10回
+  assert.deepEqual(plan('2026-10-13').map(x => x.path), plan('2026-10-13', 'morning').map(x => x.path));
+  assert.equal(plan('2026-10-13').length, 22);            // 朝は今までどおり（4＋月別12＋申請6）
   assert.equal(addMonths('2026-01', -1), '2025-12');
 });
 

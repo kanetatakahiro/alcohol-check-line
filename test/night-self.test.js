@@ -28,6 +28,7 @@ function results(today = '2026-11-12', extra = []) {
       W('k004', '2026-11-05', { overtime: 2100 }), W('k004', '2026-11-11', { isError: true }),
       W('k005', '2026-11-11', { isError: true }), ...extra] }],
     timerecord: [{ dailyWorkings: [{ employeeKey: 'k001', date: today, timeRecord: [{ code: '1' }] }] }],
+    requests: [],   // 版 2026-11-12a から夜にも申請が届く（空＝申請なし）
   };
 }
 
@@ -77,7 +78,7 @@ test('夜の本人向け：on で1人1通。4項目が重なっても1通／チ�
   assert.match(t1, /45時間に達しました（現在 46\.0時間）/); assert.match(t1, /Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」/);
   assert.ok(!/30時間/.test(t1));
   assert.match(text(self[1]), /出勤予定ですが、出勤打刻が確認できません。/); assert.match(text(self[1]), /Touch On Timeから欠勤の申請/); assert.ok(!/勤怠連絡フォーム|docs\.google/.test(text(self[1])));
-  assert.ok(text(self[1]).endsWith('ご対応のほどよろしくお願いいたします！')); assert.ok(t1.endsWith('体調にはお気をつけください。')); assert.match(text(self[1]), /30時間を超えました（現在 31\.0時間）/);
+  assert.ok(text(self[1]).endsWith('ご対応のほどよろしくお願いいたします！')); assert.ok(t1.endsWith('ご確認のほどよろしくお願いいたします！')); assert.match(text(self[1]), /30時間を超えました（現在 31\.0時間）/);
   const t3 = text(self[2]);
   assert.match(t3, /30時間を超えました/); assert.ok(!/打刻/.test(t3));            // 打刻漏れ（ATT-02）は除く
   assert.ok(!/試験|9000/.test(self.map(text).join('')));                           // 文面に氏名・社員番号は入れない
@@ -181,7 +182,7 @@ test('夜の本人向け：設定の表示と版', () => {
 test('夜の本人向け：文面（打刻だけ／打刻＋残業30時間／残業45時間／当日の打刻なし）と口調のルール', () => {
   const X = createGas({ files: FILES, now: '2026-11-12T22:31:00+09:00' }).ctx;
   const head = 'お疲れ様です😊\n勤怠のお知らせです。';
-  const tail = '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。';
+  const tail = 'ご確認のほどよろしくお願いいたします！';
   const guide = '→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。';
   const a = X.AC_nightSelfMessage([{ kind: 'punch', date: '2026-11-09' }], '2026-11-12');
   assert.equal(a, [head, '【打刻】\n・11/9（月）の打刻が確認できません。\n' + guide, tail].join('\n\n'));
@@ -202,7 +203,7 @@ test('夜の本人向け：文面（打刻だけ／打刻＋残業30時間／残
 // 2026-11-11b：当日の出勤打刻なし（noClockIn）が1つでもあれば締めを「ご対応のほどよろしくお願いいたします！」に。勤怠連絡フォームのURLは出さない
 test('夜の本人向け：締めの切り替え（出勤打刻なしあり／なし）', () => {
   const X = createGas({ files: FILES, now: '2026-11-12T22:31:00+09:00' }).ctx;
-  const care = '遅くまでお疲れ様でした。\n無理をせず、体調にはお気をつけください。', ask = 'ご対応のほどよろしくお願いいたします！';
+  const care = 'ご確認のほどよろしくお願いいたします！', ask = 'ご対応のほどよろしくお願いいたします！';
   const cases = [
     [[{ kind: 'noClockIn' }], ask],
     [[{ kind: 'noClockIn' }, { kind: 'punch', date: '2026-11-10' }, { kind: 'ot45', min: 2760 }], ask],
@@ -216,8 +217,73 @@ test('夜の本人向け：締めの切り替え（出勤打刻なしあり／�
     const s = X.AC_nightSelfMessage(items, '2026-11-12');
     assert.ok(s.endsWith('\n\n' + end), JSON.stringify(items));
     assert.equal(s.includes(ask), end === ask);
-    assert.equal(s.includes('遅くまでお疲れ様でした。'), end === care);
+    assert.ok(!s.includes('遅くまでお疲れ様でした。'));                   // 2026-11-12a：締めは2つの1行だけ
     assert.ok(!s.includes(X.AC_FORM_URL) && !s.includes('勤怠連絡フォーム'));
     assert.equal(s.includes('Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。'), end === ask);
   }
+});
+
+// ---------------- 2026-11-12a：申請のある日は打刻の項目を送らない ----------------
+const REQ = (k, type, date, status) => ({ type, date, requestedDate: '2026-11-11', employeeKey: k, requestKey: 'r-' + k + type + date + status, status });
+function reqResults() {
+  // 一郎：打刻漏れ 11/7（申請中）・11/8（承認済み）・11/9（却下）・11/10（申請なし）／
+  // 二郎：打刻漏れ 11/10・11/11 がどちらも申請済み（ほかの項目なし）／三郎：本日の出勤打刻なし・本日に有給のスケジュール申請（承認済み）
+  return {
+    employees: EMP,
+    schedules: [{ dailySchedules: [{ employeeKey: 'k003', date: '2026-11-12', clockInSchedule: '2026-11-12T09:00:00+09:00' }] }],
+    workings: [{ dailyWorkings: ['2026-11-07', '2026-11-08', '2026-11-09', '2026-11-10'].map((d) => W('k001', d, { isError: true }))
+      .concat([W('k002', '2026-11-10', { isError: true }), W('k002', '2026-11-11', { isError: true })]) }],
+    timerecord: [{ dailyWorkings: [] }],
+    requests: [REQ('k001', 'timerecords', '2026-11-07', 'applying'), REQ('k001', 'timerecords', '2026-11-08', 'approved'),
+      REQ('k001', 'timerecords', '2026-11-09', 'rejected'),
+      REQ('k002', 'timerecords', '2026-11-10', 'applying'), REQ('k002', 'schedules', '2026-11-11', 'approved'),
+      REQ('k003', 'schedules', '2026-11-12', 'approved'), REQ('k001', 'overtimes', '2026-11-10', 'applying')],
+  };
+}
+
+test('夜の本人向け（2026-11-12a）：申請中・承認済みの日は送らない。却下・申請なしの日だけ送る／全部申請済みの人には送らない／休暇の申請の日は出勤打刻なしも出さない', () => {
+  const { g, mf } = setup({ ATTENDANCE_NOTIFY: 'on' });
+  const p = toSelf(night(g, '2026-11-12', reqResults()));
+  assert.deepEqual(p.map((f) => f.body.to), [U(1)]);                                 // 二郎さん・三郎さんには1通も送らない
+  const s = text(p[0]);
+  assert.match(s, /・11\/9（月）の打刻が確認できません。/); assert.match(s, /・11\/10（火）の打刻が確認できません。/);
+  assert.ok(!/11\/7|11\/8/.test(s));                                                // 申請中・承認済みの日は出さない
+  assert.ok(!/出勤打刻が確認できません/.test(s));
+  // 外した項目は送信履歴にも、送った記録（att:）にも残さない（申請が取り消されたら次の晩に送れる）
+  const keys = Object.keys(g.userProps.getProperties());
+  assert.ok(!keys.some((k) => /2026-11-0[78]:punch|:today:noClockIn:003|2026-11-1[01]:punch:002/.test(k)));
+  assert.ok(!logRows(mf).some((r) => /2026-11-0[78]:punch|noClockIn/.test(r[5])));
+});
+
+test('夜の本人向け（2026-11-12a）：AC_nightSelfItems と管理本部の打刻漏れ（E-42）は同じ判定の関数を使い、E-42 の結果は変わらない', () => {
+  const X = createGas({ files: FILES, now: '2026-11-12T22:31:00+09:00' }).ctx;
+  const R = reqResults(), info = {};
+  const items = [...X.AC_nightSelfItems(R, '2026-11-12', true, info)].map((x) => x.kind + ':' + x.tot + ':' + (x.date || ''));
+  assert.deepEqual(items, ['punch:001:2026-11-09', 'punch:001:2026-11-10']);
+  assert.equal(info.requested, 5);                                                   // 一郎2件・二郎2件・三郎の出勤打刻なし1件
+  assert.equal(info.noRequests, false);
+  // E-42：打刻申請だけを見る（スケジュール申請の日 11/11 は今までどおり残る）
+  const e42 = JSON.parse(JSON.stringify(X.AC_unrequestedPunchErrors(R, '2026-11-12')));
+  assert.deepEqual(e42.map((x) => x.tot + ':' + x.date), ['001:2026-11-09', '001:2026-11-10', '002:2026-11-11']);
+  const d = X.AC_requestedDays(R, ['timerecords', 'schedules']);
+  assert.equal(d.ok, true);
+  assert.deepEqual(Object.keys(d.days).sort(), ['1:2026-11-07', '1:2026-11-08', '2:2026-11-10', '2:2026-11-11', '3:2026-11-12']);   // キーは AC_totKey（先頭の0を除く）
+});
+
+test('夜の本人向け（2026-11-12a）：申請のデータが無い・読み取りエラーのときは、打刻の項目を送らない（残業は送る）。ログと確認用の関数に件数', () => {
+  for (const requests of [undefined, [{ _error: 403, path: '/requests/timerecords/2026-11' }]]) {
+    const { g } = setup({ ATTENDANCE_NOTIFY: 'on' });
+    const r = results(); if (requests) r.requests = requests; else delete r.requests;
+    const l = g.logs.length;
+    const p = toSelf(night(g, '2026-11-12', r));
+    assert.deepEqual(p.map((f) => f.body.to), [U(1), U(2), U(3)]);                 // 残業の項目がある人だけ
+    for (const f of p) { assert.ok(!/【打刻】/.test(text(f))); assert.match(text(f), /【今月の残業】/); }
+    assert.match(g.logs.slice(l).join("\n"), /申請のデータが無い（または読み取りエラー）ため、打刻の項目 (%s|\d+)件を送りません/);   // 模擬環境のログは %s を置き換えない
+  }
+  const { g } = setup({ ATTENDANCE_NOTIFY: 'record' });
+  g.drive.files['tot-latest.json'] = { content: JSON.stringify({ today: '2026-11-12', fetchedAt: 'x', results: reqResults() }), updated: new Date('2026-11-12T22:30:10+09:00').getTime() };
+  const l = g.logs.length;
+  const res = g.ctx.alcoholCheckNightSelfPreview();
+  assert.equal(res.counts.requested, 5);
+  assert.match(g.logs.slice(l).join('\n'), /申請があったので送らない：5件/);
 });

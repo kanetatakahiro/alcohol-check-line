@@ -82,3 +82,15 @@ test('TOT中継: 有休の日だけを取り出す（半休は0.5、時間休は
   assert.equal(r.requests[0].message, undefined);   // 申請理由などは送らない
   assert.deepEqual(r.requests[1], { _error: 403, path: '/y' });
 });
+
+test('TOT中継（版 2026-11-13d）：スケジュール申請だけ、申請メッセージと申請内容の要約も渡す', () => {
+  const r = {};
+  collect(r, { name: 'requests', group: true, type: 'schedules', path: '/s' }, { requests: [{ date: '2026-11-20', requestedDate: '2026-11-12', employeeKey: 'k1', requestKey: 'rq1', status: 'applying',
+    message: '架空の申請メッセージ', adminComment: '架空', applicant: { type: 'employee', key: 'k1' },
+    requested: { clockInSchedule: '', holidaysObtained: { fulltimeHoliday: { code: 3, name: '欠勤' } }, workDayTypeName: '平日', scheduleTypeName: '全日休暇', note: '架空の備考' } }] });
+  collect(r, { name: 'requests', group: true, type: 'timerecords', path: '/t' }, { requests: [{ status: 'applying', message: '理由', requested: { x: 1 } }] });
+  assert.deepEqual(r.requests[0], { type: 'schedules', date: '2026-11-20', requestedDate: '2026-11-12', employeeKey: 'k1', requestKey: 'rq1', status: 'applying',
+    message: '架空の申請メッセージ', requested: { clockInSchedule: '', clockOutSchedule: '', holidayName: '欠勤', holidayCode: '3', workDayTypeName: '平日', scheduleTypeName: '全日休暇' } });
+  assert.equal(r.requests[1].message, undefined);
+  assert.equal(r.requests[1].requested, undefined);
+});

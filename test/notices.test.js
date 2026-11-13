@@ -55,13 +55,14 @@ const setCell = (mf, code, id, value) => {
 };
 
 // ---------- 34項目 ----------
-test('通知：34項目がすべて登録され、IDが重ならない（勤怠10・申請労務11・安全5・社内連絡8）', () => {
+test('通知：35項目（版 2026-11-13d で ATT-11 を末尾に追加）がすべて登録され、IDが重ならない（勤怠11・申請労務11・安全5・社内連絡8）', () => {
   const { g } = setup();
   const list = [...g.ctx.AC_NOTICES];
-  assert.equal(list.length, 34);
-  assert.equal(new Set(list.map((n) => n.id)).size, 34);
+  assert.equal(list.length, 35);
+  assert.equal(new Set(list.map((n) => n.id)).size, 35);
+  assert.equal(list.at(-1).id, 'ATT-11');
   const by = (c) => list.filter((n) => n.cat === c).length;
-  assert.deepEqual([by('勤怠・シフト'), by('申請・労務'), by('車両・資格・安全'), by('社内連絡・その他')], [10, 11, 5, 8]);
+  assert.deepEqual([by('勤怠・シフト'), by('申請・労務'), by('車両・資格・安全'), by('社内連絡・その他')], [11, 11, 5, 8]);
   assert.deepEqual(list.filter((n) => n.status === '作らない').map((n) => n.id), ['ATT-07', 'ATT-08']);
   assert.ok(list.every((n) => n.status !== '未実装' || !n.impl));
   assert.equal(g.ctx.AC_noticeIdOf('ATT-01 希望休の案内'), 'ATT-01');
@@ -77,12 +78,12 @@ test('通知：準備の関数で5つのシートができ、従業員マスタ�
   assert.deepEqual(['お知らせ停止', 'LINEグループ'].map((n) => JSON.stringify(sheetRows(mf, n))), others);
   for (const n of ['お知らせ設定', '所属別お知らせ設定', 'お知らせ種類', 'お知らせ設定履歴', '通知送信履歴']) assert.ok(mf.getSheetByName(n), n);
   const s = sheetRows(mf, 'お知らせ設定');
-  assert.equal(s[0].length, 4 + 34);
+  assert.equal(s[0].length, 4 + 35);
   assert.deepEqual(s[0].slice(0, 5), ['社員番号', '氏名', '所属', '状態', 'ATT-01 希望休の案内']);
   assert.deepEqual(s.slice(1).map((r) => String(r[0])), ['90001', '90002', '90003', '90004']);   // 退職した人の行は作らない
   assert.ok(s.slice(1).every((r) => r.slice(4).every((v) => v === true || v === false)));   // すべてチェックボックス
   const t = sheetRows(mf, 'お知らせ種類');
-  assert.equal(t.length, 1 + 34 + 4);
+  assert.equal(t.length, 1 + 35 + 4);
   assert.ok(t.some((r) => r[0] === 'CRIT-01' && /止められない/.test(r[5])));
   const d = sheetRows(mf, '所属別お知らせ設定');
   assert.deepEqual(d.map((r) => r[0]), ['所属', '法人カーケア', 'リスタイル川口', '管理本部', '（その他の所属）']);

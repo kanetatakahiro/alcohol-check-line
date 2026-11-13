@@ -24,15 +24,33 @@
  * 打刻のお知らせの【勤怠の変更】：反映待ち・反映中・反映済み・元に戻す待ち・元に戻し中の連絡の分は送らない（管理本部が反映するため）。
  *
  * ログ・GitHub に氏名・LINE ID・従業員識別キー・トークンを書かない。VPS へは従業員識別キーと日付だけを渡す（氏名は渡さない）。
+ *
+ * 版 2026-11-13d で足したこと：
+ *  A. 同じ人・同じ日に本人のスケジュール申請（申請中）があれば、カードに申請の内容を出し、ボタンを
+ *     ［申請を承認する］（承認だけ・スケジュールは書かない）［申請を棄却してフォームの内容で反映］（先に棄却してから書く）［反映しない］の3つにする。
+ *     申請は朝・夜の中継のデータ（tot-latest.json の requests）から探す。VPS が承認・棄却の直前に申請の状態を読み直す。
+ *     打刻申請・残業申請はカードに出さない。申請の承認・棄却は元に戻せない（「元に戻す」はスケジュールを書いたときだけ）。
+ *  B1. カードの対象者本人が押したボタンは受け付けない（従業員マスタの LINEユーザーID と社員番号で判定）。
+ *  B2. 9:00・15:00 の問い合わせのまとめ（INQ_remind）に「承認待ちの勤怠の変更」を足す。対象の日の前日の15時台に承認待ちのカードはもう一度送る（1枚1回）。
+ *  B3. 反映できたら（スケジュールを書いた・申請を承認した）本人へ1通（通知ID ATT-11。お知らせ設定・お知らせ停止はほかの本人向けと同じ判定）。
+ *      TOT_WRITE=on かつ DRY_RUN=false のときだけ送る。それ以外は送る予定の文を「TOT反映」シートの「本人へのお知らせ」に記録する。
  */
-var SCH_VERSION = '2026-11-13c';
+var SCH_VERSION = '2026-11-13d';
 var SCH_SHEET = 'TOT反映';
 var SCH_LOG_SHEET = 'TOT反映の記録';
 var SCH_HEADER = ['受付番号', '状態', '受付日時', '社員番号', '氏名', '区分', '開始日', '終了日', '変更後の休みの日', '入力者',
   '反映する内容（予定）', '合言葉', '承認者', '承認者のLINE ID', '承認日時', '受け渡し日時', '反映日時', '反映前のスケジュール', '結果',
-  '元に戻した人', '元に戻した人のLINE ID', '元に戻した日時'];
+  '元に戻した人', '元に戻した人のLINE ID', '元に戻した日時',
+  'やり方', '本人の申請', '申請の結果', '本人へのお知らせ', '再通知日時'];   // 版 2026-11-13d で末尾に足した列（今のシートには見出しを足す）
 var SCH_C = { id: 0, state: 1, at: 2, code: 3, name: 4, label: 5, from: 6, until: 7, changeTo: 8, by: 9, plan: 10, token: 11,
-  approver: 12, approverId: 13, approvedAt: 14, handedAt: 15, doneAt: 16, before: 17, result: 18, undoBy: 19, undoById: 20, undoAt: 21 };
+  approver: 12, approverId: 13, approvedAt: 14, handedAt: 15, doneAt: 16, before: 17, result: 18, undoBy: 19, undoById: 20, undoAt: 21,
+  method: 22, requests: 23, reqResult: 24, selfMsg: 25, renotifiedAt: 26 };
+/** やり方（ボタン）：反映＝フォームの内容で書く／申請を承認＝本人の申請を承認するだけ／申請を棄却して反映＝棄却してから書く */
+var SCH_METHOD = { apply: '反映', approveReq: '申請を承認', rejectApply: '申請を棄却して反映' };
+var SCH_ACTION_METHOD = { approve: SCH_METHOD.apply, reqok: SCH_METHOD.approveReq, reqng: SCH_METHOD.rejectApply };
+var SCH_SELF_NOTICE_ID = 'ATT-11';
+var SCH_RESEND_HOUR = 15;
+var SCH_SELF_TEXT = 'ご自身の分は、ほかの方が承認してください。';
 var SCH_LOG_HEADER = ['日時', '受付番号', '操作', '結果', 'LINEユーザーID', 'イベント番号'];
 var SCH_STATE = { wait: '承認待ち', queued: '反映待ち', sending: '反映中', done: '反映済み', failed: '失敗', declined: '反映しない',
   recorded: '承認済み（記録のみ）', replaced: '置き換え', skip: '対象外', undoQueued: '元に戻す待ち', undoSending: '元に戻し中',
@@ -62,6 +80,9 @@ var SCH_REASON = {
   sameDay: 'もともとの休みの日と変更後の休みの日が同じため',
   noTot: '従業員マスタに TOT従業員コードが無いため',
   noUndo: '反映前のスケジュールが保存されていないため',
+  requestGone: 'ご本人のスケジュール申請が、すでに承認・棄却・取り下げされていたため',
+  noApprover: 'VPS に承認に使う管理者（TOT_APPROVER_KEY）が設定されていないため',
+  approverNotInFlow: '承認に使う管理者が、この申請の今の承認フローの段階にいないため',
 };
 
 // ======================================================================
@@ -114,7 +135,7 @@ function SCH_nextId(ids, today) {
 
 /** 純粋関数：postback の中身（sch|1|操作|受付番号|合言葉）。違えば null */
 function SCH_parsePostback(data) {
-  var m = /^sch\|1\|(approve|decline|undo)\|(S-\d{8}-\d{3})\|([0-9a-f]{6})$/.exec(String(data || ''));
+  var m = /^sch\|1\|(approve|reqok|reqng|decline|undo)\|(S-\d{8}-\d{3})\|([0-9a-f]{6})$/.exec(String(data || ''));
   return m ? { action: m[1], id: m[2], token: m[3] } : null;
 }
 function SCH_postbackData(action, id, token) { return 'sch|1|' + action + '|' + id + '|' + token; }
@@ -125,6 +146,7 @@ function SCH_postbackData(action, id, token) { return 'sch|1|' + action + '|' + 
  */
 function SCH_decide(state, action, mode) {
   var S = SCH_STATE, same = { next: state, changed: false, reason: 'already' };
+  if (action === 'reqok' || action === 'reqng') action = 'approve';   // 申請を承認する・申請を棄却して反映も、状態の進み方は承認と同じ
   if (action === 'approve' || action === 'decline') {
     if (state !== S.wait) return same;
     if (action === 'decline') return { next: S.declined, changed: true, reason: 'declined' };
@@ -233,6 +255,10 @@ function SCH_queueItem(c, key) {
   var undo = c.state === SCH_STATE.undoQueued || c.state === SCH_STATE.undoSending;
   var item = { id: c.id, op: undo ? 'undo' : 'apply', employeeKey: key, note: 'LINE承認：' + c.id };
   if (undo) { item.before = c.beforeObj || {}; return item; }
+  if (c.method === SCH_METHOD.approveReq || c.method === SCH_METHOD.rejectApply) {
+    item.method = c.method === SCH_METHOD.approveReq ? 'approve' : 'reject';
+    item.requests = (c.requests || []).map(function (q) { return { requestKey: q.requestKey, date: q.date }; });
+  }
   var k = SCH_kindOf(c.label);
   if (k && k.swap) { item.kind = 'swap'; item.from = c.from; item.to = c.changeTo; }
   else { item.kind = 'leave'; item.holidayCode = k ? k.holiday : ''; item.dates = SCH_days(c); }
@@ -240,9 +266,70 @@ function SCH_queueItem(c, key) {
 }
 
 /** 純粋関数：受付の短い名前（例「試験 一郎さんの欠勤（11/12（木））」） */
-function SCH_what(c) {
-  var d = c.changeTo ? AC_mdw_(c.from) + '→' + AC_mdw_(c.changeTo) : (c.from === c.until ? AC_mdw_(c.from) : AC_mdw_(c.from) + '〜' + AC_mdw_(c.until));
-  return (c.name || '対象者') + 'さんの' + c.label + '（' + d + '）';
+function SCH_dateText(c) {
+  return c.changeTo ? AC_mdw_(c.from) + '→' + AC_mdw_(c.changeTo) : (c.from === c.until ? AC_mdw_(c.from) : AC_mdw_(c.from) + '〜' + AC_mdw_(c.until));
+}
+function SCH_what(c) { return (c.name || '対象者') + 'さんの' + c.label + '（' + SCH_dateText(c) + '）'; }
+
+/**
+ * 純粋関数（版 2026-11-13d）：その人の対象の日の、申請中のスケジュール申請（tot-latest.json の requests から）。
+ * 打刻申請・残業申請は含めない。戻り値：[{ requestKey, date, requestedDate, message, requested }]（日付の順）
+ */
+function SCH_pendingRequests(requests, key, days) {
+  if (!key || !Array.isArray(requests)) return [];
+  return requests.filter(function (r) {
+    return r && !r._error && r.type === 'schedules' && r.employeeKey === key && r.status === 'applying' && r.requestKey && (days || []).indexOf(r.date) !== -1;
+  }).map(function (r) {
+    return { requestKey: String(r.requestKey), date: r.date, requestedDate: String(r.requestedDate || '').slice(0, 10), message: String(r.message || ''), requested: r.requested || null };
+  }).sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+}
+
+/** 純粋関数：申請の内容の短い説明（例「休み（欠勤）」「9:00-18:00 の出勤」）。分からなければ「内容は TOT でご確認ください」 */
+function SCH_requestKind(q) {
+  var r = (q && q.requested) || {};
+  if (r.holidayName || r.holidayCode) return '休み（' + (r.holidayName || SCH_HOLIDAY_NAME[r.holidayCode] || '休暇区分' + r.holidayCode) + '）';
+  if (r.clockInSchedule) return SCH_hm(r.clockInSchedule) + '-' + SCH_hm(r.clockOutSchedule) + ' の出勤';
+  return r.scheduleTypeName ? String(r.scheduleTypeName) : '（内容は TOT でご確認ください）';
+}
+
+/** 純粋関数：カードに出す本人の申請の行 */
+function SCH_requestLines(reqs) {
+  if (!reqs || !reqs.length) return [];
+  var md = function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d) ? Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) : '不明'; };
+  var out = ['■ ご本人のスケジュール申請（申請中）'];
+  reqs.forEach(function (q) {
+    out.push(AC_mdw_(q.date) + '：' + SCH_requestKind(q) + '（申請日 ' + md(q.requestedDate) + '）');
+    if (q.message) out.push('　申請メッセージ：' + String(q.message).replace(/\s+/g, ' ').slice(0, 100));
+  });
+  out.push('※申請の承認・棄却は元に戻せません（「元に戻す」は TOT のスケジュールを書き換えたときだけ使えます）。');
+  return out;
+}
+
+/**
+ * 純粋関数：本人へのお知らせの文。days：スケジュールを変えた日（休みの変更は使わない）。rejected：棄却した申請の日
+ */
+function SCH_selfMessage(c, days, rejected) {
+  var head = c.changeTo ? AC_mdw_(c.from) + 'の休みを' + AC_mdw_(c.changeTo) + 'に変更しました。'
+    : (days && days.length ? days : SCH_days(c)).map(AC_mdw_).join('、') + 'は' + c.label + 'としてスケジュールを変更しました。';
+  var lines = ['お疲れ様です😊', head];
+  if (rejected && rejected.length) lines.push(rejected.map(AC_mdw_).join('、') + 'のスケジュール申請は、勤怠変更フォームの内容で反映したため取り下げとしました。');
+  return lines.concat(['Touch On Timeでの申請は不要です。', 'ご確認のほどよろしくお願いいたします！']).join('\n');
+}
+
+/** 純粋関数：まとめのお知らせ（INQ_remind）に足す「承認待ちの勤怠の変更」（0件なら null） */
+function SCH_remindText(cases) {
+  var list = (cases || []).filter(function (c) { return c.state === SCH_STATE.wait; });
+  if (!list.length) return null;
+  return ['【承認待ちの勤怠の変更 ' + list.length + '件】'].concat(list.map(function (c) {
+    return '・' + (c.name || '対象者') + 'さん ' + SCH_dateText(c) + ' ' + c.label;
+  })).concat(['勤怠管理グループの承認のカードから、承認または「反映しない」を押してください。']).join('\n');
+}
+
+/** 純粋関数：前日の15時台にもう一度送るカードか（承認待ち・まだ再通知していない・いちばん早い対象の日が明日） */
+function SCH_isDueForResend(c, today, hour) {
+  if (c.state !== SCH_STATE.wait || hour < SCH_RESEND_HOUR || (c.renotifiedAt instanceof Date) || String(c.renotifiedAt || '')) return false;
+  var first = SCH_days(c).slice().sort()[0];
+  return first === SCH_addDays(today, 1);
 }
 
 /** 純粋関数：結果の理由の文（TOT のエラーは code と message だけ） */
@@ -254,28 +341,48 @@ function SCH_reasonText(r) {
 
 /**
  * 純粋関数：VPS から届いた結果 → 次の状態と、勤怠管理グループへの文。
- * r：{ op, status: 'done'|'already'|'failed', reason, errors, written: [日付], skipped: [日付] }
+ * r：{ op, method: ''|'approve'|'reject', status: 'done'|'already'|'failed', reason, errors, written: [日付], skipped: [日付],
+ *      requestResults: [{ date, action: 'approved'|'rejected', status（TOT の応答の申請ステータス） }] }
+ * 戻り値：{ next, text, undo（「元に戻す」ボタンを付けるか）, self（本人へ知らせるか）, selfDays, rejected }
  */
 function SCH_resultPlan(c, r) {
   var S = SCH_STATE, what = SCH_what(c), ok = r.status === 'done' || r.status === 'already';
-  var written = (r.written || []).map(AC_mdw_), skipped = (r.skipped || []).map(AC_mdw_);
+  var written = (r.written || []).map(AC_mdw_), skipped = (r.skipped || []).map(AC_mdw_), rr = r.requestResults || [];
+  var rejected = rr.filter(function (x) { return x.action === 'rejected'; }).map(function (x) { return x.date; });
   if (r.op === 'undo') {
     return ok ? { next: S.undone, text: '↩️ TOT のスケジュールを元に戻しました\n' + what + (c.undoBy ? '\n操作：' + c.undoBy + 'さん' : '') }
       : { next: S.undoFailed, text: '⚠️ TOT のスケジュールを元に戻せませんでした\n' + what + '\n理由：' + SCH_reasonText(r)
         + '\nお手数ですが、TOT の管理画面で直してください。' };
+  }
+  if (!ok && r.reason === 'requestGone') {
+    return { next: S.failed, text: 'ℹ️ ' + SCH_REASON.requestGone + '、何もしませんでした\n' + what + '\nTOT の申請の状態をご確認ください。' };
+  }
+  if (ok && r.method === 'approve') {
+    var approved = rr.filter(function (x) { return x.action === 'approved'; });
+    var still = approved.filter(function (x) { return x.status !== 'approved'; }).map(function (x) { return AC_mdw_(x.date); });
+    var dates = approved.map(function (x) { return x.date; });
+    var t0 = '✅ ご本人のスケジュール申請を承認しました\n' + what + (c.approver ? '\n承認：' + c.approver + 'さん' : '')
+      + (dates.length ? '\n対象の日：' + dates.map(AC_mdw_).join('、') : '')
+      + (still.length ? '\n（TOT の承認フローに次の段階があるため、' + still.join('、') + 'の申請はまだ申請中です）' : '')
+      + '\n（スケジュールの書き換えはしていません。申請の承認は元に戻せません）';
+    return { next: S.done, text: t0, undo: false, self: dates.length > 0 && !still.length, selfDays: dates, rejected: [] };
   }
   if (ok) {
     var t = '✅ TOT のスケジュールに反映しました\n' + what + (c.approver ? '\n承認：' + c.approver + 'さん' : '');
     if (r.status === 'already' && !written.length) t += '\n（すでに同じ内容だったため、書き込みはしていません）';
     else if (written.length) t += '\n反映した日：' + written.join('、');
     if (skipped.length) t += '\n変更しなかった日：' + skipped.join('、') + '（休み・予定なし）';
-    return { next: S.done, text: t, undo: written.length > 0 };
+    if (rejected.length) t += '\nご本人のスケジュール申請（' + rejected.map(AC_mdw_).join('、') + '）は棄却しました（棄却は元に戻せません）';
+    return { next: S.done, text: t, undo: written.length > 0, self: written.length > 0, selfDays: r.written || [], rejected: rejected };
   }
   var f = '⚠️ TOT のスケジュールに反映できませんでした\n' + what + '\n理由：' + SCH_reasonText(r);
+  if (rejected.length) f += '\nご本人のスケジュール申請（' + rejected.map(AC_mdw_).join('、') + '）は棄却済みです。';
   if (written.length) f += '\n一部の日（' + written.join('、') + '）は書き込み済みです。TOT の管理画面でご確認ください。';
   else f += '\nご本人に、Touch On Time からのスケジュール申請をお願いします（打刻のお知らせでもご本人へお願いします）。';
   return { next: S.failed, text: f };
 }
+
+function SCH_parseJson_(t, dflt) { try { var v = t ? JSON.parse(t) : dflt; return v == null ? dflt : v; } catch (e) { return dflt; } }
 
 /** 純粋関数：シートの1行 → 受付（列の位置は SCH_C） */
 function SCH_rowToCase(r, i) {
@@ -284,25 +391,34 @@ function SCH_rowToCase(r, i) {
   return { row: i + 1, id: s('id'), state: s('state'), at: r[C.at], code: AC_cellCode_(r[C.code]), name: s('name'), label: s('label'),
     from: AC_formDate_(r[C.from]), until: AC_formDate_(r[C.until]) || AC_formDate_(r[C.from]), changeTo: AC_formDate_(r[C.changeTo]),
     by: s('by'), token: s('token'), approver: s('approver'), approvedAt: r[C.approvedAt], handedAt: r[C.handedAt],
-    beforeObj: before, undoBy: s('undoBy'), undoAt: r[C.undoAt] };
+    beforeObj: before, undoBy: s('undoBy'), undoAt: r[C.undoAt],
+    method: s('method') || SCH_METHOD.apply, requests: SCH_parseJson_(s('requests'), []), renotifiedAt: r[C.renotifiedAt] };
 }
 
 /** 純粋関数：承認のカード（Flex） */
-function SCH_cardMessage(c, previewLines, mode) {
+function SCH_cardMessage(c, previewLines, mode, opts) {
+  opts = opts || {};
+  var reqs = opts.requests || c.requests || [];
   var btn = function (label, action, style) {
     return { type: 'button', style: style, height: 'sm', action: { type: 'postback', label: label, data: SCH_postbackData(action, c.id, c.token), displayText: label } };
   };
   var lines = ['対象者：' + c.name + 'さん', '区分：' + c.label,
     '日付：' + (c.changeTo ? AC_mdw_(c.from) + '（もともとの休み）→ ' + AC_mdw_(c.changeTo) + '（変更後の休み）' : (c.from === c.until ? AC_mdw_(c.from) : AC_mdw_(c.from) + '〜' + AC_mdw_(c.until))),
     '入力者：' + (c.by ? c.by + 'さん' : '（未記入）'), '', '■ TOT に反映する内容（予定）'].concat(previewLines || [])
-    .concat(['', mode === 'on' ? '承認すると、10分ほどで TOT のスケジュールに反映し、結果をこのグループにお知らせします。'
-      : '（試験中：承認しても TOT には書き込みません。反映する内容をシートに記録します）']);
+    .concat(reqs.length ? [''].concat(SCH_requestLines(reqs)) : [])
+    .concat(['', mode === 'on' ? (reqs.length ? '［申請を承認する］は申請の承認だけです（スケジュールは書き換えません）。［申請を棄却してフォームの内容で反映］は、申請を棄却してから反映します。10分ほどで TOT で処理し、結果をこのグループにお知らせします。'
+        : '承認すると、10分ほどで TOT のスケジュールに反映し、結果をこのグループにお知らせします。')
+      : '（試験中：承認しても TOT には書き込みません' + (reqs.length ? '。申請の承認・棄却もしません' : '') + '。反映する内容をシートに記録します）'])
+    .concat(['ご自身の分は、ほかの方が承認してください。']);
+  var title = opts.title || '【TOT反映の承認】';
+  var buttons = reqs.length ? [btn('申請を承認する', 'reqok', 'primary'), btn('申請を棄却してフォームの内容で反映', 'reqng', 'secondary'), btn('反映しない', 'decline', 'secondary')]
+    : [btn('承認してTOTに反映', 'approve', 'primary'), btn('反映しない', 'decline', 'secondary')];
   return {
-    type: 'flex', altText: ('【TOT反映の承認】' + c.name + 'さん ' + c.label).slice(0, 400),
+    type: 'flex', altText: (title + c.name + 'さん ' + c.label).slice(0, 400),
     contents: { type: 'bubble',
-      body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [{ type: 'text', text: '【TOT反映の承認】', weight: 'bold', wrap: true }]
+      body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [{ type: 'text', text: title, weight: 'bold', wrap: true }]
         .concat(lines.map(function (l) { return l ? { type: 'text', text: l, wrap: true, size: 'sm' } : { type: 'separator' }; })) },
-      footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('承認してTOTに反映', 'approve', 'primary'), btn('反映しない', 'decline', 'secondary')] } },
+      footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: buttons } },
   };
 }
 
@@ -334,6 +450,12 @@ function SCH_sheetOf_(ss, name, header) {
     sh = ss.insertSheet(name);
     sh.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
     sh.setFrozenRows(1);
+    return sh;
+  }
+  // 版 2026-11-13d：末尾に足した列の見出しが無ければ足す（今ある列・値は変えない）
+  var lc = Math.max(sh.getLastColumn(), 1), have = sh.getRange(1, 1, 1, lc).getValues()[0];
+  if (lc < header.length && String(have[0] || '').trim() === header[0]) {
+    sh.getRange(1, lc + 1, 1, header.length - lc).setValues([header.slice(lc)]).setFontWeight('bold');
   }
   return sh;
 }
@@ -391,7 +513,42 @@ function SCH_employee_(code) {
   if (key && data.results.schedules && Array.isArray(data.results.schedules) && !data.results.schedules.some(function (d) { return d && d._error; })) {
     AC_totFlat_(data.results.schedules).forEach(function (s) { if (s && s.employeeKey === key) sched[s.date] = s; });
   }
-  return { tot: tot, key: key, data: !!data && emps.length > 0, schedules: sched };
+  var reqs = key && data.results.requests && Array.isArray(data.results.requests) ? data.results.requests : [];
+  return { tot: tot, key: key, data: !!data && emps.length > 0, schedules: sched, requests: reqs };
+}
+
+/** 従業員マスタのその社員番号の行（無ければ null） */
+function SCH_masterRow_(code) {
+  var mv = AC_masterSheet_().getDataRange().getValues();
+  for (var i = 1; i < mv.length; i++) if (AC_cellCode_(mv[i][AC_COL.code]) === code) return mv[i];
+  return null;
+}
+
+/** 押した人がカードの対象者本人か（従業員マスタの LINEユーザーID と社員番号） */
+function SCH_isSelf_(code, uid) {
+  var r = SCH_masterRow_(code);
+  return !!r && AC_isUserId(uid) && String(r[AC_COL.userId] || '').trim() === uid;
+}
+
+/**
+ * 本人へのお知らせ（版 2026-11-13d・通知ID ATT-11）。シートの「本人へのお知らせ」に書く文を返す。
+ * 送るのは TOT_WRITE=on かつ DRY_RUN=false のときだけ。LINE確認済み・退職でない人だけ。お知らせ設定（AC_noticeCheck_）でOFF・
+ * 手で入れたお知らせ停止（今日を含むもの。フォームから入った停止は数えない）の人には送らない。
+ */
+function SCH_selfNotify_(c, text) {
+  try {
+    var today = AC_today_(), r = SCH_masterRow_(c.code);
+    var uid = r ? String(r[AC_COL.userId] || '').trim() : '';
+    if (!r || !AC_isUserId(uid) || r[AC_COL.lineOk] !== true) return '送らない（LINE未登録・未確認）：' + text;
+    if (String(r[AC_COL.status] || '').trim() === '退職' || AC_isRetired(r[AC_COL.retiredOn], today)) return '送らない（退職）：' + text;
+    if (typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_(SCH_SELF_NOTICE_ID, c.code, today).send) return '送らない（お知らせ設定でOFF）：' + text;
+    if (AC_isPausedForPunch(AC_pauseIndex_(), c.code, today, true)) return '送らない（お知らせ停止中）：' + text;
+    var live = SCH_mode_() === 'on' && PropertiesService.getScriptProperties().getProperty('DRY_RUN') === 'false';
+    if (!live) return '記録のみ（DRY_RUN）：' + text;
+    AC_pushTo_(uid, text);
+    if (typeof AC_noticeLog_ === 'function') AC_noticeLog_([[new Date(), SCH_SELF_NOTICE_ID, 'スケジュール変更のお知らせ', '本人', "'" + c.code, c.id, '送信', '']]);
+    return '送信済み：' + text;
+  } catch (e) { Logger.log('TOT反映の本人へのお知らせに失敗'); return '送信失敗：' + text; }
 }
 
 // ---- 入口1：勤怠連絡フォームの送信（alcoholCheckOnAttendanceForm の最後から呼ぶ） ----
@@ -403,16 +560,18 @@ function SCH_onForm_(ans, plan, isTest) {
   var emp = SCH_employee_(plan.code), reason = req.reason, pv = { ok: true, lines: [] };
   if (!reason && !emp.tot) reason = 'noTot';
   if (!reason) { pv = SCH_preview(req, emp.schedules); if (!pv.ok) reason = pv.reason; }
+  var reqs = reason ? [] : SCH_pendingRequests(emp.requests, emp.key, req.days);   // 版 2026-11-13d：同じ日の本人のスケジュール申請（申請中）
   var ss = SCH_book_(), c, lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     var sh = SCH_sheetOf_(ss, SCH_SHEET, SCH_HEADER), cases = SCH_cases_(sh);
     c = { id: SCH_nextId(cases.map(function (x) { return x.id; }), AC_today_()), state: reason ? SCH_STATE.skip : SCH_STATE.wait,
-      code: plan.code, name: plan.name, label: req.label, from: req.from, until: req.until, changeTo: req.changeTo, by: ans.by || '', token: SCH_token_() };
+      code: plan.code, name: plan.name, label: req.label, from: req.from, until: req.until, changeTo: req.changeTo, by: ans.by || '', token: SCH_token_(), requests: reqs };
     var r = SCH_HEADER.map(function () { return ''; });
     r[SCH_C.id] = c.id; r[SCH_C.state] = c.state; r[SCH_C.at] = new Date(); r[SCH_C.code] = "'" + c.code; r[SCH_C.name] = c.name;
     r[SCH_C.label] = c.label; r[SCH_C.from] = "'" + c.from; r[SCH_C.until] = "'" + c.until; r[SCH_C.changeTo] = c.changeTo ? "'" + c.changeTo : '';
     r[SCH_C.by] = c.by; r[SCH_C.plan] = pv.lines.join('\n'); r[SCH_C.token] = "'" + c.token; r[SCH_C.result] = reason ? '対象外：' + SCH_REASON[reason] : '';
+    r[SCH_C.requests] = reqs.length ? JSON.stringify(reqs) : '';
     sh.appendRow(r);
     SCH_log_(ss, c.id, '受付', c.state, '', '');
   } finally { lock.releaseLock(); }
@@ -420,7 +579,7 @@ function SCH_onForm_(ans, plan, isTest) {
     var t = '（TOT への自動反映の対象外：' + SCH_what(c) + '・' + SCH_REASON[reason] + '）\nご本人の Touch On Time からのスケジュール申請で対応してください。';
     SCH_send_([{ type: 'text', text: t }], t);
   } else {
-    SCH_send_([SCH_cardMessage(c, pv.lines, mode)], '【TOT反映の承認】' + SCH_what(c) + '\n' + pv.lines.join('\n'));
+    SCH_send_([SCH_cardMessage(c, pv.lines, mode)], '【TOT反映の承認】' + SCH_what(c) + '\n' + pv.lines.concat(SCH_requestLines(reqs)).join('\n'));
   }
   return c;
 }
@@ -456,12 +615,26 @@ function SCH_button_(ev, p, uid, name, mode) {
     if (!c || !c.token || c.token !== p.token) {
       SCH_log_(ss, p.id, p.action, '拒否（合言葉の不一致）', uid, ev.webhookEventId);
       reply = 'このボタンは使えません。新しいお知らせのボタンを押してください。';
+    } else if (SCH_isSelf_(c.code, uid)) {
+      // 版 2026-11-13d：カードの対象者本人のボタンは受け付けない
+      SCH_log_(ss, c.id, p.action, '拒否（ご本人）', uid, ev.webhookEventId);
+      reply = SCH_SELF_TEXT;
+    } else if ((p.action === 'reqok' || p.action === 'reqng') !== ((c.requests || []).length > 0) && p.action !== 'decline' && p.action !== 'undo') {
+      SCH_log_(ss, c.id, p.action, '拒否（ボタンの種類が違う）', uid, ev.webhookEventId);
+      reply = 'このボタンは使えません。新しいお知らせのボタンを押してください。';
     } else {
       var d = SCH_decide(c.state, p.action, mode), what = SCH_what(c);
       if (d.changed) {
         SCH_set_(sh, c.row, 'state', d.next);
         if (p.action === 'undo') { SCH_set_(sh, c.row, 'undoBy', name); SCH_set_(sh, c.row, 'undoById', uid); SCH_set_(sh, c.row, 'undoAt', now); }
         else { SCH_set_(sh, c.row, 'approver', name); SCH_set_(sh, c.row, 'approverId', uid); SCH_set_(sh, c.row, 'approvedAt', now); }
+        if (SCH_ACTION_METHOD[p.action]) SCH_set_(sh, c.row, 'method', SCH_ACTION_METHOD[p.action]);
+        if (d.reason === 'recorded') {
+          // TOT_WRITE=record：本人へは送らず、送る予定の文を記録する
+          var rq = (c.requests || []).map(function (q) { return q.date; });
+          var preview = SCH_selfMessage(c, p.action === 'reqok' ? rq : null, p.action === 'reqng' ? rq : []);
+          SCH_set_(sh, c.row, 'selfMsg', '記録のみ（TOT_WRITE=record）：' + preview);
+        }
         if (d.reason === 'approved' || d.reason === 'recorded') {
           // 同じ人の日が重なる前の受付（承認待ち・反映待ち）は「置き換え」（あとの受付だけを反映する）
           var mine = SCH_days(c);
@@ -475,9 +648,11 @@ function SCH_button_(ev, p, uid, name, mode) {
         }
       }
       SCH_log_(ss, c.id, p.action, d.reason + '（' + (d.changed ? d.next : c.state) + '）', uid, ev.webhookEventId);
+      var how = { reqok: 'ご本人の申請を承認します', reqng: 'ご本人の申請を棄却して TOT に反映します' }[p.action];
       reply = {
-        approved: what + 'を承認しました（' + name + 'さん）。10分ほどで TOT に反映し、結果をお知らせします。',
-        recorded: what + 'を承認しました（' + name + 'さん）。試験中のため TOT には書き込まず、反映する内容を「TOT反映」シートに記録しました。',
+        approved: how ? what + 'について、' + how + '（' + name + 'さん）。10分ほどで TOT で処理し、結果をお知らせします。'
+          : what + 'を承認しました（' + name + 'さん）。10分ほどで TOT に反映し、結果をお知らせします。',
+        recorded: what + 'を承認しました（' + name + 'さん）。試験中のため TOT には書き込まず' + (how ? '（申請の承認・棄却もしません）' : '') + '、反映する内容を「TOT反映」シートに記録しました。',
         declined: what + 'は TOT に反映しないことにしました（' + name + 'さん）。ご本人の Touch On Time からのスケジュール申請で対応してください。',
         undo: what + 'を元に戻します（' + name + 'さん）。10分ほどで TOT に反映し、結果をお知らせします。',
         undoOff: '今は TOT への書き込みを止めているため、元に戻せません。TOT の管理画面で直してください。',
@@ -544,7 +719,8 @@ function SCH_handleResult_(body) {
       var c = sh ? SCH_cases_(sh).filter(function (x) { return x.id === String(body.id || ''); })[0] : null;
       var expect = body.op === 'undo' ? SCH_STATE.undoSending : SCH_STATE.sending;
       if (!c || c.state !== expect) { SCH_log_(ss, body.id, '結果', '受け付けなし（状態：' + (c ? c.state : '受付なし') + '）', '', ''); return 'NG state'; }
-      var r = { op: body.op === 'undo' ? 'undo' : 'apply', status: String(body.status || ''), reason: String(body.reason || ''),
+      var r = { op: body.op === 'undo' ? 'undo' : 'apply', method: body.method === 'approve' || body.method === 'reject' ? body.method : '',
+        requestResults: Array.isArray(body.requestResults) ? body.requestResults.slice(0, 31) : [], status: String(body.status || ''), reason: String(body.reason || ''),
         errors: Array.isArray(body.errors) ? body.errors.slice(0, 5) : [], written: Array.isArray(body.written) ? body.written : [], skipped: Array.isArray(body.skipped) ? body.skipped : [] };
       var pl = SCH_resultPlan(c, r);
       SCH_set_(sh, c.row, 'state', pl.next);
@@ -552,9 +728,13 @@ function SCH_handleResult_(body) {
       SCH_set_(sh, c.row, 'result', (pl.next === SCH_STATE.done || pl.next === SCH_STATE.undone ? '成功' : '失敗：' + SCH_reasonText(r))
         + (r.written.length ? '（書き込んだ日：' + r.written.join('、') + '）' : ''));
       if (r.op === 'apply' && body.before && typeof body.before === 'object' && !c.beforeObj) SCH_set_(sh, c.row, 'before', JSON.stringify(body.before));
+      if (r.requestResults.length) SCH_set_(sh, c.row, 'reqResult', r.requestResults.map(function (x) {
+        return x.date + '：' + (x.action === 'rejected' ? '棄却' : '承認') + '（' + String(x.status || '') + '）';
+      }).join('\n'));
       SCH_log_(ss, c.id, '結果', pl.next, '', '');
       msg = pl.undo ? SCH_doneMessage(c, pl.text) : { type: 'text', text: pl.text };
       c.text = pl.text;
+      if (pl.self) SCH_set_(sh, c.row, 'selfMsg', SCH_selfNotify_(c, SCH_selfMessage(c, pl.selfDays, pl.rejected)));   // 版 2026-11-13d：本人へ
     } finally { lock.releaseLock(); }
     SCH_send_([msg], c.text);
     return 'OK';
@@ -580,6 +760,27 @@ function SCH_watch_() {
       + 'VPS の cron（src/tot-write.js）と、.env の TOT_WRITE_TOKEN を確認してください。「TOT反映」シートで状態を確認できます。');
     return stuck;
   } catch (e) { Logger.log('TOT反映の見守りに失敗'); return 0; }
+}
+
+/**
+ * まとめのお知らせ（INQ_remind・9:00・15:00）から呼ぶ（版 2026-11-13d）。TOT_WRITE が未設定・シートが無ければ null。
+ * 戻り値 { text（承認待ちの一覧。0件なら null）, after（前日の15時台に、承認待ちのカードをもう一度送る。1枚1回） }
+ */
+function SCH_remindPart_(now) {
+  var mode = SCH_mode_();
+  if (mode === 'off') return null;
+  var ss = SCH_book_(), sh = ss.getSheetByName(SCH_SHEET);
+  if (!sh) return null;
+  var cases = SCH_cases_(sh), today = Utilities.formatDate(now, AC_TZ, 'yyyy-MM-dd'), hour = Number(Utilities.formatDate(now, AC_TZ, 'H'));
+  var due = cases.filter(function (c) { return SCH_isDueForResend(c, today, hour); });
+  return { text: SCH_remindText(cases), after: function () {
+    due.forEach(function (c) {
+      SCH_set_(sh, c.row, 'renotifiedAt', new Date());
+      var lines = String(sh.getRange(c.row, SCH_C.plan + 1).getValue() || '').split('\n').filter(Boolean);
+      SCH_send_([SCH_cardMessage(c, lines, mode, { title: '【TOT反映の承認・明日が対象の日です】' })], '【TOT反映の承認・明日が対象の日です】' + SCH_what(c));
+      SCH_log_(ss, c.id, '再通知', '前日の15時台', '', '');
+    });
+  } };
 }
 
 /** 【勤怠の変更】の文を送らない連絡のキー（SCH_entryKey）。シートが無ければ空 */

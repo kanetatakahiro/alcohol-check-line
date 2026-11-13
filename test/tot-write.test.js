@@ -143,7 +143,7 @@ test('実行：書き込み用のトークンが無い・禁止の時間帯の�
   assert.equal(JSON.parse(f.calls[0].body ? JSON.stringify(f.calls[0].body) : '{}').peek, true);
   assert.equal(f.calls.some((c) => c.method === 'PUT' || c.method === 'DELETE'), false);
   assert.equal(f.results.length, 0);
-  assert.deepEqual(r.summary, [{ id: 'S-20261113-001', op: 'apply', status: 'ready', reason: '', writes: 1, skipped: 0 }]);
+  assert.deepEqual(r.summary, [{ id: 'S-20261113-001', op: 'apply', method: '', status: 'ready', reason: '', writes: 1, skipped: 0, requests: 0 }]);
   assert.match(logs[0], /"dryRun":true/);
 });
 

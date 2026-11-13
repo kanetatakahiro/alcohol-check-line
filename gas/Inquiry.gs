@@ -36,7 +36,7 @@
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10e';
+var INQ_VERSION = '2026-11-10e';   // INQ_remind だけ版 2026-11-13d で変更（TOT反映の承認待ちを足す。問い合わせの動きは同じ）
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -810,22 +810,29 @@ function INQ_button_(ev, p, uid, name) {
 
 // ---- 時刻指定：まとめのお知らせ（9:00・15:00・土日も。INQ_REMIND_DAYS=weekdays なら土日は送らない） ----
 function INQ_remind() {
+  var now = new Date(), sch = null;
+  // 版 2026-11-13d：TOT反映の承認待ち（gas/TotSync.gs）。問い合わせとは別に、TOT_WRITE が record・on のときだけ。曜日の設定（INQ_REMIND_DAYS）には従わない
+  try { if (typeof SCH_remindPart_ === 'function') sch = SCH_remindPart_(now); } catch (es) { INQ_fail_('リマインド（TOT反映）', es); }
+  var text = null;
   try {
-    var mode = INQ_mode_();
-    if (mode === 'off') return;
-    var now = new Date();
+    var mode = INQ_mode_(), skipDay = false;
     if (String(INQ_props_().getProperty('INQ_REMIND_DAYS') || 'all').trim() === 'weekdays') {
       var dow = INQ_dow_(now);
-      if (dow === 0 || dow === 6) return;
+      skipDay = dow === 0 || dow === 6;
     }
-    INQ_classifyFill_();   // まだ分類が空の行を、本文の全体から先に埋める（要注意の分類を内容（冒頭）だけで判定しないため。エラーは外へ出さない）
-    var cases = INQ_cases_(INQ_sheet_(INQ_book_(), INQ_SHEET_CASE, INQ_CASE_HEADER))
-      .map(function (c) { c.who = INQ_caseWho(c); return c; });
-    var text = INQ_remindText(cases, now);
-    if (!text) return;
-    if (mode !== 'on') { Logger.log('問い合わせのまとめ（記録のみのため送らない）：%s文字', text.length); return; }
-    INQ_send_([{ type: 'text', text: text }], text);
+    if (mode !== 'off' && !skipDay) {
+      INQ_classifyFill_();   // まだ分類が空の行を、本文の全体から先に埋める（要注意の分類を内容（冒頭）だけで判定しないため。エラーは外へ出さない）
+      var cases = INQ_cases_(INQ_sheet_(INQ_book_(), INQ_SHEET_CASE, INQ_CASE_HEADER))
+        .map(function (c) { c.who = INQ_caseWho(c); return c; });
+      text = INQ_remindText(cases, now);
+      if (text && mode !== 'on') { Logger.log('問い合わせのまとめ（記録のみのため送らない）：%s文字', text.length); text = null; }
+    }
   } catch (err) { INQ_fail_('リマインド', err); }
+  try {
+    if (sch && sch.text) text = text ? (text + '\n\n' + sch.text).slice(0, 5000) : sch.text;
+    if (text) INQ_send_([{ type: 'text', text: text }], text);
+    if (sch && sch.after) sch.after();
+  } catch (err2) { INQ_fail_('リマインド', err2); }
 }
 
 // ---- 1時間ごと（alcoholCheckImportTot から）：分類・要点を埋める ----

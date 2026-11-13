@@ -86,6 +86,14 @@ export function pickPaidLeaves(days) {
   return out;
 }
 
+/** スケジュール申請の申請内容の要約（出勤・退勤の予定、全日休暇の名前とコード、勤務日種別、スケジュール種別） */
+export function scheduleSummary(q) {
+  if (!q || typeof q !== 'object') return null;
+  const f = q.holidaysObtained && q.holidaysObtained.fulltimeHoliday;
+  return { clockInSchedule: q.clockInSchedule || '', clockOutSchedule: q.clockOutSchedule || '', holidayName: (f && f.name) || '',
+    holidayCode: f && f.code != null ? String(f.code) : '', workDayTypeName: q.workDayTypeName || '', scheduleTypeName: q.scheduleTypeName || '' };
+}
+
 /** 取得結果をまとめる（group は配列に連結、申請は種類を付ける、有休は必要な所だけ） */
 export function collect(results, item, data) {
   if (!item.group) { results[item.name] = data; return; }
@@ -94,7 +102,9 @@ export function collect(results, item, data) {
   if (item.leave) cur.push(...pickPaidLeaves(data));
   else if (item.type) {
     cur.push(...((data && data.requests) || []).map(r => ({ type: item.type, date: r.date, requestedDate: r.requestedDate,
-      employeeKey: r.employeeKey, requestKey: r.requestKey, status: r.status })));
+      employeeKey: r.employeeKey, requestKey: r.requestKey, status: r.status,
+      // 版 2026-11-13d：スケジュール申請だけ、申請メッセージと申請内容の要約も渡す（TOT反映の承認のカードに出すため）。打刻申請・残業申請は今までどおり渡さない
+      ...(item.type === 'schedules' ? { message: r.message || '', requested: scheduleSummary(r.requested) } : {}) })));
   } else {
     // 月別勤怠は36協定の判定に使う項目だけ
     cur.push(...(Array.isArray(data) ? data : []).map(w => ({ year: w.year, month: w.month, employeeKey: w.employeeKey,

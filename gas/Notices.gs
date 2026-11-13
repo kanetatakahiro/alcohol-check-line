@@ -14,7 +14,7 @@
  *   重要な通知（飲酒検知・取り込みの失敗・システムのエラー）は、この設定では止まらない
  */
 
-// ---------------- お知らせ34項目（設計用ID・2026-11-09 確定） ----------------
+// ---------------- お知らせ35項目（設計用ID・2026-11-09 確定の34項目＋版 2026-11-13d の ATT-11） ----------------
 // status：'送信中'（本番で送っている）／'停止中'（コードはあるが本番で止まっている・記録だけ）／'未実装'／'作らない'
 // def：所属の初期値（決定済み、または今の動きを引き継ぐ値）。restyle：所属名に「リスタイル」を含むときの初期値
 // impl：true のものだけ、実際の送信に連動する（未実装・作らないものは ON でも送らない）
@@ -53,6 +53,9 @@ var AC_NOTICES = [
   { id: 'GEN-06', name: 'アンケート回答依頼', cat: '社内連絡・その他', status: '未実装', def: false },
   { id: 'GEN-07', name: '社内イベントの案内', cat: '社内連絡・その他', status: '未実装', def: false },
   { id: 'GEN-08', name: '誕生日・記念日のお知らせ', cat: '社内連絡・その他', status: '未実装', def: false },
+  // 版 2026-11-13d で足した通知は末尾に足す（今のシートの列の並び＝この並び。途中に入れると新しい行の値が列とずれる）
+  { id: 'ATT-11', name: 'スケジュール変更のお知らせ（TOT反映）', cat: '勤怠・シフト', status: '停止中', impl: true, def: true,
+    link: '勤怠連絡フォームの内容を TOT のスケジュールに反映したとき（版 2026-11-13d・gas/TotSync.gs）。TOT_WRITE=on かつ DRY_RUN=false のときだけ送る' },
 ];
 // 重要な通知（「お知らせ設定」の列にしない＝一般の設定では止められない。止める・送信先を変えるには両名の承認）
 var AC_CRITICAL_NOTICES = [
@@ -262,6 +265,7 @@ function alcoholCheckSetupNoticeSettings() {
     dept.getRange(2, 1, rows.length, dh.length).setValues(rows);
     dept.getRange(2, 2, rows.length, AC_NOTICES.length).insertCheckboxes();
   } else {
+    AC_noticeAddCols_(dept, 1, function (id, row) { var d = String(row[0] || '').trim(); return AC_noticeDeptDefault(id, d === AC_NS_OTHER_DEPT ? '' : d); });   // 版 2026-11-13d
     var have = {};
     dept.getDataRange().getValues().slice(1).forEach(function (r) { have[String(r[0]).trim()] = true; });
     var add = rows.filter(function (r) { return !have[r[0]]; });
@@ -276,6 +280,29 @@ function alcoholCheckSetupNoticeSettings() {
   var r = AC_noticeSync_(ss, mv);
   AC_NS_CACHE = null;
   Logger.log('お知らせ設定を準備しました（行の追加 %s人・更新 %s人）。NOTICE_SETTINGS が未設定の間は、通知の動きは変わりません', r.added, r.updated);
+}
+
+/**
+ * 版 2026-11-13d：見出しの通知IDの列が AC_NOTICES より少ないシート（今の本番のシート）に、足りない列を末尾に足す。
+ * 見出しは今の列の並びのまま読む（AC_noticeIndex は見出しのIDで読むので、列の位置は問わない）。fixed：先頭の固定の列数。
+ * def(id, 行)：今の行に入れる初期値。足した列の数を返す
+ */
+function AC_noticeAddCols_(sh, fixed, def) {
+  var lc = sh.getLastColumn();
+  if (!lc) return 0;
+  var head = sh.getRange(1, 1, 1, lc).getValues()[0], have = {};
+  head.forEach(function (h) { var id = AC_noticeIdOf(h); if (id) have[id] = true; });
+  if (!Object.keys(have).length) return 0;   // 通知の列が1つも無いシートは触らない
+  var add = AC_NOTICES.filter(function (n) { return !have[n.id]; });
+  if (!add.length) return 0;
+  sh.getRange(1, lc + 1, 1, add.length).setValues([add.map(AC_noticeHeader)]).setFontWeight('bold');
+  var last = sh.getLastRow();
+  if (last >= 2) {
+    var rows = sh.getRange(2, 1, last - 1, Math.max(fixed, 1)).getValues();
+    sh.getRange(2, lc + 1, last - 1, add.length).setValues(rows.map(function (r) { return add.map(function (n) { return def(n.id, r); }); }));
+    sh.getRange(2, lc + 1, last - 1, add.length).insertCheckboxes();
+  }
+  return add.length;
 }
 
 /** 1日1回（record／on のとき、最初の判定の前に）：新しい人の行を足し、所属・在籍の変化を反映する */
@@ -296,6 +323,8 @@ function AC_noticeSync_(ss, mv) {
     sh.setFrozenRows(1);
     created = true;
   }
+  // 版 2026-11-13d：あとから足した通知（ATT-11 など）の列が無ければ、見出しと今の行のチェックボックス（所属の初期値）を末尾に足す
+  if (!created) AC_noticeAddCols_(sh, AC_NS_FIXED.length, function (id, row) { return AC_noticeDeptDefault(id, String(row[2] || '').trim()); });
   var values = sh.getDataRange().getValues();
   var ex = {};
   if (created) AC_parseCodeList(props.getProperty('LEAVE_REQUEST_EXCLUDE_CODES')).forEach(function (c) { ex[c] = true; });   // 初回だけ引き継ぐ

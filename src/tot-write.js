@@ -1,4 +1,4 @@
-// さくらのVPS（固定IP）で10分ごとに動かす：Touch On Time（TOT）の日別スケジュールへの書き込み（版 2026-11-13c）。
+// さくらのVPS（固定IP）で10分ごとに動かす：Touch On Time（TOT）の日別スケジュールへの書き込み（版 2026-11-13c・13d で本人のスケジュール申請の承認・棄却を追加）。
 // 設計：docs/TOT_SCHEDULE_SYNC_DESIGN.md。Apps Script（gas/TotSync.gs）の「反映待ち」を取りに行き、1件ずつ TOT に書き込んで結果を返す。
 //  1. Apps Script の Webアプリへ { type: 'tot-write-queue' } → 反映待ちを受け取る（Apps Script が「反映中」にする。TOT_WRITE=on のときだけ届く）
 //  2. 1件ずつ：その日のスケジュールと打刻を読み直す（GET）→ 過ぎた日・打刻がある日は書かない → もう目的の内容なら書かない
@@ -8,6 +8,12 @@
 //   TOT_ACCESS_TOKEN  読み取り用（今の中継と同じ）
 //   TOT_WRITE_TOKEN   書き込み用（連携希望項目「日別スケジュールデータ（書き込み）」）。無ければ何もしない
 //   GAS_WEBAPP_URL・TOT_SYNC_SECRET  今の中継と同じ
+//   TOT_APPROVER_KEY  （版 2026-11-13d）本人のスケジュール申請を承認・棄却するときの TOT の管理者識別キー。無ければ申請の承認・棄却はしない（失敗を返す）
+//                     調べ方：node --env-file=.env src/tot-write.js --admins（管理者の一覧を画面に出すだけ。チャット・GitHub に貼らない）
+// 版 2026-11-13d：やり方（item.method）
+//   'approve'＝本人のスケジュール申請を承認するだけ（スケジュールは書かない）／'reject'＝申請を棄却してから、フォームの内容で書く
+//   どちらも直前に申請を読み直し（GET /requests/schedules/{年月}?additionalFields=flow）、申請中でなければ何もしない（requestGone）。
+//   承認・棄却は PUT /requests/{requestKey}（administratorKey・approve・adminComment）。管理者が今の承認フローの段階にいなければ何もしない
 // 試し実行：node --env-file=.env src/tot-write.js --dry-run
 //   反映待ちを「反映中」にせずに受け取り（peek）、TOT を読むだけで、書き込む予定の件数をログに出す（TOT へは書かない・結果も返さない）
 // ログに出すもの：受付番号・操作・結果・理由・日数・HTTP状態だけ。トークン・合言葉・従業員識別キー・氏名・時刻・備考は出さない。
@@ -156,6 +162,23 @@ export function planItem(item, sched, punched, today) {
   return already ? { status: 'already', reason: '', writes, skipped, before } : { ...fail('noWork'), skipped };
 }
 
+/**
+ * 本人のスケジュール申請を承認・棄却してよいか（版 2026-11-13d）。wanted：[{ requestKey, date }]、found：{ requestKey: 申請 }、approverKey：管理者識別キー
+ * 申請が見つからない・申請中でない → requestGone、管理者が無い → noApprover、今の段階の承認者にいない → approverNotInFlow（flow が無ければ確かめない）
+ */
+export function checkRequests(wanted, found, approverKey) {
+  if (!Array.isArray(wanted) || !wanted.length) return { ok: false, reason: 'requestGone' };
+  for (const w of wanted) { const f = found[w.requestKey]; if (!f || f.status !== 'applying') return { ok: false, reason: 'requestGone' }; }
+  if (!approverKey) return { ok: false, reason: 'noApprover' };
+  for (const w of wanted) {
+    const f = found[w.requestKey];
+    if (!Array.isArray(f.flow)) continue;
+    const level = f.flow.find(x => Number(x.level) === Number(f.currentFlow));
+    if (!level || !(level.administratorKeys || []).includes(approverKey)) return { ok: false, reason: 'approverNotInFlow' };
+  }
+  return { ok: true, reason: '' };
+}
+
 /** 日付の一覧を、62日以内のまとまりに分ける（GET の期間の上限） */
 export function spans(dates) {
   const s = [...new Set(dates)].sort(), out = [];
@@ -166,12 +189,12 @@ export function spans(dates) {
   return out;
 }
 
-export async function runWrite({ env = process.env, fetchImpl = fetch, now = () => new Date(), dryRun = false,
+export async function runWrite({ env = process.env, fetchImpl = fetch, now = () => new Date(), dryRun = false, admins = false,
   wait = ms => new Promise(r => setTimeout(r, ms)), log = console.log } = {}) {
   const read = env.TOT_ACCESS_TOKEN, write = env.TOT_WRITE_TOKEN, url = env.GAS_WEBAPP_URL, secret = env.TOT_SYNC_SECRET;
   if (!read || !url || !secret) throw new Error('サーバーの .env に TOT_ACCESS_TOKEN / GAS_WEBAPP_URL / TOT_SYNC_SECRET を設定してください。');
   if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) throw new Error('GAS_WEBAPP_URL の形式を確認してください。');
-  if (!write && !dryRun) { log(JSON.stringify({ skip: 'TOT_WRITE_TOKEN がないため何もしません' })); return { skipped: 'noToken' }; }
+  if (!write && !dryRun && !admins) { log(JSON.stringify({ skip: 'TOT_WRITE_TOKEN がないため何もしません' })); return { skipped: 'noToken' }; }
   if (!safeToRun(now())) { log(JSON.stringify({ skip: 'TOT の利用禁止の時間帯（の直前）のため何もしません' })); return { skipped: 'time' }; }
   const today = japanDate(now());
 
@@ -207,6 +230,26 @@ export async function runWrite({ env = process.env, fetchImpl = fetch, now = () 
     return { sched, punched };
   };
 
+  /** 本人のスケジュール申請を読む（申請の日の年月ごと）：{ requestKey: { status, currentFlow, flow, date } } */
+  const readRequests = async (wanted) => {
+    const found = {};
+    for (const ym of [...new Set((wanted || []).map(w => String(w.date).slice(0, 7)))].sort()) {
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      const r = await tot('GET', `/requests/schedules/${ym}?additionalFields=flow`, read);
+      if (!r.ok) throw Object.assign(new Error('read'), { status: r.status });
+      for (const x of (r.json && r.json.requests) || []) found[x.requestKey] = { status: x.status, currentFlow: x.currentFlow, flow: x.flow, date: x.date };
+    }
+    return found;
+  };
+
+  if (admins) {
+    // 管理者の一覧（コード・名前・識別キー）を画面に出すだけ。TOT_APPROVER_KEY を決めるため。ログファイル・チャットには残さない
+    const r = await tot('GET', '/administrators', read);
+    if (!r.ok) { log(JSON.stringify({ admins: 'error', http: r.status, errors: r.errors })); return { admins: null }; }
+    for (const a of Array.isArray(r.json) ? r.json : []) log(`${a.code}\t${a.name}\t${a.key}`);
+    return { admins: Array.isArray(r.json) ? r.json.length : 0 };
+  }
+
   const q = await gas({ type: 'tot-write-queue', peek: dryRun });
   let queue;
   try { queue = JSON.parse(q.text); } catch { queue = null; }
@@ -217,34 +260,54 @@ export async function runWrite({ env = process.env, fetchImpl = fetch, now = () 
     let result;
     try {
       if (!item || !item.id || !item.employeeKey) continue;
-      const dates = itemDates(item);
-      const { sched, punched } = await readDays(item.employeeKey, dates);
-      const p = planItem(item, sched, punched, today);
-      if (dryRun) { summary.push({ id: item.id, op: item.op, status: p.status, reason: p.reason, writes: p.writes.length, skipped: p.skipped.length }); continue; }
-      result = { status: p.status === 'ready' ? 'done' : p.status, reason: p.reason, errors: [], written, skipped: p.skipped, before: p.before };
-      for (const w of p.writes) {
+      const dates = itemDates(item), method = item.op === 'apply' && (item.method === 'approve' || item.method === 'reject') ? item.method : '';
+      let check = null;
+      if (method) check = checkRequests(item.requests, await readRequests(item.requests), env.TOT_APPROVER_KEY);   // 承認・棄却の直前に読み直す
+      let p;
+      if (method === 'approve') p = { status: 'ready', reason: '', writes: [], skipped: [], before: {} };   // 申請の承認だけ（スケジュールは書かない）
+      else { const { sched, punched } = await readDays(item.employeeKey, dates); p = planItem(item, sched, punched, today); }
+      if (check && !check.ok && p.status !== 'failed') p = { status: 'failed', reason: check.reason, writes: [], skipped: [], before: {} };
+      if (dryRun) { summary.push({ id: item.id, op: item.op, method, status: p.status, reason: p.reason, writes: p.writes.length, skipped: p.skipped.length, requests: (item.requests || []).length }); continue; }
+      result = { status: p.status === 'ready' ? 'done' : p.status, reason: p.reason, errors: [], written, skipped: p.skipped, before: p.before, method, requestResults: [] };
+      if (method && result.status !== 'failed') {
+        // 申請の承認・棄却（棄却して反映は、先に棄却してからスケジュールを書く）
+        for (const w of item.requests) {
+          const body = { administratorKey: env.TOT_APPROVER_KEY, approve: method === 'approve',
+            adminComment: method === 'approve' ? `LINE承認：${item.id}` : '勤怠変更フォームの内容で反映したため' };
+          const r = await tot('PUT', `/requests/${encodeURIComponent(w.requestKey)}`, write, body);
+          if (!r.ok) { result = { ...result, status: 'failed', reason: 'api', errors: r.errors.length ? r.errors : [{ code: r.status, message: 'HTTP ' + r.status }] }; break; }
+          result.requestResults.push({ date: w.date, action: method === 'approve' ? 'approved' : 'rejected', status: (r.json && r.json.status) || '' });
+        }
+        if (method === 'approve' && result.status !== 'failed') result.status = 'done';
+      }
+      for (const w of result.status === 'failed' ? [] : p.writes) {
         const path = `/daily-schedules/${encodeURIComponent(item.employeeKey)}/${w.date}`;
         const r = w.body ? await tot('PUT', path, write, w.body) : await tot('DELETE', path, write);
         if (!r.ok) { result = { ...result, status: 'failed', reason: 'api', errors: r.errors.length ? r.errors : [{ code: r.status, message: 'HTTP ' + r.status }] }; break; }
         written.push(w.date);
       }
-      if (result.status === 'done' && written.length) {
+      if (result.status === 'done' && written.length && method !== 'approve') {
         const after = await readDays(item.employeeKey, written);
         const bad = p.writes.filter(w => written.includes(w.date) && !matches(after.sched[w.date], w.body));
         if (bad.length) result = { ...result, status: 'failed', reason: 'verify' };
       }
     } catch (e) {
       // 読み取りの失敗・禁止の時間帯：まだ書いていなければ結果を返さない（Apps Script が30分後にもう一度渡す）
-      if (!written.length) { summary.push({ id: item.id, op: item.op, status: 'retry', http: e && e.status }); continue; }
+      if (!written.length && !(result && result.requestResults && result.requestResults.length)) { summary.push({ id: item.id, op: item.op, status: 'retry', http: e && e.status }); continue; }
+      if (!written.length && result && result.requestResults && result.requestResults.length) {
+        // 申請の承認・棄却はしたが、そのあとで止まった：結果を返す（申請の操作は戻せないため、グループに知らせる）
+        result = { ...result, status: 'failed', reason: 'api', errors: [{ code: e && e.status || 0, message: '申請の処理のあとで止まりました' }], written };
+      } else
       result = { ...(result || {}), status: 'failed', reason: 'api', errors: [{ code: e && e.status || 0, message: '書き込みの途中で止まりました' }], written };
     }
     const r = await gas({ type: 'tot-write-result', id: item.id, op: item.op, ...result });
-    summary.push({ id: item.id, op: item.op, status: result.status, reason: result.reason, written: written.length, skipped: (result.skipped || []).length, gas: r.text.slice(0, 20) });
+    summary.push({ id: item.id, op: item.op, method: result.method || '', status: result.status, reason: result.reason, written: written.length, skipped: (result.skipped || []).length,
+      requests: (result.requestResults || []).length, gas: r.text.slice(0, 20) });
   }
   log(JSON.stringify({ today, dryRun, items: items.length, summary }));
   return { items: items.length, summary };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runWrite({ dryRun: process.argv.includes('--dry-run') }).catch(e => { console.error(e.message); process.exitCode = 1; });
+  runWrite({ dryRun: process.argv.includes('--dry-run'), admins: process.argv.includes('--admins') }).catch(e => { console.error(e.message); process.exitCode = 1; });
 }

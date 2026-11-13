@@ -1,5 +1,23 @@
 # 変更履歴
 
+## 2026-11-13 13:39〜14:0x 本番反映（版 2026-11-13d・Apps Script と VPS）
+- Apps Script（11/13 13:39）：コード.gs `8b0d5fc58a2432cf` → `cb51ca2590b1f4be`（版 2026-11-13d）、TotSync.gs `ae9d4b768b9a7e8a` → `0272c87d34b392cf`、Inquiry.gs `6a128fc12d5ba779` → `c7420dea20f00378`、Notices.gs `821b30bfc0c22532` → `c35ead8627af23d0` に差し替え。LeaveRequest.gs は変更なし
+  - alcoholCheckSetupNoticeSettings を実行（ATT-11 の列）。Webアプリ バージョン30
+  - TOT_WRITE=record のまま（承認・本人へのお知らせはシートに記録するだけ）
+  - INQ_remindPreview：正常（未完了3件・237字）
+- VPS（11/13 13:5x〜14:0x、安藤さんがシリアルコンソールで実施）：src/tot-relay.js（`b78f26b831d50b26`）・src/tot-write.js（`1be91e8eb12f6fd4`・新しいファイル）を df2ca23 の版に置き換え
+  - 控え：~/tot-relay.js.bak-20261113・~/env.bak-20261113
+  - plan(night)：10行（うち申請6行）
+  - .env に TOT_WRITE_TOKEN（今のトークンと同じ値）と TOT_APPROVER_KEY（管理本部の管理者の識別キー）を追加し、chmod 600
+  - crontab に `3-59/10 7-22 * * * … src/tot-write.js >> /home/rocky/tot-write.log` を追加
+  - tot-write.js --dry-run：反映待ち0件・エラーなし（TOT_WRITE=record のため、Apps Script は反映待ちを渡さない）
+- TOT のトークンの連携希望項目に「日別スケジュールデータ」「申請データ」Read/write と「管理者データ」Read を追加（安藤さん）
+- VPS の作業ツリーは main と差分あり（src/tot-relay.js・src/tot-write.js）。このブランチを main に入れるまで git pull はしない
+- 次：1週間 TOT_WRITE=record で確認し、そのあと管理本部の分から TOT_WRITE=on
+- 戻し方：
+  - Apps Script：4つのファイルを 13c の指紋に戻し、Webアプリを再公開
+  - VPS：`cp ~/tot-relay.js.bak-20261113 ~/alcohol-check-line/src/tot-relay.js`、crontab の tot-write の行を消す（.env は ~/env.bak-20261113 から戻せる）
+
 ## 2026-11-13 版 2026-11-13d：本人のスケジュール申請の承認・棄却／本人による承認の拒否／承認待ちのまとめと前日の再通知／本人へのお知らせ（ブランチ feature/notification-settings・本番未導入）
 - 11/13 安藤さんの指示（②）で作成。調べたことと決めたこと：docs/TOT_SCHEDULE_SYNC_DESIGN.md の「10.」
 - A：承認のカードを作るとき、同じ人・同じ日の申請中のスケジュール申請を探し、あればカードに申請の内容（対象の日・スケジュールの種類・申請日・申請メッセージ）とボタン3つ（申請を承認する／申請を棄却してフォームの内容で反映／反映しない）。打刻申請・残業申請は出さない。VPS は承認・棄却の直前に申請を読み直し、申請中でなければ何もしない。申請の承認・棄却は元に戻せない（カードに明記）。カードは勤怠管理グループだけ

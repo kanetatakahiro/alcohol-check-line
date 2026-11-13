@@ -4,7 +4,7 @@ import { createGas } from './helpers/gas-mock.js';
 import { checkRequests } from '../src/tot-write.js';
 
 // 勤怠のお知らせの決まり（docs/ATTENDANCE_NOTICE_RULES.md の番号）を、1つのルールにつき1つ以上確かめる。すべて架空データ・模擬環境（LINE・TOT には送らない）。
-// 「todo」の印のテストは、今のコードがルールどおりになっていないところ（直さずに報告する。docs の「ルールどおりでないところ」）。
+// 「停止：」のテストは、止めたお知らせ（E-42・承認待ちの本人へのお知らせ。11/13 にスクリプトプロパティを削除）が、設定が無ければ動かないことを確かめる（コードは残す）。
 const U = (c) => 'U' + String(c).repeat(32).slice(0, 32);
 const ADMIN = 'U' + 'a'.repeat(32);
 const SECRET = 'fake-secret';
@@ -28,7 +28,7 @@ const TODAY = '2026-11-13';
 const md = (d) => Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10));
 
 // ---- お知らせ（E-40・E-42・E-78）の準備 ----
-// 一郎：11/12 打刻漏れ（ATT-02 を OFF にするテストで使う）／二郎（管理本部）：11/12 打刻漏れ（E-42 と E-40 の重なり）
+// 一郎：11/12 打刻漏れ（ATT-02 を OFF にするテストで使う）／二郎（管理本部）：11/12 打刻漏れ（管理本部も E-40・E-78 の対象）
 // 三郎：11/11 は手で入れたお知らせ停止／四郎：11/10 はフォームの欠勤（本人が入力・フォームから入った停止）
 // 五郎：11/9 打刻申請（申請中）・11/10 スケジュール申請（承認済み）・11/11 申請なし・11/8 打刻申請（却下）
 function results(today = TODAY) {
@@ -71,7 +71,7 @@ const night = (g, today = TODAY, res = results(today)) => {
   assert.match(out.getContent(), /^OK/);
   return g.fetches.slice(n).filter((f) => f.url.endsWith('/push') && f.body.to !== ADMIN);
 };
-const morning = (g, today = TODAY, res = results(today)) => {   // E-42（朝の1時間ごとの処理）
+const morning = (g, today = TODAY, res = results(today)) => {   // 朝の1時間ごとの処理（止めた E-42・承認待ちの本人へのお知らせの入口）
   g.drive.files['tot-latest.json'] = { content: JSON.stringify({ today, mode: 'morning', fetchedAt: today + 'T07:05:05+09:00', results: res }), updated: new Date(today + 'T07:05:30+09:00').getTime() };
   g.ctx.AC_FORM_ENTRIES_CACHE = null;
   const n = g.fetches.length;
@@ -122,7 +122,7 @@ const queue = (g) => JSON.parse(post(g, { type: 'tot-write-queue', secret: SECRE
 const caseRows = (g, mf) => mf.getSheetByName('TOT反映').dump().slice(1).map((r, i) => ({ ...g.ctx.SCH_rowToCase(r, i + 1) }));
 
 // ======================================================================
-// ルール1：打刻申請・スケジュール申請が申請中・承認済みの日は、E-40・E-42・E-78 で送らない
+// ルール1：打刻申請・スケジュール申請が申請中・承認済みの日は、E-40・E-78 で送らない
 // ======================================================================
 test('ルール1：E-40（夜）は打刻申請・スケジュール申請が申請中・承認済みの日を送らない（却下の日は送る）', () => {
   const { g } = att();
@@ -136,18 +136,6 @@ test('ルール1：E-78（月曜）は打刻申請・スケジュール申請が
   const plan = X.AC_weeklyPunchItems(results('2026-11-16'), '2026-11-16');
   assert.deepEqual([...plan.byTot['5']], ['2026-11-08', '2026-11-11']);
   assert.equal(plan.requested, 2);
-});
-
-test('ルール1：E-42（管理本部）は打刻申請が申請中・承認済みの日を送らない', () => {
-  const X = att().g.ctx;
-  const R = { ...results(), workings: [{ dailyWorkings: [E('k002', '2026-11-11'), E('k002', '2026-11-12')] }], requests: [Q('k002', '2026-11-11', 'timerecords', 'approved')] };
-  assert.deepEqual([...X.AC_punchSelfNotices(R, MASTER, TODAY)[0].dates], ['2026-11-12']);
-});
-
-test('ルール1：E-42（管理本部）はスケジュール申請が申請中・承認済みの日も送らない', { todo: 'E-42 の打刻の日は打刻申請だけを見ていて、スケジュール申請のある日も送る（AC_unrequestedPunchErrors が timerecords だけ）' }, () => {
-  const X = att().g.ctx;
-  const R = { ...results(), workings: [{ dailyWorkings: [E('k002', '2026-11-11'), E('k002', '2026-11-12')] }], requests: [Q('k002', '2026-11-11', 'schedules', 'approved')] };
-  assert.deepEqual([...X.AC_punchSelfNotices(R, MASTER, TODAY)[0].dates], ['2026-11-12']);
 });
 
 // ======================================================================
@@ -224,10 +212,21 @@ test('ルール3：反映待ち・反映済み（反映中・元に戻す待ち�
   assert.match(textTo(night(att().g), 4), /【勤怠の変更】\n・勤怠変更フォームより、11\/10（火）は欠勤とご連絡をいただいています。\n→ Touch On Timeから「スケジュール申請」をお願いいたします。/);
 });
 
-test('ルール3：TOT_WRITE が on でないときは、反映待ち・反映中のまま残った連絡も【勤怠の変更】で依頼する', { todo: '【勤怠の変更】を送らない判定（SCH_syncedKeys_）は TOT_WRITE を見ていない。on から record・未設定に戻したとき、反映待ち・反映中のまま残った連絡は TOT に書かれないのに本人へも送られない' }, () => {
-  const s = syncedByState({ TOT_WRITE: 'record' });
-  assert.equal(s['反映待ち'], false);
-  assert.equal(s['反映中'], false);
+test('ルール3：TOT_WRITE が on でないとき（record・未設定）は、送らない判定を効かせない（反映待ち・反映中のまま残った連絡も【勤怠の変更】で依頼。版 2026-11-13f で直した 3-a）', () => {
+  for (const props of [{ TOT_WRITE: 'record' }, {}]) {
+    const s = syncedByState(props);
+    assert.ok(Object.values(s).every((v) => v === false), JSON.stringify(props) + ' ' + JSON.stringify(s));
+  }
+  // 夜：TOT_WRITE=record で「反映待ち」のまま残った四郎の 11/10 欠勤も【勤怠の変更】で依頼
+  const { g, mf } = att({ TOT_WRITE: 'record' });
+  const sh = g.ctx.SCH_sheetOf_(mf, 'TOT反映', g.ctx.SCH_HEADER), x = g.ctx.SCH_HEADER.map(() => '');
+  Object.assign(x, { 0: 'S-20261110-001', 1: '反映待ち', 3: "'90004", 5: '欠勤', 6: "'2026-11-10", 7: "'2026-11-10" });
+  sh.appendRow(x);
+  assert.match(textTo(night(g), 4), /11\/10（火）は欠勤とご連絡をいただいています。/);
+  const b = att({ TOT_WRITE: 'on' });                                              // on なら送らない（管理本部が反映する）
+  const sh2 = b.g.ctx.SCH_sheetOf_(b.mf, 'TOT反映', b.g.ctx.SCH_HEADER);
+  sh2.appendRow(x);
+  assert.equal(textTo(night(b.g), 4), null);
 });
 
 // ======================================================================
@@ -240,32 +239,22 @@ test('ルール4：締めは「ご確認のほどよろしくお願いいたし�
   assert.equal(end([{ kind: 'noClockOut' }]), 'ご確認のほどよろしくお願いいたします！');
   assert.equal(end([{ kind: 'ot30', min: 1900 }]), 'ご確認のほどよろしくお願いいたします！');
   assert.equal(end([{ kind: 'noClockIn' }, { kind: 'punch', date: '2026-11-12', punchKind: 'out' }]), 'ご対応のほどよろしくお願いいたします！');
-  assert.equal(X.AC_punchSelfMessage(['2026-11-12'], null, {}, TODAY, { '2026-11-12': 'holiday' }).split('\n').at(-1), 'ご確認のほどよろしくお願いいたします！');
   assert.equal(X.AC_weeklyPunchMessage(['2026-11-12'], '2026-11-16', {}, {}).split('\n').at(-1), 'ご確認のほどよろしくお願いいたします！');
 });
 
 // ======================================================================
-// ルール5：夜のお知らせと E-42 は同じ日・同じ連絡について1回だけ。E-78（月曜）は未申請なら毎週
+// ルール5：夜のお知らせ（E-40）は同じ日・同じ連絡について1回だけ。E-78（月曜）は未申請なら毎週
 // ======================================================================
-test('ルール5：夜のお知らせ（E-40）で送った日は E-42 で送らない。同じフォームの連絡も1回だけ', () => {
-  const { g } = att({ PUNCH_SELF_NOTIFY: 'on' }, TODAY + 'T22:31:00+09:00');
-  const R = { ...results(), workings: [{ dailyWorkings: [E('k002', '2026-11-12')] }], requests: [] };
-  assert.match(textTo(night(g, TODAY, R), 2), /11\/12（木）/);
-  g.clock.now = new Date('2026-11-14T08:00:00+09:00').getTime();
-  assert.equal(textTo(morning(g, '2026-11-14', { ...R, today: '2026-11-14' }), 2), null);
-  // 同じ連絡（夜に送った【勤怠の変更】）は次の晩も送らない
+test('ルール5：夜のお知らせ（E-40）は同じ日を次の晩に送らない。同じフォームの連絡も1回だけ', () => {
+  const { g } = att();
+  const R = (today) => ({ ...results(today), workings: [{ dailyWorkings: [E('k002', '2026-11-12')] }], requests: [] });
+  assert.match(textTo(night(g, TODAY, R(TODAY)), 2), /11\/12（木）/);
+  g.clock.now = new Date('2026-11-14T22:31:00+09:00').getTime();
+  assert.equal(textTo(night(g, '2026-11-14', R('2026-11-14')), 2), null);
   const a = att();
   assert.ok(textTo(night(a.g), 4));
   a.g.clock.now = new Date('2026-11-14T22:31:00+09:00').getTime();
   assert.equal(textTo(night(a.g, '2026-11-14'), 4), null);
-});
-
-test('ルール5：E-42 で送った日は夜のお知らせ（E-40）で送らない', { todo: 'E-42 の送信の記録（sent:日付:punchself:社員番号）を夜のお知らせが見ていないため、朝に E-42 で知らせた日を、その夜の E-40 でもう一度送る' }, () => {
-  const { g } = att({ PUNCH_SELF_NOTIFY: 'on' }, TODAY + 'T08:00:00+09:00');
-  const R = { ...results(), workings: [{ dailyWorkings: [E('k002', '2026-11-12')] }], requests: [] };
-  assert.match(textTo(morning(g, TODAY, R), 2), /11\/12（木）/);
-  g.clock.now = new Date(TODAY + 'T22:31:00+09:00').getTime();
-  assert.equal(textTo(night(g, TODAY, R), 2), null);
 });
 
 test('ルール5：E-78（月曜）は同じ週は1通、次の週も未申請なら出す', () => {
@@ -381,4 +370,146 @@ test('ルール11：TOT_WRITE が未設定ならシートもカードも作ら�
   press(b.g, btn(cardOf(b.g), 0));
   assert.equal(caseRows(b.g, b.mf)[0].state, '承認済み（記録のみ）');
   assert.deepEqual([queue(b.g).mode, queue(b.g).items.length], ['record', 0]);
+});
+
+// ======================================================================
+// ルール12：管理本部の人も、ほかの人と同じく E-40（夜）と E-78（月曜）の対象（所属で外さない）
+// ======================================================================
+test('ルール12：管理本部の人にも E-40・E-78 を送る', () => {
+  const { g } = att();
+  assert.match(textTo(night(g), 2), /・11\/12（木）の打刻の内容をご確認ください。/);   // 二郎（管理本部）
+  const w = att({ WEEKLY_PUNCH_NOTIFY: 'on' }, '2026-11-16T10:00:00+09:00');
+  w.g.drive.files['tot-latest.json'] = { content: JSON.stringify({ today: '2026-11-16', mode: 'morning', fetchedAt: 'x', results: results('2026-11-16') }), updated: new Date('2026-11-16T07:05:30+09:00').getTime() };
+  w.g.ctx.AC_FORM_ENTRIES_CACHE = null;
+  const n = w.g.fetches.length;
+  w.g.ctx.alcoholCheckWeeklyPunchReminder();
+  assert.match(textTo(w.g.fetches.slice(n).filter((f) => f.url.endsWith('/push')), 2), /・11\/12（木）/);
+});
+
+// ======================================================================
+// 停止：E-42（管理本部の本人への打刻漏れのお知らせ・PUNCH_SELF_NOTIFY）と、本人への承認待ちの申請のお知らせ（REQUEST_SELF_NOTIFY）
+// 11/13 14:44・14:47 にスクリプトプロパティを削除して止めた。コードは残す（設定が無ければ動かない）
+// ======================================================================
+test('停止：PUNCH_SELF_NOTIFY・REQUEST_SELF_NOTIFY が無ければ、朝の処理は本人へ何も送らず、シートも作らない', () => {
+  const { g, mf } = att({}, TODAY + 'T08:00:00+09:00');
+  assert.equal(g.scriptProps.getProperty('PUNCH_SELF_NOTIFY'), null);
+  assert.equal(g.scriptProps.getProperty('REQUEST_SELF_NOTIFY'), null);
+  const R = { ...results(), requests: [...results().requests, Q('k002', '2026-11-12', 'timerecords', 'applying'), Q('k002', '2026-11-11', 'schedules', 'applying')] };
+  assert.deepEqual(morning(g, TODAY, R), []);
+  assert.equal(mf.getSheetByName('打刻漏れ本人通知'), null);
+  assert.equal(mf.getSheetByName('承認待ち本人通知'), null);
+  assert.equal(g.userProps.getProperty('selfnotice:' + TODAY), null);   // 1日1回の印も付けない（何もしていない）
+});
+
+test('停止：止めたあとは、管理本部の人の打刻漏れは夜のお知らせ（E-40）だけで1回届く（以前の 5-a の2回目は起きない）', () => {
+  const { g } = att({}, TODAY + 'T08:00:00+09:00');
+  const R = { ...results(), workings: [{ dailyWorkings: [E('k002', '2026-11-12')] }], requests: [] };
+  assert.deepEqual(morning(g, TODAY, R), []);
+  g.clock.now = new Date(TODAY + 'T22:31:00+09:00').getTime();
+  const p = night(g, TODAY, R).filter((f) => f.body.to === U(2));
+  assert.equal(p.length, 1);
+  assert.match(p[0].body.messages[0].text, /11\/12（木）/);
+});
+
+// ---- お知らせ設定（gas/Notices.gs）・アルコールチェック・希望休の準備 ----
+const AHEAD = ['タイムスタンプ', '氏名', '区分', '測定結果'];
+const DAYS = ['2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09', '2026-11-10'];
+function alc(props = {}, now = '2026-11-10T08:30:00+09:00') {
+  const g = createGas({ files: FILES, now });
+  const mf = g.newSpreadsheet('【テスト】従業員マスタ（架空）');
+  const m = mf.insertSheet('従業員マスタ');
+  [HEAD, row('90001', '試験 一郎', '法人カーケア'), row('90002', '試験 二郎', '法人カーケア'), row('90003', '試験 三郎', '法人カーケア')].forEach((r) => m.appendRow(r));
+  mf.insertSheet('お知らせ停止').appendRow(['社員番号', '氏名（参考）', '開始日', '終了日', 'メモ', '止めるお知らせ（全部／勤怠のみ）']);
+  const gs = mf.insertSheet('LINEグループ');
+  gs.appendRow(['グループID', '部門（所属）', '登録日時', '状態']);
+  gs.appendRow([KANRI, '勤怠管理', '2026-10-20', '有効']);
+  const ms = g.newSpreadsheet('【テスト】管理シート（架空）');
+  g.sheets[g.ctx.AC_SPREADSHEET_ID] = ms;
+  const sv = ms.insertSheet('2026-2028');
+  sv.appendRow(['シフト表（架空）', '', '', '']);
+  sv.appendRow(['', '', '', ...DAYS]);
+  ['試験 一郎', '試験 二郎', '試験 三郎'].forEach((n) => sv.appendRow(['', n, 'シフト', ...DAYS.map(() => '出勤')]));
+  const fv = ms.insertSheet('フォームの回答 1');
+  fv.appendRow(AHEAD);
+  // 二郎：11/6〜11/10 の5日、出勤前・退勤前がそろう（11/10 の20:00 にお礼の対象＝5勤務日連続）
+  DAYS.forEach((d) => { fv.appendRow([new g.FakeDate(d + 'T08:00:00+09:00'), '試験 二郎', '出勤前', '0.00']); fv.appendRow([new g.FakeDate(d + 'T19:00:00+09:00'), '試験 二郎', '退勤前', '0.00']); });
+  const inv = ms.insertSheet('アルコールチェッカー在庫');
+  inv.appendRow(['従業員コード', '機器所持']);
+  ['90001', '90002', '90003'].forEach((c) => inv.appendRow(["'" + c, true]));
+  g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: mf.getId(), LINE_CHANNEL_ACCESS_TOKEN: 'fake', LINE_ADMIN_USER_ID: ADMIN,
+    DRY_RUN: 'false', NOTIFY_EMPLOYEES: 'true', NOTIFY_ADMIN: 'false', REQUIRE_DEVICE: 'true', NOTICE_SETTINGS: 'on', ...props });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  g.ctx.AC_NS_CACHE = null;
+  return { g, mf, fv };
+}
+const at = (g, fn, when) => { g.clock.now = new Date(when).getTime(); const n = g.fetches.length; g.ctx[fn](); return pushes(g, n); };
+const tos = (list) => list.map((f) => f.body.to);
+const ALC = [['alcoholCheckMorning', '2026-11-10T08:30:00+09:00'], ['alcoholCheckBeforeWork', '2026-11-10T10:00:00+09:00'],
+  ['alcoholCheckEvening', '2026-11-10T18:30:00+09:00'], ['alcoholCheckAfterWork', '2026-11-10T20:00:00+09:00']];
+const thanksTo = (list) => list.filter((f) => /勤務日連続/.test(f.body.messages[0].text || '')).map((f) => f.body.to);
+
+// ======================================================================
+// ルール13：希望休の案内（ATT-01）は、お知らせ設定でチェックがある人だけに送る（LEAVE_REQUEST_EXCLUDE_CODES の人も送らない）
+// ======================================================================
+test('ルール13：希望休の案内は ATT-01 にチェックがある人だけ。除外の社員番号の人は、チェックがあっても送らない', () => {
+  const { g, mf } = alc({ LEAVE_REQUEST_NOTIFY: 'on', LEAVE_REQUEST_EXCLUDE_CODES: '90003' }, '2026-11-10T12:05:00+09:00');
+  settingOff(mf, g, '90001', 'ATT-01');
+  const sh = mf.getSheetByName('お知らせ設定'), v = sh.getDataRange().getValues();   // 三郎は最初に作るときに OFF で引き継がれる → あえてチェックを付ける
+  sh.getRange(v.findIndex((x) => String(x[0]) === '90003') + 1, v[0].findIndex((h) => String(h).startsWith('ATT-01 ')) + 1).setValue(true);
+  g.ctx.AC_NS_CACHE = null;
+  g.ctx.alcoholCheckLeaveRequestNotice();
+  assert.deepEqual(tos(pushes(g)).filter((t) => t !== ADMIN), [U(2)]);
+  const rec = mf.getSheetByName('希望休案内').getDataRange().getValues();
+  assert.ok(rec.some((r) => String(r[2]) === '90001' && /お知らせ設定でOFF/.test(r[4])));
+  assert.ok(rec.some((r) => String(r[2]) === '90003' && /除外の社員番号/.test(r[4])));
+});
+
+// ======================================================================
+// ルール14：アルコールチェックの案内（8:30・18:30）は ATT-03・04、入力確認（催促 10:00・20:00）は ATT-12、お礼は ATT-13 にチェックがある人だけ。
+//   NOTICE_ALCOHOL_SCOPE は使わない（11/13 14:53 に all を追加 → 14:58 に削除。版 2026-11-13f で ATT-12・13 に分けた）
+// ======================================================================
+test('ルール14：案内は ATT-03・04、入力確認は ATT-12、お礼は ATT-13 で判定する。案内だけ止めた人にも催促・お礼は届く', () => {
+  const { g, mf } = alc({});
+  settingOff(mf, g, '90001', 'ATT-03');
+  settingOff(mf, g, '90001', 'ATT-04');            // 一郎：案内だけ止める → 催促は届く
+  settingOff(mf, g, '90003', 'ATT-12');            // 三郎：催促だけ止める → 案内は届く
+  const r = ALC.map(([fn, w]) => at(g, fn, w));
+  assert.deepEqual(tos(r[0]), [U(2), U(3)]);       // 8:30 案内
+  assert.deepEqual(tos(r[1]), [U(1)]);             // 10:00 催促（二郎は入力済み）
+  assert.deepEqual(tos(r[2]), [U(2), U(3)]);       // 18:30 案内
+  assert.deepEqual(tos(r[3]).sort(), [U(1), U(2)].sort());   // 20:00 催促：一郎／お礼：二郎（ATT-04 は OFF でない）
+  assert.deepEqual(thanksTo(r[3]), [U(2)]);
+});
+
+test('ルール14：お礼は ATT-13 にチェックがある人だけ（ATT-04 を止めてもお礼は届く）。NOTICE_ALCOHOL_SCOPE を入れても判定は変わらない', () => {
+  for (const scope of [undefined, 'all', 'guideAndFollow']) {
+    const a = alc(scope ? { NOTICE_ALCOHOL_SCOPE: scope } : {});
+    settingOff(a.mf, a.g, '90002', 'ATT-04');
+    assert.deepEqual(thanksTo(at(a.g, 'alcoholCheckAfterWork', '2026-11-10T20:00:00+09:00')), [U(2)], String(scope));
+    const b = alc(scope ? { NOTICE_ALCOHOL_SCOPE: scope } : {});
+    settingOff(b.mf, b.g, '90002', 'ATT-13');
+    const p = at(b.g, 'alcoholCheckAfterWork', '2026-11-10T20:00:00+09:00');
+    assert.deepEqual(thanksTo(p), [], String(scope));
+    assert.deepEqual(tos(p).sort(), [U(1), U(3)].sort(), String(scope));   // 催促（ATT-12）はそのまま
+  }
+});
+
+// ======================================================================
+// ルール15：飲酒検知・管理者への知らせ・記録は、お知らせ設定に関係なく動く
+// ======================================================================
+test('ルール15：お知らせ設定を全部 OFF にしても、飲酒検知（管理者・勤怠管理グループ）と記録、管理者への知らせは止まらない', () => {
+  const { g, mf, fv } = alc({}, '2026-11-10T08:40:00+09:00');
+  const sh = mf.getSheetByName('お知らせ設定'), v = sh.getDataRange().getValues();
+  for (let r = 2; r <= v.length; r++) for (let c = 5; c <= v[0].length; c++) sh.getRange(r, c).setValue(false);
+  g.ctx.AC_NS_CACHE = null;
+  fv.appendRow([new g.FakeDate('2026-11-10T08:35:00+09:00'), '試験 一郎', '出勤前', '0.25']);
+  g.ctx.alcoholCheckAlerts();
+  assert.deepEqual(tos(pushes(g)), [ADMIN, KANRI]);
+  const log = mf.getSheetByName('通知送信履歴').getDataRange().getValues().filter((r) => r[1] === 'CRIT-01');
+  assert.deepEqual(log.map((r) => r[6]), ['送信', '送信']);
+  const n = g.fetches.length;
+  g.ctx.AC_adminNotice_('rules-test', '【テスト】管理者への知らせ（架空）');
+  assert.deepEqual(tos(pushes(g, n)), [ADMIN]);
+  // 本人向けの案内は止まる（チェックが無い）
+  assert.deepEqual(at(g, 'alcoholCheckEvening', '2026-11-10T18:30:00+09:00').filter((f) => f.body.to !== ADMIN && f.body.to !== KANRI), []);
 });

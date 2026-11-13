@@ -55,14 +55,14 @@ const setCell = (mf, code, id, value) => {
 };
 
 // ---------- 34項目 ----------
-test('通知：35項目（版 2026-11-13d で ATT-11 を末尾に追加）がすべて登録され、IDが重ならない（勤怠11・申請労務11・安全5・社内連絡8）', () => {
+test('通知：37項目（版 2026-11-13d で ATT-11、版 2026-11-13f で ATT-12・ATT-13 を末尾に追加）がすべて登録され、IDが重ならない（勤怠13・申請労務11・安全5・社内連絡8）', () => {
   const { g } = setup();
   const list = [...g.ctx.AC_NOTICES];
-  assert.equal(list.length, 35);
-  assert.equal(new Set(list.map((n) => n.id)).size, 35);
-  assert.equal(list.at(-1).id, 'ATT-11');
+  assert.equal(list.length, 37);
+  assert.equal(new Set(list.map((n) => n.id)).size, 37);
+  assert.deepEqual(list.slice(-3).map((n) => n.id), ['ATT-11', 'ATT-12', 'ATT-13']);
   const by = (c) => list.filter((n) => n.cat === c).length;
-  assert.deepEqual([by('勤怠・シフト'), by('申請・労務'), by('車両・資格・安全'), by('社内連絡・その他')], [11, 11, 5, 8]);
+  assert.deepEqual([by('勤怠・シフト'), by('申請・労務'), by('車両・資格・安全'), by('社内連絡・その他')], [13, 11, 5, 8]);
   assert.deepEqual(list.filter((n) => n.status === '作らない').map((n) => n.id), ['ATT-07', 'ATT-08']);
   assert.ok(list.every((n) => n.status !== '未実装' || !n.impl));
   assert.equal(g.ctx.AC_noticeIdOf('ATT-01 希望休の案内'), 'ATT-01');
@@ -78,12 +78,12 @@ test('通知：準備の関数で5つのシートができ、従業員マスタ�
   assert.deepEqual(['お知らせ停止', 'LINEグループ'].map((n) => JSON.stringify(sheetRows(mf, n))), others);
   for (const n of ['お知らせ設定', '所属別お知らせ設定', 'お知らせ種類', 'お知らせ設定履歴', '通知送信履歴']) assert.ok(mf.getSheetByName(n), n);
   const s = sheetRows(mf, 'お知らせ設定');
-  assert.equal(s[0].length, 4 + 35);
+  assert.equal(s[0].length, 4 + 37);
   assert.deepEqual(s[0].slice(0, 5), ['社員番号', '氏名', '所属', '状態', 'ATT-01 希望休の案内']);
   assert.deepEqual(s.slice(1).map((r) => String(r[0])), ['90001', '90002', '90003', '90004']);   // 退職した人の行は作らない
   assert.ok(s.slice(1).every((r) => r.slice(4).every((v) => v === true || v === false)));   // すべてチェックボックス
   const t = sheetRows(mf, 'お知らせ種類');
-  assert.equal(t.length, 1 + 35 + 4);
+  assert.equal(t.length, 1 + 37 + 4);
   assert.ok(t.some((r) => r[0] === 'CRIT-01' && /止められない/.test(r[5])));
   const d = sheetRows(mf, '所属別お知らせ設定');
   assert.deepEqual(d.map((r) => r[0]), ['所属', '法人カーケア', 'リスタイル川口', '管理本部', '（その他の所属）']);
@@ -168,16 +168,42 @@ test('通知：ATT-03 を OFF にすると朝の案内だけ止まり、退勤�
   assert.ok(sheetRows(mf, '通知送信履歴').some((r) => r[1] === 'ATT-03' && String(r[4]) === '90001' && /送らない/.test(r[6])));
 });
 
-test('通知：NOTICE_ALCOHOL_SCOPE=guideAndFollow なら未入力の催促も止まる。record は記録だけで送る', () => {
-  const { g, mf } = setup({ props: { NOTICE_SETTINGS: 'on', NOTICE_ALCOHOL_SCOPE: 'guideAndFollow' } });
-  g.ctx.alcoholCheckSetupNoticeSettings();
-  setCell(mf, '90001', 'ATT-03', false);
-  assert.deepEqual(tos(runKind(g, 'alcoholCheckBeforeWork', '2026-11-10T10:00:00+09:00')), [U(2), U(3)]);
+test('13f 通知：入力確認（催促 10:00・20:00）は ATT-12 で判定する（ATT-03・04 と NOTICE_ALCOHOL_SCOPE は見ない）。record は記録だけで送る', () => {
+  for (const scope of [undefined, 'guideAndFollow', 'all']) {
+    const { g, mf } = setup({ props: { NOTICE_SETTINGS: 'on', ...(scope ? { NOTICE_ALCOHOL_SCOPE: scope } : {}) } });
+    g.ctx.alcoholCheckSetupNoticeSettings();
+    setCell(mf, '90001', 'ATT-03', false);   // 案内だけ止めたい人：催促は届く
+    setCell(mf, '90002', 'ATT-12', false);   // 催促だけ止めたい人：案内は届く
+    assert.deepEqual(tos(runKind(g, 'alcoholCheckMorning', '2026-11-10T08:30:00+09:00')), [U(2), U(3)], String(scope));
+    assert.deepEqual(tos(runKind(g, 'alcoholCheckBeforeWork', '2026-11-10T10:00:00+09:00')), [U(1), U(3)], String(scope));
+    assert.deepEqual(tos(runKind(g, 'alcoholCheckEvening', '2026-11-10T18:30:00+09:00')), [U(1), U(2), U(3)], String(scope));
+    assert.deepEqual(tos(runKind(g, 'alcoholCheckAfterWork', '2026-11-10T20:00:00+09:00')), [U(1), U(3)], String(scope));
+  }
+  assert.deepEqual(['morning', 'evening', 'followBefore', 'followAfter', 'thanks', 'other'].map((t) => setup().g.ctx.AC_alcoholNoticeId(t, 'all')),
+    ['ATT-03', 'ATT-04', 'ATT-12', 'ATT-12', 'ATT-13', null]);
   const r = setup({ props: { NOTICE_SETTINGS: 'record' } });
   r.g.ctx.alcoholCheckSetupNoticeSettings();
-  setCell(r.mf, '90001', 'ATT-03', false);
-  assert.deepEqual(tos(runKind(r.g, 'alcoholCheckMorning', '2026-11-10T08:30:00+09:00')), [U(1), U(2), U(3)]);
-  assert.ok(sheetRows(r.mf, '通知送信履歴').some((x) => x[1] === 'ATT-03' && /記録のみ/.test(x[6])));
+  setCell(r.mf, '90001', 'ATT-12', false);
+  assert.deepEqual(tos(runKind(r.g, 'alcoholCheckBeforeWork', '2026-11-10T10:00:00+09:00')), [U(1), U(2), U(3)]);
+  assert.ok(sheetRows(r.mf, '通知送信履歴').some((x) => x[1] === 'ATT-12' && /記録のみ/.test(x[6])));
+});
+
+test('13f お知らせ設定：今のシート（ATT-12・ATT-13 の列が無い）に列を足すと、全員チェックあり（リスタイル・所属別も）。列を足す前も送る', () => {
+  const { g, mf } = setup({ props: { NOTICE_SETTINGS: 'on' } });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
+    const sh = mf.getSheetByName(n);
+    sh.rows.forEach((r) => { r.length = Math.min(r.length, sh.rows[0].length - 2); });   // 13e までの本番のシート（ATT-12・13 の列なし）
+  }
+  g.ctx.AC_NS_CACHE = null;
+  for (const c of ['90001', '90003']) for (const id of ['ATT-12', 'ATT-13']) assert.equal(g.ctx.AC_noticeCheck_(id, c, '2026-11-10').send, true, c + id);
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
+    const d = mf.getSheetByName(n).dump();
+    const j12 = d[0].indexOf('ATT-12 アルコールチェックの入力確認（催促）'), j13 = d[0].indexOf('ATT-13 アルコールチェックのお礼');
+    assert.deepEqual([j12, j13], [d[0].length - 2, d[0].length - 1], n);
+    assert.ok(d.slice(1).every((r) => r[j12] === true && r[j13] === true), n);   // リスタイル川口・（その他の所属）も
+  }
 });
 
 test('通知：案内を OFF にしても、飲酒検知（2か所）・回答の記録・J列の対象者判定は変わらない', () => {

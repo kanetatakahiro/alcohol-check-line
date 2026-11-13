@@ -1370,7 +1370,8 @@ function AC_punchSelfMessage(dates, ctx, overrides, today, kinds) {
   return AC_nightSelfMessage((dates || []).map(function (d) { return { kind: 'punch', date: d, punchKind: (kinds || {})[d] || '' }; }), today);
 }
 
-/** 管理本部の本人への未申請の打刻漏れのお知らせ（PUNCH_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。記録は「打刻漏れ本人通知」シート */
+/** 管理本部の本人への未申請の打刻漏れのお知らせ（PUNCH_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。記録は「打刻漏れ本人通知」シート
+ *  【停止】2026-11-13 14:44 に PUNCH_SELF_NOTIFY を削除して止めた（管理本部も E-40・E-78 だけ）。コードは残す（docs/ATTENDANCE_NOTICE_RULES.md の「止めたお知らせ」） */
 function AC_punchSelfNotices_(R, mv, ss, today, props) {
   var mode = String(props.getProperty('PUNCH_SELF_NOTIFY') || '').trim();
   if (mode !== 'record' && mode !== 'on') return;
@@ -1852,14 +1853,14 @@ var AC_SETTINGS_SHOWN = {
   TOT_RELAY_CHECK: '未設定＝取り込みの見守りをする（"false" で停止）',
   AGREEMENT_START_MONTH: '未設定＝4月',
   FORM_LIVE_FROM: '未設定＝2026-10-20',
-  REQUEST_SELF_NOTIFY: '未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信。どちらも1つの申請につき1回だけ）',
-  PUNCH_SELF_NOTIFY: '未設定＝本人へ未申請の打刻漏れを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
+  REQUEST_SELF_NOTIFY: '【停止】2026-11-13 に削除（ToT で本人が確認できるため不要）。未設定＝本人へ承認待ちを知らせない（record＝記録だけ／on＝管理本部の本人へ送信。どちらも1つの申請につき1回だけ）',
+  PUNCH_SELF_NOTIFY: '【停止】2026-11-13 に削除（管理本部も夜のお知らせ・毎週月曜の催促だけ）。未設定＝本人へ未申請の打刻漏れを知らせない（record＝記録だけ／on＝管理本部の本人へ送信）',
   INQ_MODE: '未設定＝問い合わせ管理は動かない（record＝記録だけ／on＝利用開始）',
   INQ_NOTIFY_TO: '未設定＝問い合わせの通知は勤怠管理グループへ（admin＝管理者の個別LINEへ）',
   INQ_REMIND_DAYS: '未設定＝問い合わせのリマインドは毎日（weekdays＝土日は送らない）',
   LEAVE_REQUEST_NOTIFY: '未設定＝希望休の申請期限の案内をしない（record＝記録だけ／on＝毎月10日に送信）',
   NOTICE_SETTINGS: '未設定＝お知らせ設定を使わない（record＝OFFの人を記録だけ／on＝チェックに従う）',
-  NOTICE_ALCOHOL_SCOPE: '未設定＝guide（ATT-03・04 は8:30・18:30の案内だけに効く／guideAndFollow＝入力確認も／all＝お礼も）',
+  NOTICE_ALCOHOL_SCOPE: '使わない（版 2026-11-13f から、入力確認は ATT-12・お礼は ATT-13 で判定する。ATT-03・04 は8:30・18:30の案内だけ）',
   NOTICE_DEPT_CHANGE: '未設定＝keep（所属が変わっても個人の設定を引き継ぐ／reset＝新しい所属の初期値に戻す）',
   ALERT_TO_GROUP: '未設定＝飲酒検知を勤怠管理グループにも送る（"false" で管理者だけ）',
   NIGHT_WATCH: '未設定＝夜の取り込みを22:45に見守る（"false" で停止）',
@@ -2383,7 +2384,7 @@ function AC_dispatch_(kind) {
     var who = test ? 'test:' + test.code : reg ? reg.code : key;
     var dedupe = 'sent:' + today + ':' + tag + ':' + who;
     if (state.getProperty(dedupe)) return;
-    // お知らせ設定（ATT-03 出勤前・ATT-04 退勤後）。本人向けの案内だけに効く。飲酒検知・記録・J列の対象者判定には影響しない（gas/Notices.gs）
+    // お知らせ設定（案内：ATT-03 出勤前・ATT-04 退勤後／入力確認：ATT-12／お礼：ATT-13。版 2026-11-13f）。本人向けだけに効く。飲酒検知・記録・J列の対象者判定には影響しない（gas/Notices.gs）
     var nid = typeof AC_alcoholNoticeId === 'function' ? AC_alcoholNoticeId(tag, props.getProperty('NOTICE_ALCOHOL_SCOPE')) : null;
     if (nid && (test || reg) && !AC_noticeCheck_(nid, test ? test.code : reg.code, today).send) { offBySetting++; return; }
     var careKey = 'att:' + today + ':care:' + (test ? test.code : reg ? reg.code : key);

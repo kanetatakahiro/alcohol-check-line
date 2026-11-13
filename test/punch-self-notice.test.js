@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
+// 【停止】2026-11-13 14:44 に本番の PUNCH_SELF_NOTIFY を削除して止めた（E-42）。コードは残すため、このテストも残す（設定が無ければ動かないことは test/rules.test.js の「停止：」）
 // 管理本部の本人への「未申請の打刻漏れ」のお知らせ（すべて架空データ）
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
 const HEAD = ['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み', 'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日'];

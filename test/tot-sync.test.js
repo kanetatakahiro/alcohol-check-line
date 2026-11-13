@@ -545,14 +545,14 @@ test('13d お知らせ設定：今のシート（ATT-11 の列が無い）に、
   g.ctx.alcoholCheckSetupNoticeSettings();
   for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
     const sh = mf.getSheetByName(n);
-    sh.rows.forEach((r) => { r.length = Math.min(r.length, sh.rows[0].length - 1); });   // 13c までの本番のシート（ATT-11 の列なし）
+    sh.rows.forEach((r) => { r.length = Math.min(r.length, sh.rows[0].length - 3); });   // 13c までの本番のシート（ATT-11 の列なし。13f の ATT-12・13 も無い）
   }
   assert.ok(!mf.getSheetByName('お知らせ設定').dump()[0].some((h) => /^ATT-11/.test(h)));
   g.ctx.AC_noticeSync_(mf, mf.getSheetByName('従業員マスタ').dump());
   g.ctx.alcoholCheckSetupNoticeSettings();
   for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
     const v = mf.getSheetByName(n).dump(), j = v[0].indexOf('ATT-11 スケジュール変更のお知らせ（TOT反映）');
-    assert.equal(j, v[0].length - 1, n);
+    assert.equal(j, v[0].length - 3, n);   // 末尾に ATT-11・ATT-12・ATT-13 の順
     assert.ok(v.slice(1).every((r) => r[j] === true), n);
     assert.equal(v[0].filter((h) => /^ATT-11/.test(h)).length, 1, n + '：2回目でも増えない');
   }

@@ -14,22 +14,22 @@
  *   重要な通知（飲酒検知・取り込みの失敗・システムのエラー）は、この設定では止まらない
  */
 
-// ---------------- お知らせ35項目（設計用ID・2026-11-09 確定の34項目＋版 2026-11-13d の ATT-11） ----------------
+// ---------------- お知らせ37項目（設計用ID・2026-11-09 確定の34項目＋版 2026-11-13d の ATT-11＋版 2026-11-13f の ATT-12・ATT-13） ----------------
 // status：'送信中'（本番で送っている）／'停止中'（コードはあるが本番で止まっている・記録だけ）／'未実装'／'作らない'
 // def：所属の初期値（決定済み、または今の動きを引き継ぐ値）。restyle：所属名に「リスタイル」を含むときの初期値
 // impl：true のものだけ、実際の送信に連動する（未実装・作らないものは ON でも送らない）
 var AC_NOTICES = [
   { id: 'ATT-01', name: '希望休の案内', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, restyle: false, link: '希望休の申請期限の案内（毎月10日 12時台）' },
-  { id: 'ATT-02', name: '打刻漏れの連絡', cat: '勤怠・シフト', status: '停止中', impl: true, def: true, restyle: true, link: '打刻漏れ・当日の打刻なし（夜22:30。ATTENDANCE_NOTIFY 未設定で本人へは止まっている）、管理本部の本人への未申請の打刻漏れ（記録のみ）' },
-  { id: 'ATT-03', name: '出勤前アルコールチェックの案内', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, link: '朝の案内（8:30）。NOTICE_ALCOHOL_SCOPE により出勤前の入力確認（10:00）も' },
-  { id: 'ATT-04', name: '退勤後アルコールチェックの案内', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, link: '退勤前の案内（18:30）。NOTICE_ALCOHOL_SCOPE により退勤前の入力確認（20:00）・お礼も。※今の通知とフォームは「退勤前」（名前は未決）' },
+  { id: 'ATT-02', name: '打刻漏れの連絡', cat: '勤怠・シフト', status: '停止中', impl: true, def: true, restyle: true, link: '打刻漏れ・当日の打刻なし（夜22:30）、毎週月曜の打刻漏れの催促。管理本部の本人への未申請の打刻漏れは 2026-11-13 に停止（PUNCH_SELF_NOTIFY を削除）' },
+  { id: 'ATT-03', name: '出勤前アルコールチェックの案内', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, link: '朝の案内（8:30）だけ。入力確認（10:00）は ATT-12（版 2026-11-13f から）' },
+  { id: 'ATT-04', name: '退勤後アルコールチェックの案内', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, link: '退勤前の案内（18:30）だけ。入力確認（20:00）は ATT-12、お礼は ATT-13（版 2026-11-13f から）。※今の通知とフォームは「退勤前」（名前は未決）' },
   { id: 'ATT-05', name: 'シフト確定のお知らせ', cat: '勤怠・シフト', status: '未実装', def: false },
   { id: 'ATT-06', name: 'シフト変更のお知らせ', cat: '勤怠・シフト', status: '未実装', def: false },
   { id: 'ATT-07', name: '有給休暇の取得案内', cat: '勤怠・シフト', status: '作らない', def: false, note: '2026-11-06 の決定（会社から有給の取得を促さない）。ON にしても送らない' },
   { id: 'ATT-08', name: '有給休暇の残日数のお知らせ', cat: '勤怠・シフト', status: '作らない', def: false, note: '2026-11-06 の決定（残数は給与明細で確認）。ON にしても送らない' },
   { id: 'ATT-09', name: '勤怠修正の依頼', cat: '勤怠・シフト', status: '未実装', def: false },
   { id: 'ATT-10', name: '欠勤・遅刻の連絡確認', cat: '勤怠・シフト', status: '未実装', def: false },
-  { id: 'HR-01', name: '申請の確認', cat: '申請・労務', status: '停止中', impl: true, def: true, restyle: true, link: '管理本部の本人への承認待ちのお知らせ（記録のみ）' },
+  { id: 'HR-01', name: '申請の確認', cat: '申請・労務', status: '停止中', impl: true, def: true, restyle: true, link: '管理本部の本人への承認待ちのお知らせ。2026-11-13 に停止（REQUEST_SELF_NOTIFY を削除。TOT で本人が確認できるため）' },
   { id: 'HR-02', name: '残業の警告', cat: '申請・労務', status: '停止中', impl: true, def: true, restyle: true, link: '残業30時間（夜22:30。ATTENDANCE_NOTIFY 未設定で本人へは止まっている）' },
   { id: 'HR-03', name: '最大残業時間の警告（45時間）', cat: '申請・労務', status: '未実装', def: false, note: '45時間の手前の警告（時間は未決。案：40時間）' },
   { id: 'HR-04', name: '最大残業時間の超過（45時間）', cat: '申請・労務', status: '停止中', impl: true, def: true, link: '残業45時間（今月45時間以上で1回。夜22:30。本人へは止まっている）' },
@@ -56,6 +56,11 @@ var AC_NOTICES = [
   // 版 2026-11-13d で足した通知は末尾に足す（今のシートの列の並び＝この並び。途中に入れると新しい行の値が列とずれる）
   { id: 'ATT-11', name: 'スケジュール変更のお知らせ（TOT反映）', cat: '勤怠・シフト', status: '停止中', impl: true, def: true,
     link: '勤怠連絡フォームの内容を TOT のスケジュールに反映したとき（版 2026-11-13d・gas/TotSync.gs）。TOT_WRITE=on かつ DRY_RUN=false のときだけ送る' },
+  // 版 2026-11-13f：アルコールチェックの入力確認（催促）とお礼を、案内（ATT-03・04）と分ける。最初の値は全員チェックあり（リスタイルも）
+  { id: 'ATT-12', name: 'アルコールチェックの入力確認（催促）', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, restyle: true,
+    link: '出勤前の入力確認（10:00）・退勤前の入力確認（20:00）。版 2026-11-13f から（それまでは NOTICE_ALCOHOL_SCOPE で ATT-03・04 に従っていた）' },
+  { id: 'ATT-13', name: 'アルコールチェックのお礼', cat: '勤怠・シフト', status: '送信中', impl: true, def: true, restyle: true,
+    link: '連続記録のお礼（20:00。5・10・20…勤務日）。版 2026-11-13f から' },
 ];
 // 重要な通知（「お知らせ設定」の列にしない＝一般の設定では止められない。止める・送信先を変えるには両名の承認）
 var AC_CRITICAL_NOTICES = [
@@ -122,15 +127,16 @@ function AC_noticeEffective(idx, id, code) {
   return AC_noticeDeptDefault(id, dept);
 }
 
-/** 純粋関数：アルコールチェックの本人向け通知が、どの設定に従うか。scope：guide（案内だけ・推奨）／guideAndFollow（案内＋催促）／all（＋お礼） */
+/**
+ * 純粋関数：アルコールチェックの本人向け通知が、どの設定に従うか（版 2026-11-13f）。
+ * 案内：8:30 は ATT-03・18:30 は ATT-04／入力確認（催促 10:00・20:00）は ATT-12／お礼は ATT-13。
+ * scope（NOTICE_ALCOHOL_SCOPE）は使わない（引数の並びは変えない。13e までは guide／guideAndFollow／all で催促・お礼を ATT-03・04 に従わせていた）
+ */
 function AC_alcoholNoticeId(tag, scope) {
-  scope = scope === 'guideAndFollow' || scope === 'all' ? scope : 'guide';
   if (tag === 'morning') return 'ATT-03';
   if (tag === 'evening') return 'ATT-04';
-  if (scope === 'guide') return null;
-  if (tag === 'followBefore') return 'ATT-03';
-  if (tag === 'followAfter') return 'ATT-04';
-  if (tag === 'thanks' && scope === 'all') return 'ATT-04';
+  if (tag === 'followBefore' || tag === 'followAfter') return 'ATT-12';
+  if (tag === 'thanks') return 'ATT-13';
   return null;
 }
 

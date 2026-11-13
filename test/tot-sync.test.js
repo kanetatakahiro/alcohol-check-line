@@ -322,3 +322,240 @@ test('受け渡し：tot-latest.json が無いときは渡さずに待たせる�
   assert.equal(cases(g, mf)[0].state, '失敗');
   assert.match(pushes(g).at(-1).body.messages[0].text, /TOT の従業員が見つからないため/);
 });
+
+// ======================================================================
+// 版 2026-11-13d：本人のスケジュール申請の承認・棄却／本人による承認の拒否／まとめと前日の再通知／本人へのお知らせ（ATT-11）
+// ======================================================================
+const RQ = (date, o = {}) => ({ type: 'schedules', date, requestedDate: '2026-11-12', employeeKey: 'k001', requestKey: 'rq-' + date, status: 'applying',
+  message: '架空の申請メッセージ', requested: { clockInSchedule: '', clockOutSchedule: '', holidayName: '欠勤', holidayCode: '3', workDayTypeName: '平日', scheduleTypeName: '全日休暇' }, ...o });
+const withRequests = (g, reqs) => {
+  const f = g.drive.files['tot-latest.json'], d = JSON.parse(f.content);
+  d.results.requests = reqs;
+  g.drive.files['tot-latest.json'] = { ...f, content: JSON.stringify(d) };
+};
+const live = (props = {}) => setup({ TOT_WRITE: 'on', DRY_RUN: 'false', ...props });
+
+test('13d 純粋関数：同じ人・同じ日の申請中のスケジュール申請だけを拾う（打刻申請・残業申請・ほかの人・ほかの日・承認済みは拾わない）', () => {
+  const X = setup().g.ctx;
+  const list = [RQ('2026-11-16'), RQ('2026-11-17', { status: 'approved' }), RQ('2026-11-18', { type: 'timerecords' }), RQ('2026-11-16', { type: 'overtimes', requestKey: 'x' }),
+    RQ('2026-11-16', { employeeKey: 'k002', requestKey: 'y' }), RQ('2026-11-20'), { _error: 403 }];
+  assert.deepEqual([...X.SCH_pendingRequests(list, 'k001', ['2026-11-16', '2026-11-17', '2026-11-18'])].map((q) => q.requestKey), ['rq-2026-11-16']);
+  assert.equal(X.SCH_requestKind(RQ('2026-11-16')), '休み（欠勤）');
+  assert.equal(X.SCH_requestKind({ requested: { clockInSchedule: T('2026-11-16', '10:00'), clockOutSchedule: T('2026-11-16', '19:00') } }), '10:00-19:00 の出勤');
+  assert.equal(X.SCH_requestKind({}), '（内容は TOT でご確認ください）');
+  const lines = [...X.SCH_requestLines([X.SCH_pendingRequests([RQ('2026-11-16')], 'k001', ['2026-11-16'])[0]])];
+  assert.deepEqual(lines, ['■ ご本人のスケジュール申請（申請中）', '11/16（月）：休み（欠勤）（申請日 11/12）', '　申請メッセージ：架空の申請メッセージ',
+    '※申請の承認・棄却は元に戻せません（「元に戻す」は TOT のスケジュールを書き換えたときだけ使えます）。']);
+});
+
+test('13d 純粋関数：本人へのお知らせの文（1日・何日か・休みの変更・棄却したとき）', () => {
+  const X = setup().g.ctx;
+  const c = { label: '欠勤', from: '2026-11-20', until: '2026-11-20', changeTo: '' };
+  assert.equal(X.SCH_selfMessage(c, ['2026-11-20'], []), 'お疲れ様です😊\n11/20（金）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  assert.match(X.SCH_selfMessage({ ...c, label: '有給休暇', until: '2026-11-21' }, ['2026-11-20', '2026-11-21'], []), /11\/20（金）、11\/21（土）は有給休暇として/);
+  const sw = X.SCH_selfMessage({ label: '休みの変更', from: '2026-11-12', until: '2026-11-12', changeTo: '2026-11-15' }, null, []);
+  assert.match(sw, /^お疲れ様です😊\n11\/12（木）の休みを11\/15（日）に変更しました。\nTouch On Timeでの申請は不要です。/);
+  assert.match(X.SCH_selfMessage(c, ['2026-11-20'], ['2026-11-20']), /変更しました。\n11\/20（金）のスケジュール申請は、勤怠変更フォームの内容で反映したため取り下げとしました。\nTouch On Timeでの申請は不要です。/);
+});
+
+test('13d カード：同じ日に本人の申請があれば、申請の内容と3つのボタン（申請を承認する・棄却して反映・反映しない）。無ければ今までどおり2つ', () => {
+  const { g, mf } = setup();
+  withRequests(g, [RQ('2026-11-16'), RQ('2026-11-17', { type: 'timerecords', requestKey: 'tr' })]);
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16', '終了日（何日か続くとき）': '2026-11-17' });
+  const card = cardOf(g), [c] = cases(g, mf);
+  assert.deepEqual(card.contents.footer.contents.map((b) => b.action.label), ['申請を承認する', '申請を棄却してフォームの内容で反映', '反映しない']);
+  assert.deepEqual(card.contents.footer.contents.map((b) => b.action.data.split('|')[2]), ['reqok', 'reqng', 'decline']);
+  const text = JSON.stringify(card);
+  assert.match(text, /11\/16（月）：休み（欠勤）（申請日 11\/12）/);
+  assert.match(text, /申請の承認・棄却は元に戻せません/);
+  assert.ok(!text.includes('rq-') && !text.includes('11/17（火）：休み'), '打刻申請は出さない・申請識別キーは出さない');
+  assert.deepEqual([...c.requests].map((q) => q.requestKey), ['rq-2026-11-16']);
+  assert.ok(pushes(g).filter((f) => f.body.messages[0].type === 'flex').every((f) => f.body.to === KANRI), 'カードは勤怠管理グループだけ');
+  // 申請のあるカードに「承認してTOTに反映」（古い形のボタン）は使えない
+  assert.match(press(g, btnData(card, 0).replace('|reqok|', '|approve|')), /このボタンは使えません/);
+  const b = setup();
+  submit(b.g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  assert.deepEqual(cardOf(b.g).contents.footer.contents.map((x) => x.action.label), ['承認してTOTに反映', '反映しない']);
+  assert.match(press(b.g, btnData(cardOf(b.g), 0).replace('|approve|', '|reqok|')), /このボタンは使えません/);
+});
+
+test('13d 申請を承認する：受け渡しに method=approve と申請。結果で本人の申請の承認を知らせ、「元に戻す」は出さない。本人へ1通', () => {
+  const { g, mf } = live();
+  withRequests(g, [RQ('2026-11-16')]);
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  assert.match(press(g, btnData(cardOf(g), 0)), /ご本人の申請を承認します（承認 花子さん）/);
+  let [c] = cases(g, mf);
+  assert.deepEqual([c.state, c.method], ['反映待ち', '申請を承認']);
+  const item = queue(g).items[0];
+  assert.deepEqual([item.method, JSON.parse(JSON.stringify(item.requests))], ['approve', [{ requestKey: 'rq-2026-11-16', date: '2026-11-16' }]]);
+  const n = g.fetches.length;
+  post(g, { type: 'tot-write-result', secret: SECRET, id: c.id, op: 'apply', method: 'approve', status: 'done', written: [], requestResults: [{ date: '2026-11-16', action: 'approved', status: 'approved' }] });
+  const ps = pushes(g, n);
+  const grp = ps.find((f) => f.body.to === KANRI).body.messages[0];
+  assert.equal(grp.type, 'text');
+  assert.match(grp.text, /ご本人のスケジュール申請を承認しました[\s\S]*対象の日：11\/16（月）[\s\S]*申請の承認は元に戻せません/);
+  const self = ps.find((f) => f.body.to === U(1));
+  assert.ok(self, '本人へ1通');
+  assert.equal(self.body.messages[0].text, 'お疲れ様です😊\n11/16（月）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  [c] = cases(g, mf);
+  assert.equal(c.state, '反映済み');
+  const v = sheet(mf).dump()[1];
+  assert.match(v[24], /2026-11-16：承認（approved）/);
+  assert.match(v[25], /^送信済み：お疲れ様です/);
+});
+
+test('13d 申請を承認する：承認フローの次の段階が残る（まだ申請中）なら、本人へは送らない', () => {
+  const { g, mf } = live();
+  withRequests(g, [RQ('2026-11-16')]);
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  press(g, btnData(cardOf(g), 0));
+  const id = queue(g).items[0].id, n = g.fetches.length;
+  post(g, { type: 'tot-write-result', secret: SECRET, id, op: 'apply', method: 'approve', status: 'done', requestResults: [{ date: '2026-11-16', action: 'approved', status: 'applying' }] });
+  assert.match(pushes(g, n)[0].body.messages[0].text, /次の段階があるため、11\/16（月）の申請はまだ申請中です/);
+  assert.equal(pushes(g, n).some((f) => f.body.to === U(1)), false);
+  assert.equal(sheet(mf).dump()[1][25], '');
+});
+
+test('13d 申請を棄却して反映：結果に棄却したことと「元に戻す」、本人へは取り下げの一文つき。申請がもう無ければ何もしない（本人へのお願いも書かない）', () => {
+  const { g, mf } = live();
+  withRequests(g, [RQ('2026-11-16')]);
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  assert.match(press(g, btnData(cardOf(g), 1)), /ご本人の申請を棄却して TOT に反映します/);
+  const item = queue(g).items[0];
+  assert.equal(item.method, 'reject');
+  const n = g.fetches.length;
+  post(g, { type: 'tot-write-result', secret: SECRET, id: item.id, op: 'apply', method: 'reject', status: 'done', written: ['2026-11-16'],
+    before: { '2026-11-16': { clockInSchedule: T('2026-11-16', '09:00'), workDayTypeName: '平日' } }, requestResults: [{ date: '2026-11-16', action: 'rejected', status: 'rejected' }] });
+  const grp = pushes(g, n).find((f) => f.body.to === KANRI).body.messages[0];
+  assert.equal(grp.type, 'flex');
+  assert.match(JSON.stringify(grp), /スケジュール申請（11\/16（月））は棄却しました（棄却は元に戻せません）/);
+  assert.equal(grp.contents.footer.contents[0].action.label, '元に戻す');
+  assert.match(pushes(g, n).find((f) => f.body.to === U(1)).body.messages[0].text, /取り下げとしました/);
+  assert.equal(cases(g, mf)[0].state, '反映済み');
+  // 申請がもう無い
+  const b = live();
+  withRequests(b.g, [RQ('2026-11-16')]);
+  submit(b.g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  press(b.g, btnData(cardOf(b.g), 1));
+  const id = queue(b.g).items[0].id, m = b.g.fetches.length;
+  post(b.g, { type: 'tot-write-result', secret: SECRET, id, op: 'apply', method: 'reject', status: 'failed', reason: 'requestGone' });
+  const t = pushes(b.g, m)[0].body.messages[0].text;
+  assert.match(t, /すでに承認・棄却・取り下げされていたため、何もしませんでした/);
+  assert.ok(!/ご本人に、Touch On Time/.test(t));
+  assert.equal(pushes(b.g, m).some((f) => f.body.to === U(1)), false);
+});
+
+test('13d 本人のボタンは受け付けない（どのボタンも）。ほかのメンバーなら受け付ける', () => {
+  const { g, mf } = setup();
+  g.line.members[KANRI][U(1)] = '試験 一郎';
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  const card = cardOf(g);
+  for (const i of [0, 1]) assert.equal(press(g, btnData(card, i), { uid: U(1) }), 'ご自身の分は、ほかの方が承認してください。');
+  assert.equal(cases(g, mf)[0].state, '承認待ち');
+  assert.ok(mf.getSheetByName('TOT反映の記録').dump().some((r) => r[3] === '拒否（ご本人）'));
+  assert.match(press(g, btnData(card, 0)), /承認しました/);
+  assert.match(JSON.stringify(card), /ご自身の分は、ほかの方が承認してください。/);
+});
+
+test('13d 本人へのお知らせ：record は送らず記録だけ／DRY_RUN・お知らせ設定でOFF・お知らせ停止中は送らない', () => {
+  const a = setup({ TOT_WRITE: 'record' });
+  submit(a.g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  press(a.g, btnData(cardOf(a.g), 0));
+  assert.match(sheet(a.mf).dump()[1][25], /^記録のみ（TOT_WRITE=record）：お疲れ様です😊\n11\/16（月）は欠勤として/);
+  assert.equal(pushes(a.g).some((f) => f.body.to === U(1)), false);
+  const done = (g) => {
+    submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+    press(g, btnData(cardOf(g), 0));
+    const id = queue(g).items[0].id;
+    post(g, { type: 'tot-write-result', secret: SECRET, id, op: 'apply', status: 'done', written: ['2026-11-16'], before: {} });
+  };
+  const b = setup({ TOT_WRITE: 'on' });                                   // DRY_RUN 未設定
+  done(b.g);
+  assert.match(sheet(b.mf).dump()[1][25], /^記録のみ（DRY_RUN）：/);
+  assert.equal(pushes(b.g).some((f) => f.body.to === U(1)), false);
+  const c = live();                                                        // 手で入れたお知らせ停止（今日を含む）
+  c.mf.getSheetByName('お知らせ停止').appendRow(["'90001", '試験 一郎', '2026-11-10', '2026-11-20', '休み', '全部']);
+  done(c.g);
+  assert.match(sheet(c.mf).dump()[1][25], /^送らない（お知らせ停止中）：/);
+  const d = live({ NOTICE_SETTINGS: 'on' });                               // お知らせ設定で ATT-11 を OFF
+  d.g.ctx.alcoholCheckSetupNoticeSettings();
+  const ns = d.mf.getSheetByName('お知らせ設定'), col = ns.dump()[0].indexOf('ATT-11 スケジュール変更のお知らせ（TOT反映）');
+  assert.ok(col > 0);
+  ns.getRange(2, col + 1).setValue(false);
+  d.g.ctx.AC_NS_CACHE = null;
+  done(d.g);
+  assert.match(sheet(d.mf).dump()[1][25], /^送らない（お知らせ設定でOFF）：/);
+  // フォームから入ったお知らせ停止（欠勤の日）は数えない（live の最初のテストで送れていることで確認済み）
+});
+
+test('13d まとめ（INQ_remind）：承認待ちの一覧を足す（0件なら足さない）。前日の15時台に承認待ちのカードをもう一度（1枚1回）', () => {
+  const { g, mf } = setup({ TOT_WRITE: 'on' }, '2026-11-15T09:00:00+09:00');
+  g.drive.files['tot-latest.json'] = { ...g.drive.files['tot-latest.json'] };
+  g.ctx.INQ_remind();
+  assert.equal(pushes(g).length, 0, 'シートが無い・0件なら何も送らない');
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+  submit(g, { 区分: '有給休暇', '日付（開始日）': '2026-11-20' });
+  let n = g.fetches.length;
+  g.ctx.INQ_remind();                                                      // 9時台：一覧だけ（再通知はまだ）
+  let ps = pushes(g, n);
+  assert.equal(ps.length, 1, JSON.stringify(ps.map((f) => [f.body.to, f.body.messages[0].text || f.body.messages[0].altText])));
+  assert.equal(ps[0].body.to, KANRI);
+  assert.equal(ps[0].body.messages[0].text, '【承認待ちの勤怠の変更 2件】\n・試験 一郎さん 11/16（月） 欠勤\n・試験 一郎さん 11/20（金） 有給休暇\n勤怠管理グループの承認のカードから、承認または「反映しない」を押してください。');
+  g.clock.now = new Date('2026-11-15T15:00:00+09:00').getTime();
+  n = g.fetches.length;
+  g.ctx.INQ_remind();                                                      // 15時台：11/16 のカードだけもう一度
+  ps = pushes(g, n);
+  const again = ps.map((f) => f.body.messages[0]).filter((m) => m.type === 'flex');
+  assert.equal(again.length, 1);
+  assert.match(again[0].altText, /明日が対象の日です/);
+  assert.match(JSON.stringify(again[0]), /11\/16（月）：9:00-18:00 の出勤 → 欠勤/);
+  n = g.fetches.length;
+  g.ctx.INQ_remind();                                                      // 2回目は送らない
+  assert.equal(pushes(g, n).filter((f) => f.body.messages[0].type === 'flex').length, 0);
+  assert.ok(sheet(mf).dump()[1][26]);
+  // 承認されたら一覧から消える
+  press(g, btnData(cardOf(g), 0));
+  n = g.fetches.length;
+  g.ctx.INQ_remind();
+  assert.match(pushes(g, n)[0].body.messages[0].text, /【承認待ちの勤怠の変更 1件】\n・試験 一郎さん 11\/20（金） 有給休暇/);
+  // TOT_WRITE が未設定なら足さない
+  g.scriptProps.deleteProperty('TOT_WRITE');
+  n = g.fetches.length;
+  g.ctx.INQ_remind();
+  assert.equal(pushes(g, n).length, 0);
+});
+
+test('13d シート：13c で作った「TOT反映」（22列）に、足した列の見出しを足す（今の値は変えない）', () => {
+  const { g, mf } = setup();
+  const sh = mf.insertSheet('TOT反映');
+  sh.appendRow(g.ctx.SCH_HEADER.slice(0, 22));
+  const old = g.ctx.SCH_HEADER.map(() => '').slice(0, 22);
+  Object.assign(old, { 0: 'S-20261113-001', 1: '承認待ち', 3: "'90001", 4: '試験 一郎', 5: '欠勤', 6: "'2026-11-16", 7: "'2026-11-16", 11: "'abcdef" });
+  sh.appendRow(old);
+  const before = JSON.stringify(sh.dump()[1].slice(0, 22));
+  submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-17' });
+  const v = sh.dump();
+  assert.deepEqual(v[0].slice(22), ['やり方', '本人の申請', '申請の結果', '本人へのお知らせ', '再通知日時']);
+  assert.equal(JSON.stringify(v[1].slice(0, 22)), before);
+  assert.equal(cases(g, mf)[0].method, '反映');                          // 空のやり方は「反映」として読む
+});
+
+test('13d お知らせ設定：今のシート（ATT-11 の列が無い）に、見出しと所属の初期値（ON）のチェックボックスを末尾に足す', () => {
+  const { g, mf } = setup({ TOT_WRITE: 'on', NOTICE_SETTINGS: 'on' });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
+    const sh = mf.getSheetByName(n);
+    sh.rows.forEach((r) => { r.length = Math.min(r.length, sh.rows[0].length - 1); });   // 13c までの本番のシート（ATT-11 の列なし）
+  }
+  assert.ok(!mf.getSheetByName('お知らせ設定').dump()[0].some((h) => /^ATT-11/.test(h)));
+  g.ctx.AC_noticeSync_(mf, mf.getSheetByName('従業員マスタ').dump());
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) {
+    const v = mf.getSheetByName(n).dump(), j = v[0].indexOf('ATT-11 スケジュール変更のお知らせ（TOT反映）');
+    assert.equal(j, v[0].length - 1, n);
+    assert.ok(v.slice(1).every((r) => r[j] === true), n);
+    assert.equal(v[0].filter((h) => /^ATT-11/.test(h)).length, 1, n + '：2回目でも増えない');
+  }
+  g.ctx.AC_NS_CACHE = null;
+  assert.equal(g.ctx.AC_noticeCheck_('ATT-11', '90001', TODAY).send, true);
+});

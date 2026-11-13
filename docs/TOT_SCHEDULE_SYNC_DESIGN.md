@@ -236,3 +236,31 @@
 
 - 書き込み用のトークンの発行（サポートセンター）と、パターン使用でないことの確認
 - 本番で最初に試す人と日（管理本部の人の未来の日で1件。元に戻すも試す）
+
+## 10. 版 2026-11-13d（本番未導入）
+
+### 10-1. 調べたこと（API の資料の原文）
+
+- 申請の承認・棄却 `PUT /requests/{requestKey}`：送る項目は `administratorKey`（**必須**・管理者識別キー）・`approve`（**必須**・true 承認／false 棄却）・`adminComment`（任意・管理者コメント）。棄却の理由は adminComment に入れる。
+  - 「管理者識別キーで指定した管理者が対象の申請の承認フローに存在しない、または承認レベルが異なる場合にはエラー」。承認フローが何段階もある申請は、1回の承認で次の段階に進むだけ（応答の status は applying のまま）。
+  - 応答：requestKey・status・currentFlow・flow・adminComment・lastModifiedAdministratorKey
+- スケジュール申請の一覧 `GET /requests/schedules/{年月}`：date（対象日）・requestedDate（申請日）・employeeKey・requestKey・applicant・status（applying／rejected／approved）・currentFlow・message（申請メッセージ）・adminComment・requested（申請内容：予定時刻・休憩・holidaysObtained〔休暇区分のコードと名前〕・workDayTypeName・scheduleTypeName など）・current（今のスケジュール）。additionalFields で schedulePatternCode・schedulePatternName・flow（段階ごとの管理者識別キー）も取れる。**カードに出す項目はすべて取れる**。
+  - 状態に「取り下げ」は無い。本人が取り下げた申請は一覧から消えるものとして扱う（未確認）。
+- 管理者の一覧 `GET /administrators`（連携希望項目「管理者データ（読み取り）」）：code・key・name。今のトークンにこの項目が無ければ 403。
+
+### 10-2. 決めたこと・作ったもの
+
+- 承認に使う管理者は、VPS の .env の `TOT_APPROVER_KEY`（1人）。調べ方は `node --env-file=.env src/tot-write.js --admins`（画面に出すだけ）。その管理者が申請の今の段階の承認者にいなければ、何もせず失敗（approverNotInFlow）。TOT 上は、その管理者が承認・棄却したことになる（承認した人の名前は「TOT反映」シートと adminComment「LINE承認：受付番号」に残る）。
+- 申請の内容は中継（src/tot-relay.js）が朝・夜に取るスケジュール申請（今月・前月）から探す。**中継を置き換えるまでは、カードの申請の行は「（内容は TOT でご確認ください）」になり、申請メッセージは出ない**（申請があることとボタン3つは出る）。カードを作るときのデータは最新の中継の時点のもの（それより後の申請はカードに出ない。VPS は書く前に読み直す）。翌月の日の申請は今の中継では取っていない。
+- ［申請を承認する］：申請中なら PUT approve:true（adminComment「LINE承認：受付番号」）。スケジュールは書かない。「元に戻す」は出さない。
+- ［申請を棄却してフォームの内容で反映］：スケジュールの計画（過ぎた日・打刻・入れ替え）を先に確かめ、書けるときだけ PUT approve:false（adminComment「勤怠変更フォームの内容で反映したため」）→ スケジュールを PUT。「元に戻す」はスケジュールを書いたときだけ（棄却は戻せない）。
+- 申請がもう申請中でない（承認・棄却・一覧に無い）→ 何もしない（requestGone）。グループに「何もしませんでした」。
+- 本人のボタンの拒否・承認待ちのまとめ（A-49）・前日の15時台の再通知（A-50）・本人へのお知らせ（E-79・ATT-11）は gas/TotSync.gs の冒頭の説明のとおり。
+- 「TOT反映」シートに列を5つ足した（やり方・本人の申請・申請の結果・本人へのお知らせ・再通知日時）。13c で作ったシートには見出しを自動で足す（今の値は変えない）。
+- お知らせ設定に ATT-11 を末尾に足した。今の「お知らせ設定」「所属別お知らせ設定」には、見出しと所属の初期値（ON）のチェックボックスを末尾に自動で足す。
+
+### 10-3. まだ確かめること
+
+- 本番の承認フローの段階と、TOT_APPROVER_KEY にする管理者（管理本部の誰か）
+- 今のトークンに「管理者データ（読み取り）」があるか（無ければ `--admins` は 403。管理画面で追加するか、サポートに識別キーの調べ方を確認）
+- 取り下げた申請が一覧から消えるか（消えずに別の状態で残るなら、requestGone の判定を見直す）

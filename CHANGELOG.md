@@ -1,5 +1,39 @@
 # 変更履歴
 
+## 2026-11-13 版 2026-11-13d：本人のスケジュール申請の承認・棄却／本人による承認の拒否／承認待ちのまとめと前日の再通知／本人へのお知らせ（ブランチ feature/notification-settings・本番未導入）
+- 11/13 安藤さんの指示（②）で作成。調べたことと決めたこと：docs/TOT_SCHEDULE_SYNC_DESIGN.md の「10.」
+- A：承認のカードを作るとき、同じ人・同じ日の申請中のスケジュール申請を探し、あればカードに申請の内容（対象の日・スケジュールの種類・申請日・申請メッセージ）とボタン3つ（申請を承認する／申請を棄却してフォームの内容で反映／反映しない）。打刻申請・残業申請は出さない。VPS は承認・棄却の直前に申請を読み直し、申請中でなければ何もしない。申請の承認・棄却は元に戻せない（カードに明記）。カードは勤怠管理グループだけ
+- B1：カードの対象者本人が押したボタンは受け付けない（「ご自身の分は、ほかの方が承認してください。」）
+- B2：9:00・15:00 の問い合わせのまとめに「承認待ちの勤怠の変更 ○件」と1行ずつ（0件なら出さない）。対象の日の前日の15時台に承認待ちのカードをもう一度（1枚1回）
+- B3：反映できたら本人へ1通（E-79・新しい通知ID ATT-11・初期値 ON）。TOT_WRITE=on かつ DRY_RUN=false のときだけ送り、それ以外は送る予定の文を「TOT反映」シートに記録
+- 中継（src/tot-relay.js）：スケジュール申請だけ、申請メッセージと申請内容の要約も Apps Script に渡す（打刻申請・残業申請は今までどおり渡さない）。取る回数は変わらない（夜10回・申請6回）
+- VPS（src/tot-write.js）：.env の TOT_APPROVER_KEY（承認・棄却に使う管理者識別キー）。`--admins` で管理者の一覧を画面に出す
+- INQ_remind：TOT反映の部分は INQ_MODE・INQ_REMIND_DAYS に関係なく動く（TOT_WRITE が record・on のとき）。問い合わせの部分の動きは変わらない
+- 指紋：コード.gs `cb51ca2590b1f4be`（版 2026-11-13d）、TotSync.gs `0272c87d34b392cf`、Inquiry.gs `c7420dea20f00378`、Notices.gs `c35ead8627af23d0`、src/tot-write.js `1be91e8eb12f6fd4`、src/tot-relay.js `b78f26b831d50b26`（今の VPS は `82e456a1a4feae56`）。LeaveRequest.gs は変更なし
+- テスト：test/tot-sync.test.js に11件、test/tot-write.test.js に5件、test/tot-relay.test.js に1件。項目数のテストを35項目に（全269件成功）
+- 資料：設計メモ（10.）、メッセージ一覧（E-79・A-49・A-50、A-44・A-46・A-47 に追記）、docs/VPS_SSH_HARDENING.md（C：SSH を鍵だけのログインにする手順書）
+- 本番・VPS・Touch On Time は変更なし
+
+### 本番に入れる手順（Apps Script）
+1. 本番が 13c（コード.gs `8b0d5fc58a2432cf`・TotSync.gs `ae9d4b768b9a7e8a`）であることを確かめる
+2. 差し替え：コード.gs → `cb51ca2590b1f4be`、TotSync.gs → `0272c87d34b392cf`、Inquiry.gs（`6a128fc12d5ba779`）→ `c7420dea20f00378`、Notices.gs（`821b30bfc0c22532`）→ `c35ead8627af23d0`。保存
+3. Webアプリを既存デプロイの編集で新しいバージョンとして公開
+4. alcoholCheckSetupNoticeSettings を1回実行（「お知らせ種類」に ATT-11、「お知らせ設定」「所属別お知らせ設定」の末尾に ATT-11 の列〔初期値 ON〕。毎日の更新でも足されるが、先にそろえておく）
+5. INQ_remind のトリガー（9時台・15時台）があるかをトリガーの一覧で確かめる。無ければ INQ_setupRemindTriggers（INQ_MODE=record のままなら、問い合わせのまとめは今までどおり送られず、承認待ちの一覧だけが送られる）
+6. TOT_WRITE=record のまま：承認は記録だけ。本人へのお知らせも送らず、文をシートに記録
+
+### VPS に入れる手順（安藤さんがシリアルコンソールで）
+1. `cd ~/alcohol-check-line && cp src/tot-relay.js ~/tot-relay.js.bak-20261113`
+2. `curl -fsSL https://raw.githubusercontent.com/kanetatakahiro/alcohol-check-line/{コミット}/src/tot-relay.js -o src/tot-relay.js`（{コミット} はこの項を入れたコミット）
+3. `curl -fsSL https://raw.githubusercontent.com/kanetatakahiro/alcohol-check-line/{コミット}/src/tot-write.js -o src/tot-write.js`
+4. 指紋：`for f in src/tot-relay.js src/tot-write.js; do perl -0pe 's/\n+\z//' $f | shasum -a 256 | cut -c1-16; done` → `b78f26b831d50b26`・`1be91e8eb12f6fd4`
+5. 読み込みの確認（TOT・Apps Script へは接続しない）：`node -e "import('./src/tot-relay.js').then(m=>{const p=m.plan('2026-11-13','night');console.log(p.length,p.filter(i=>i.path.includes('/requests/')).length)})"` → `10 6`
+6. TOT_WRITE=on にするとき（書き込みを始めるとき）だけ：.env に `TOT_WRITE_TOKEN=…`（今のトークンと同じ値）と `TOT_APPROVER_KEY=…` をエディタで足す。管理者識別キーは `node --env-file=.env src/tot-write.js --admins` で画面に出して選ぶ（チャットに貼らない）。cron の行は 13c の手順のとおり
+- 戻し方：`cp ~/tot-relay.js.bak-20261113 ~/alcohol-check-line/src/tot-relay.js`（Apps Script は 13d のままでも、申請の内容の行が「内容は TOT でご確認ください」になるだけ）
+
+### 戻し方（Apps Script）
+- 4つのファイルを 13c の指紋に戻して再公開。「TOT反映」の足した列・お知らせ設定の ATT-11 の列は残してよい（読まれないか、初期値 ON で使われない）
+
 ## 2026-11-13 10:54 本番反映（版 2026-11-13c）
 - コード.gs を fdb8e69730475c28 → 8b0d5fc58a2432cf（版 2026-11-13c）に差し替え、TotSync.gs（ae9d4b768b9a7e8a）を追加（Claude が実施）
 - Webアプリ バージョン29 を既存デプロイの編集で公開（説明：TOTスケジュール自動反映 2026-11-13c（TotSync 追加・TOT_WRITE 未設定））

@@ -327,7 +327,7 @@ function SCH_remindText(cases) {
 
 /** 純粋関数：前日の15時台にもう一度送るカードか（承認待ち・まだ再通知していない・いちばん早い対象の日が明日） */
 function SCH_isDueForResend(c, today, hour) {
-  if (c.state !== SCH_STATE.wait || hour < SCH_RESEND_HOUR || (c.renotifiedAt instanceof Date) || String(c.renotifiedAt || '')) return false;
+  if (c.state !== SCH_STATE.wait || !(hour >= SCH_RESEND_HOUR) || (c.renotifiedAt instanceof Date) || String(c.renotifiedAt || '')) return false;
   var first = SCH_days(c).slice().sort()[0];
   return first === SCH_addDays(today, 1);
 }
@@ -771,7 +771,7 @@ function SCH_remindPart_(now) {
   if (mode === 'off') return null;
   var ss = SCH_book_(), sh = ss.getSheetByName(SCH_SHEET);
   if (!sh) return null;
-  var cases = SCH_cases_(sh), today = Utilities.formatDate(now, AC_TZ, 'yyyy-MM-dd'), hour = Number(Utilities.formatDate(now, AC_TZ, 'H'));
+  var cases = SCH_cases_(sh), today = Utilities.formatDate(now, AC_TZ, 'yyyy-MM-dd'), hour = Number(Utilities.formatDate(now, AC_TZ, 'HH'));
   var due = cases.filter(function (c) { return SCH_isDueForResend(c, today, hour); });
   return { text: SCH_remindText(cases), after: function () {
     due.forEach(function (c) {

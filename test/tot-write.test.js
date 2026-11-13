@@ -155,3 +155,95 @@ test('実行：読み取りに失敗したら結果を返さない（Apps Script
   assert.equal(f.results.length, 0);
   assert.deepEqual(r.summary, [{ id: 'S-20261113-001', op: 'apply', status: 'retry', http: 429 }]);
 });
+
+// ---- 版 2026-11-13d：本人のスケジュール申請の承認・棄却 ----
+import { checkRequests } from '../src/tot-write.js';
+const FLOW = (keys = ['adm-1']) => [{ level: 1, administratorKeys: keys }];
+const REQ = (o = {}) => ({ date: '2026-11-16', requestKey: 'rq1', status: 'applying', currentFlow: 1, flow: FLOW(), ...o });
+function withRequestsApi(f, reqs, { failReq = false } = {}) {
+  const orig = f.fetchImpl, puts = [];
+  f.fetchImpl = async (url, opt) => {
+    const u = new URL(url.startsWith('http') ? url : 'https://x' + url), path = u.pathname.replace('/v1.0', '');
+    if (opt.method === 'GET' && /^\/requests\/schedules\/\d{4}-\d{2}$/.test(path)) {
+      f.calls.push({ method: 'GET', url: path + u.search, auth: opt.headers.Authorization });
+      assert.equal(u.searchParams.get('additionalFields'), 'flow');
+      return { ok: true, status: 200, json: async () => ({ requests: reqs }), text: async () => '' };
+    }
+    const m = /^\/requests\/([^/]+)$/.exec(path);
+    if (opt.method === 'PUT' && m) {
+      const b = JSON.parse(opt.body);
+      puts.push({ key: m[1], ...b, auth: opt.headers.Authorization });
+      f.calls.push({ method: 'PUT', url: path });
+      if (failReq) return { ok: false, status: 400, json: async () => ({ errors: [{ code: 1, message: '架空のエラー' }] }), text: async () => '' };
+      return { ok: true, status: 200, json: async () => ({ requestKey: m[1], status: b.approve ? 'approved' : 'rejected' }), text: async () => '' };
+    }
+    return orig(url, opt);
+  };
+  return puts;
+}
+const ENV2 = { ...ENV, TOT_APPROVER_KEY: 'adm-1' };
+const APPROVE = { ...LEAVE(['2026-11-16']), method: 'approve', requests: [{ requestKey: 'rq1', date: '2026-11-16' }] };
+const REJECT = { ...LEAVE(['2026-11-16']), method: 'reject', requests: [{ requestKey: 'rq1', date: '2026-11-16' }] };
+
+test('13d 部品：申請の確かめ（申請中でない・見つからない・管理者なし・承認フローにいない）', () => {
+  const w = [{ requestKey: 'rq1', date: '2026-11-16' }];
+  assert.deepEqual(checkRequests(w, { rq1: REQ() }, 'adm-1'), { ok: true, reason: '' });
+  assert.equal(checkRequests(w, { rq1: REQ({ status: 'approved' }) }, 'adm-1').reason, 'requestGone');
+  assert.equal(checkRequests(w, {}, 'adm-1').reason, 'requestGone');            // 取り下げ（一覧から消えた）
+  assert.equal(checkRequests([], {}, 'adm-1').reason, 'requestGone');
+  assert.equal(checkRequests(w, { rq1: REQ() }, '').reason, 'noApprover');
+  assert.equal(checkRequests(w, { rq1: REQ({ flow: FLOW(['other']) }) }, 'adm-1').reason, 'approverNotInFlow');
+  assert.equal(checkRequests(w, { rq1: REQ({ currentFlow: 2 }) }, 'adm-1').reason, 'approverNotInFlow');
+  assert.equal(checkRequests(w, { rq1: REQ({ flow: undefined }) }, 'adm-1').ok, true);   // flow が無ければ TOT のエラーに任せる
+});
+
+test('13d 実行：申請を承認する（承認だけ。スケジュールは書かない）', async () => {
+  const f = fake({ items: [APPROVE], sched: by(work('2026-11-16')) });
+  const puts = withRequestsApi(f, [REQ()]);
+  await run(f, { env: ENV2 });
+  assert.deepEqual(puts, [{ key: 'rq1', administratorKey: 'adm-1', approve: true, adminComment: 'LINE承認：S-20261113-001', auth: 'Bearer write-token' }]);
+  assert.equal(f.calls.some((c) => c.method === 'PUT' && /daily-schedules/.test(c.url)), false);
+  const r = f.results[0];
+  assert.deepEqual([r.status, r.method, r.written, r.requestResults], ['done', 'approve', [], [{ date: '2026-11-16', action: 'approved', status: 'approved' }]]);
+});
+
+test('13d 実行：申請を棄却して反映（先に棄却、そのあとスケジュールを書く）', async () => {
+  const f = fake({ items: [REJECT], sched: by(work('2026-11-16')) });
+  const puts = withRequestsApi(f, [REQ()]);
+  await run(f, { env: ENV2 });
+  assert.deepEqual(puts.map((p) => [p.approve, p.adminComment]), [[false, '勤怠変更フォームの内容で反映したため']]);
+  const order = f.calls.filter((c) => c.method === 'PUT').map((c) => c.url);
+  assert.deepEqual(order, ['/requests/rq1', '/daily-schedules/k001/2026-11-16']);
+  const r = f.results[0];
+  assert.deepEqual([r.status, r.written, r.requestResults[0].action], ['done', ['2026-11-16'], 'rejected']);
+});
+
+test('13d 実行：申請がもう申請中でない・打刻がある・棄却が失敗したときは、スケジュールを書かない（打刻があるときは棄却もしない）', async () => {
+  const a = fake({ items: [REJECT], sched: by(work('2026-11-16')) });
+  const pa = withRequestsApi(a, [REQ({ status: 'approved' })]);
+  await run(a, { env: ENV2 });
+  assert.deepEqual([pa.length, a.results[0].status, a.results[0].reason], [0, 'failed', 'requestGone']);
+  const b = fake({ items: [REJECT], sched: by(work('2026-11-16')), punches: { '2026-11-16': true } });
+  const pb = withRequestsApi(b, [REQ()]);
+  await run(b, { env: ENV2 });
+  assert.deepEqual([pb.length, b.results[0].reason], [0, 'punched']);
+  const c = fake({ items: [REJECT], sched: by(work('2026-11-16')) });
+  withRequestsApi(c, [REQ()], { failReq: true });
+  await run(c, { env: ENV2 });
+  assert.deepEqual([c.results[0].status, c.results[0].reason, c.results[0].written], ['failed', 'api', []]);
+  assert.equal(c.calls.some((x) => x.method === 'PUT' && /daily-schedules/.test(x.url)), false);
+  const d = fake({ items: [APPROVE], sched: {} });                         // TOT_APPROVER_KEY なし
+  const pd = withRequestsApi(d, [REQ()]);
+  await run(d);
+  assert.deepEqual([pd.length, d.results[0].reason], [0, 'noApprover']);
+});
+
+test('13d 実行：--admins は管理者の一覧を画面に出すだけ（Apps Script へは行かない）', async () => {
+  const f = fake({});
+  const orig = f.fetchImpl;
+  f.fetchImpl = async (url, opt) => (url.endsWith('/administrators') ? { ok: true, status: 200, json: async () => [{ code: 'admin', name: '架空の管理者', key: 'adm-1' }], text: async () => '' } : orig(url, opt));
+  const { r, logs } = await run(f, { admins: true, env: { ...ENV, TOT_WRITE_TOKEN: '' } });
+  assert.deepEqual(r, { admins: 1 });
+  assert.deepEqual(logs, ['admin\t架空の管理者\tadm-1']);
+  assert.equal(f.calls.some((c) => c.url === GAS), false);
+});

@@ -1227,6 +1227,33 @@ function AC_selfNoticeTargets(masterValues, today) {
   return out;
 }
 
+/**
+ * 純粋関数：打刻漏れの種類の索引（版 2026-11-13a）。日別打刻（timerecord）の code で数える（King of Time の資料：1＝出勤・2＝退勤。休憩などは数えない）。
+ * 戻り値：{ 'TOTコード:YYYY-MM-DD': 'in'（出勤の打刻が無い＝退勤 > 出勤）／'out'（退勤の打刻が無い＝出勤 > 退勤）／'both'（出勤・退勤とも0）／''（同じ数） }
+ * timerecord の行が無い日（期間外・データ無し・読み取りエラー）は索引に入らない＝種類が分からない（今までどおり「打刻」）。
+ * 11/13 朝の本番のデータ（直近7日の打刻漏れ28件）：出勤 > 退勤 8件／退勤 > 出勤 16件／同じ数 4件／打刻なし 0件（tools/punchKindCheck.gs）
+ */
+function AC_punchKindIndex(R) {
+  var codeByKey = AC_totCodeByKey_((R && R.employees) || []), count = {}, out = {};
+  if (!Array.isArray(R && R.timerecord)) return out;
+  AC_totFlat_(R.timerecord).forEach(function (t) {
+    var tot = t && codeByKey[t.employeeKey];
+    if (!tot || !t.date) return;
+    var k = AC_totKey(tot) + ':' + String(t.date).slice(0, 10), c = count[k] || (count[k] = { in: 0, out: 0 });
+    (t.timeRecord || []).forEach(function (r) { if (String(r && r.code) === '1') c.in++; if (String(r && r.code) === '2') c.out++; });
+  });
+  Object.keys(count).forEach(function (k) {
+    var c = count[k];
+    out[k] = c.in > c.out ? 'out' : c.out > c.in ? 'in' : c.in === 0 ? 'both' : '';
+  });
+  return out;
+}
+
+/** 純粋関数：打刻漏れの種類の言葉（'in'→出勤の打刻、'out'→退勤の打刻、'both'→出勤・退勤の打刻、分からない→打刻） */
+var AC_PUNCH_KIND_LABEL = { in: '出勤の打刻', out: '退勤の打刻', both: '出勤・退勤の打刻' };
+function AC_punchKindLabel(kind) { return AC_PUNCH_KIND_LABEL[kind] || '打刻'; }
+function AC_punchKindOf(index, tot, date) { return (index && index[AC_totKey(tot) + ':' + date]) || ''; }
+
 /** 申請があれば打刻のお知らせを送らない状態（申請中・承認済み）。却下・取消などの状態の値は本番のデータで未確認のため、この2つだけ */
 var AC_REQUESTED_STATUSES = { applying: 1, approved: 1 };
 
@@ -1267,21 +1294,27 @@ function AC_unrequestedPunchErrors(R, today) {
  * 戻り値：[{ code, name, userId, tot, dates:[…] }]（本文は送るときに作る）
  */
 function AC_punchSelfNotices(R, masterValues, today) {
-  var targets = AC_selfNoticeTargets(masterValues, today), groups = {};
+  var targets = AC_selfNoticeTargets(masterValues, today), groups = {}, kinds = AC_punchKindIndex(R);
   AC_unrequestedPunchErrors(R, today).forEach(function (p) {
     var t = targets[AC_totKey(p.tot)];
     if (!t) return;
-    var g = groups[t.code] || (groups[t.code] = { code: t.code, name: t.name, userId: t.userId, tot: AC_totKey(p.tot), dates: [] });
+    var g = groups[t.code] || (groups[t.code] = { code: t.code, name: t.name, userId: t.userId, tot: AC_totKey(p.tot), dates: [], kinds: {} });
     g.dates.push(p.date);
+    var k = AC_punchKindOf(kinds, p.tot, p.date);
+    if (k) g.kinds[p.date] = k;   // 版 2026-11-13a：出勤・退勤の区別（分からない日は入れない）
   });
   return Object.keys(groups).sort().map(function (c) { return groups[c]; });
 }
 
-/** 純粋関数：打刻漏れのお知らせ本文。1日なら既存の打刻漏れの文面、複数日なら日付を並べる */
-function AC_punchSelfMessage(dates, ctx, overrides, today) {
-  if (dates.length === 1) return AC_punchMessage(dates[0], ctx, overrides, today);
+/**
+ * 純粋関数：打刻漏れのお知らせ本文。1日なら既存の打刻漏れの文面、複数日なら日付を並べる。
+ * kinds（任意・版 2026-11-13a）：{ 日付: 'in'／'out'／'both' }。分かる日は日付の後ろに「（退勤の打刻）」のように足す（分からない日は今までどおり日付だけ）
+ */
+function AC_punchSelfMessage(dates, ctx, overrides, today, kinds) {
   var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
-  return AC_punchMessage(dates[0], ctx, overrides, today).replace(md(dates[0]), dates.map(md).join('、'));
+  var label = function (d) { var k = kinds && kinds[d]; return md(d) + (k ? '（' + AC_punchKindLabel(k) + '）' : ''); };
+  var base = AC_punchMessage(dates[0], ctx, overrides, today), list = dates.map(label).join('、');
+  return list === md(dates[0]) ? base : base.replace(md(dates[0]), list);
 }
 
 /** 管理本部の本人への未申請の打刻漏れのお知らせ（PUNCH_SELF_NOTIFY：未設定＝何もしない／record＝記録だけ／on＝送信）。記録は「打刻漏れ本人通知」シート */
@@ -1303,7 +1336,7 @@ function AC_punchSelfNotices_(R, mv, ss, today, props) {
     if (dates.length && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('ATT-02', g.code, today).send) { result = '送らない（お知らせ設定でOFF）'; dates = []; }
     else if (!dates.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
     else {
-      text = AC_punchSelfMessage(dates, null, overrides, today);
+      text = AC_punchSelfMessage(dates, null, overrides, today, g.kinds);
       if (!live) result = '記録のみ（送信しない）';
       else {
         try { AC_pushTo_(g.userId, text); result = '送信'; } catch (e) { result = '送信失敗'; }
@@ -1926,7 +1959,7 @@ function AC_nightSelfItems(R, today, withToday, info) {
   info = info || {};
   info.requested = 0; info.noRequests = false; info.noRequestsSkipped = 0;
   var f = AC_attendanceFindings(R, today), month = today.slice(0, 7), out = [], seen = {};
-  var req = AC_requestedDays(R, AC_NIGHT_REQUEST_TYPES);
+  var req = AC_requestedDays(R, AC_NIGHT_REQUEST_TYPES), kinds = AC_punchKindIndex(R);
   if (!req.ok) info.noRequests = true;
   var add = function (it) { if (!seen[it.key]) { seen[it.key] = 1; out.push(it); } };
   var addPunch = function (it, date) {   // 打刻の項目：申請があれば外す（同じ項目は1回だけ数える）
@@ -1941,7 +1974,7 @@ function AC_nightSelfItems(R, today, withToday, info) {
     });
   }
   f.punchErrors.forEach(function (p) {
-    addPunch({ tot: p.tot, kind: 'punch', nid: 'ATT-02', key: 'att:' + p.date + ':punch:' + AC_totKey(p.tot), date: p.date }, p.date);
+    addPunch({ tot: p.tot, kind: 'punch', nid: 'ATT-02', key: 'att:' + p.date + ':punch:' + AC_totKey(p.tot), date: p.date, punchKind: AC_punchKindOf(kinds, p.tot, p.date) }, p.date);
   });
   Object.keys(f.overtime).forEach(function (tot) {
     var min = f.overtime[tot];
@@ -1963,7 +1996,7 @@ function AC_nightSelfMessage(items, today) {
   list.forEach(function (it) {
     if (it.kind === 'noClockOut') punch.push('・本日' + md(today) + 'の退勤打刻がまだ確認できません。勤務中の場合は、退勤時に打刻をお願いいたします。');
     else if (it.kind === 'noClockIn') { punch.push('・本日' + md(today) + 'は出勤予定ですが、出勤打刻が確認できません。'); form = true; }
-    else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の打刻が確認できません。');
+    else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の' + AC_punchKindLabel(it.punchKind) + 'が確認できません。');   // 版 2026-11-13a：出勤・退勤の区別
     else if (it.kind === 'ot30') ot.push('・今月の残業時間が30時間を超えました（現在 ' + h(it.min) + '時間）。無理のない働き方を心がけてください。');
     else if (it.kind === 'ot45') ot.push('・今月の残業時間が45時間に達しました（現在 ' + h(it.min) + '時間）。今後の業務量について、上長にご相談ください。');
   });
@@ -2726,17 +2759,18 @@ function AC_weekMonday(today) {
 
 /**
  * 純粋関数：毎週の催促の対象（当月1日〜前日のエラー勤務のうち、申請中・承認済みの申請が無い日）。
- * 戻り値：{ ok（勤務・申請のデータがあり読み取りエラーが無い）, reason, byTot: { TOTコード: [日付…（古い順）] }, order: [TOTコード…], requested（申請があったので外した日数） }
+ * 戻り値：{ ok（勤務・申請のデータがあり読み取りエラーが無い）, reason, byTot: { TOTコード: [日付…（古い順）] }, order: [TOTコード…], requested（申請があったので外した日数）,
+ *   kinds: { 'TOTコード:日付': 'in'／'out'／'both' }（出勤・退勤の区別が分かる日だけ） }
  */
 function AC_weeklyPunchItems(R, today) {
   R = R || {};
-  var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0 };
+  var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0, kinds: {} };
   var bad = function (a) { return !Array.isArray(a) || a.some(function (x) { return x && x._error; }); };
   if (!Array.isArray(R.employees) || bad(R.workings)) { out.reason = '勤務のデータが無い、または読み取りエラー'; return out; }
   var req = AC_requestedDays(R, AC_WEEKLY_PUNCH_REQUEST_TYPES);
   if (!req.ok) { out.reason = '申請のデータが無い、または読み取りエラー'; return out; }
   out.ok = true;
-  var codeByKey = AC_totCodeByKey_(R.employees), from = today.slice(0, 8) + '01', seen = {};
+  var codeByKey = AC_totCodeByKey_(R.employees), from = today.slice(0, 8) + '01', seen = {}, kinds = AC_punchKindIndex(R);
   AC_totFlat_(R.workings).forEach(function (w) {
     var tot = codeByKey[w && w.employeeKey];
     if (!tot || w.isError !== true || !w.date || w.date < from || w.date >= today) return;
@@ -2746,15 +2780,20 @@ function AC_weeklyPunchItems(R, today) {
     if (req.days[k]) { out.requested++; return; }
     if (!out.byTot[t]) { out.byTot[t] = []; out.order.push(t); }
     out.byTot[t].push(w.date);
+    if (kinds[k]) out.kinds[k] = kinds[k];   // 出勤・退勤の区別（timerecord のある直近7日だけ分かる）
   });
   out.order.forEach(function (t) { out.byTot[t].sort(); });
   return out;
 }
 
-/** 純粋関数：毎週の催促の文面（テンプレート weeklyPunch。「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行が入る） */
-function AC_weeklyPunchMessage(dates, today, overrides) {
+/**
+ * 純粋関数：毎週の催促の文面（テンプレート weeklyPunch。「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行が入る）。
+ * kinds（任意）：{ 日付: 'in'／'out'／'both' }。分かる日は「・11/5（木）出勤の打刻」の形（分からない日は日付だけ）
+ */
+function AC_weeklyPunchMessage(dates, today, overrides, kinds) {
   var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
-  return AC_render('weeklyPunch', today, { dates: (dates || []).map(function (d) { return '・' + md(d); }).join('\n') }, overrides);
+  var line = function (d) { var k = kinds && kinds[d]; return '・' + md(d) + (k ? AC_punchKindLabel(k) : ''); };
+  return AC_render('weeklyPunch', today, { dates: (dates || []).map(line).join('\n') }, overrides);
 }
 
 /**
@@ -2788,7 +2827,9 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     var dates = plan.byTot[t].filter(function (d) { return !AC_isPaused(pauseIdx, code, d); });   // 停止期間中の日は外す
     if (!dates.length) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
     if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
-    var text = AC_weeklyPunchMessage(dates, today, overrides), to = line[t];
+    var dk = {};
+    dates.forEach(function (d) { if (plan.kinds[t + ':' + d]) dk[d] = plan.kinds[t + ':' + d]; });
+    var text = AC_weeklyPunchMessage(dates, today, overrides, dk), to = line[t];
     if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }
     counts.people++; counts.dates += dates.length;
     if (preview) { people.push({ dates: dates, text: text, line: true }); return; }
@@ -3835,7 +3876,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

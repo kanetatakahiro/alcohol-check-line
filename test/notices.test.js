@@ -427,3 +427,58 @@ test('通知：確認用の関数は人数だけを出し、送らない', () =>
   assert.match(log, /ATT-07 有給休暇の取得案内：ON 0人（作らない・送らない）/);
   assert.ok(!/試験|9000/.test(log));
 });
+
+// ---------- 版 2026-11-13g：列の並びを変えたシート（本番 11/13 15:16：ATT-12・13 を ATT-04 のすぐ右へ移し、値を ATT-04 と同じにした） ----------
+function moveCols(sh) {
+  const head = sh.rows[0], j4 = head.findIndex((h) => String(h).startsWith('ATT-04 '));
+  const j12 = head.findIndex((h) => String(h).startsWith('ATT-12 ')), j13 = head.findIndex((h) => String(h).startsWith('ATT-13 '));
+  sh.rows.forEach((r, i) => {
+    const a = r[j12], b = r[j13];
+    const rest = r.filter((_, k) => k !== j12 && k !== j13);
+    const v12 = i === 0 ? a : r[j4], v13 = i === 0 ? b : r[j4];   // 値は ATT-04 と同じ
+    rest.splice(j4 + 1, 0, v12, v13);
+    r.length = 0;
+    r.push(...rest);
+  });
+}
+
+test('13g お知らせ設定：列を動かしたシートを、準備の関数・毎日の行の更新が元の並びに戻さず、ATT-12・13 の値も上書きしない', () => {
+  const { g, mf } = setup({ props: { NOTICE_SETTINGS: 'on' } });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  setCell(mf, '90002', 'ATT-04', false);
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) moveCols(mf.getSheetByName(n));
+  const before = ['お知らせ設定', '所属別お知らせ設定'].map((n) => JSON.stringify(mf.getSheetByName(n).dump()));
+  const h = mf.getSheetByName('お知らせ設定').dump()[0];
+  assert.deepEqual(h.slice(7, 10).map((x) => x.slice(0, 6)), ['ATT-04', 'ATT-12', 'ATT-13']);
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  g.ctx.AC_noticeSync_(mf, mf.getSheetByName('従業員マスタ').dump());
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  assert.deepEqual(['お知らせ設定', '所属別お知らせ設定'].map((n) => JSON.stringify(mf.getSheetByName(n).dump())), before);
+  g.ctx.AC_NS_CACHE = null;
+  assert.deepEqual(['ATT-04', 'ATT-12', 'ATT-13'].map((id) => g.ctx.AC_noticeCheck_(id, '90002', '2026-11-10').send), [false, false, false]);
+  assert.deepEqual(['ATT-04', 'ATT-12', 'ATT-13'].map((id) => g.ctx.AC_noticeCheck_(id, '90001', '2026-11-10').send), [true, true, true]);
+});
+
+test('13g お知らせ設定：列を動かしたシートでも、新しく入った人の行・新しい所属の行は見出しの列どおり（ATT-12・13 は所属別お知らせ設定の値）', () => {
+  const { g, mf, m } = setup({ props: { NOTICE_SETTINGS: 'on' } });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  for (const n of ['お知らせ設定', '所属別お知らせ設定']) moveCols(mf.getSheetByName(n));
+  // 所属別：法人カーケアの ATT-12 を OFF・ATT-13 は ON のまま
+  const ds = mf.getSheetByName('所属別お知らせ設定'), dv = ds.getDataRange().getValues();
+  ds.getRange(dv.findIndex((r) => r[0] === '法人カーケア') + 1, dv[0].findIndex((x) => String(x).startsWith('ATT-12 ')) + 1).setValue(false);
+  m.appendRow(row('90006', '試験 六郎', '法人カーケア'));
+  m.appendRow(row('90007', '試験 七郎', '新しい部署'));
+  g.ctx.AC_noticeSync_(mf, m.dump());
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  const v = mf.getSheetByName('お知らせ設定').dump(), head = v[0];
+  const col = (id) => head.findIndex((x) => String(x).startsWith(id + ' '));
+  const r6 = v.find((r) => String(r[0]) === '90006'), r7 = v.find((r) => String(r[0]) === '90007');
+  assert.equal(r6.length, head.length);
+  assert.deepEqual(['ATT-01', 'ATT-04', 'ATT-12', 'ATT-13', 'ATT-05', 'ATT-07', 'HR-01', 'GEN-01', 'ATT-11'].map((id) => r6[col(id)]),
+    [true, true, false, true, false, false, true, false, true]);
+  assert.deepEqual(['ATT-12', 'ATT-13', 'ATT-05'].map((id) => r7[col(id)]), [true, true, false]);   // 新しい部署：（その他の所属）→ 初期値
+  const d = mf.getSheetByName('所属別お知らせ設定').dump(), dn = d.find((r) => r[0] === '新しい部署');
+  const dc = (id) => d[0].findIndex((x) => String(x).startsWith(id + ' '));
+  assert.ok(dn, '新しい所属の行');
+  assert.deepEqual(['ATT-04', 'ATT-12', 'ATT-13', 'ATT-05', 'ATT-11'].map((id) => dn[dc(id)]), [true, true, true, false, true]);
+});

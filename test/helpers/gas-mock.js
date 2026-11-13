@@ -180,12 +180,13 @@ export function createGas({ files, now, shared }) {
     },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
     ScriptApp: {   // トリガーの模擬（作成・削除を記録するだけ）
+      WeekDay: { SUNDAY: 'SUNDAY', MONDAY: 'MONDAY', TUESDAY: 'TUESDAY', WEDNESDAY: 'WEDNESDAY', THURSDAY: 'THURSDAY', FRIDAY: 'FRIDAY', SATURDAY: 'SATURDAY' },
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i !== -1) triggers.splice(i, 1); },
       newTrigger: (fn) => {
         const t = { fn, at: null, monthDay: null, getHandlerFunction: () => fn, getEventType: () => 'CLOCK' };
         const b = { timeBased: () => b, atHour: (h) => { t.at = h; return b; }, nearMinute: () => b, everyDays: () => b, everyHours: () => b,
-          onMonthDay: (d) => { t.monthDay = d; return b; }, everyMinutes: () => b,
+          onMonthDay: (d) => { t.monthDay = d; return b; }, onWeekDay: (d) => { t.weekDay = d; return b; }, everyMinutes: () => b,
           inTimezone: () => b, create: () => { triggers.push(t); return t; } };
         return b;
       },

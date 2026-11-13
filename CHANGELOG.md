@@ -1,5 +1,35 @@
 # 変更履歴
 
+## 2026-11-13 毎週月曜10:00の本人向けの打刻漏れの催促（コード.gs 版 2026-11-13a・ブランチ feature/notification-settings・本番未導入）
+- 11/13 安藤さんの要望：当月の「まだ申請していない打刻漏れ」を毎週月曜に本人へ1人1通で知らせ、月末までに打刻修正申請をしてもらう（月初の催促を減らす）
+- 新しい関数：alcoholCheckWeeklyPunchReminder（毎週月曜10時台のトリガー）、AC_setupWeeklyPunchTrigger（消してから作るので重複しない）、AC_removeWeeklyPunchTrigger（このトリガーだけ消す）、alcoholCheckWeeklyPunchPreview（送信なし）
+- 対象：夜のお知らせ（E-40）と同じ人。お知らせ停止中の人・停止期間中の日・従業員マスタに無い人・お知らせ設定 ATT-02 が OFF の人は除く
+- 期間：当月1日〜前日の ToT のエラー勤務（日別勤怠の isError。朝のデータは前月1日から取っているので足りる。VPS の変更は不要）。打刻申請・スケジュール申請が申請中・承認済みの日は AC_requestedDays で外す。対象の日が無い人には送らない
+- WEEKLY_PUNCH_NOTIFY：未設定＝何もしない／record＝送らずに「通知送信履歴」へ文面ごと記録／on＝送信（DRY_RUN=false のときだけ。ほかの通知と同じ）
+- 同じ人へは同じ週（月曜はじまり）に1通だけ。記録は att:週の月曜:weeklypunch:TOTコード（ユーザープロパティ。40日で自動で消える）
+- 今朝のTOTのデータが届いていない・勤務や申請のデータが無い／読み取りエラーのときは、誰にも送らず管理者へエラーを知らせる（AC_adminNotice_・1日1回。CRIT-04 と同じ仕組み）
+- 文面：テンプレート weeklyPunch（「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行）。出勤・退勤の区別はまだ入れない
+- alcoholCheckShowSettings に WEEKLY_PUNCH_NOTIFY を表示。トリガーの一覧で alcoholCheckWeeklyPunchReminder を「このコードの関数」として扱う
+- 変えないもの：夜のお知らせ・E-42・朝の取り込み・doPost（既存の関数は変更なし。足したのは新しい節・テンプレート1つ・設定の表示）。alcoholCheckSetupTriggers は新しいトリガーを消さない
+- 指紋：コード.gs `65b3b2c132d9896a`（版 2026-11-13a・12a の内容を含む）。Inquiry.gs・LeaveRequest.gs・Notices.gs は変更なし
+- テスト：test/weekly-punch.test.js 6件を追加。模擬環境に週のトリガー（onWeekDay・ScriptApp.WeekDay）を追加（全213件成功）
+- 資料：docs/MESSAGES_INVENTORY.md に E-78（催促）・A-43（管理者へのエラー）
+- 本番は変更なし
+
+### 本番に入れる手順
+1. 本番のコード.gs が `a426cee1c0a84a7c`（版 2026-11-12a）であることを確かめ、`65b3b2c132d9896a`（版 2026-11-13a）に差し替えて保存
+2. Webアプリを既存デプロイの編集で新しいバージョンとして公開（催促はトリガーで動くので必須ではないが、doPost の版をコードにそろえるため）
+3. alcoholCheckShowSettings：版 2026-11-13a、WEEKLY_PUNCH_NOTIFY が未設定であること
+4. alcoholCheckWeeklyPunchPreview（送信なし）：送る人数・打刻漏れの件数・外した件数（申請済み／お知らせ設定OFF／LINE未登録／停止中／マスタに無い）と文面の例を確かめる。朝7:05 の後〜22:30 より前に実行する（それ以外は前日のデータで、その旨が出る）
+   - 初めての実行で「LINE文面」シートに weeklyPunch の行が1行足される（既存の仕組み：新しいキーは文面欄を空で追記。送信には影響なし）
+5. スクリプトプロパティ WEEKLY_PUNCH_NOTIFY=record
+6. AC_setupWeeklyPunchTrigger を実行し、トリガーの画面で alcoholCheckWeeklyPunchReminder（毎週月曜 10時台）が1本だけあることを確かめる
+7. 最初の月曜（11/16）10時台の後、「通知送信履歴」に「打刻漏れ（毎週月曜の催促）」の記録（文面つき）があることを確かめる。送ってよければ WEEKLY_PUNCH_NOTIFY=on（record の記録は送信の記録とは別なので、同じ週に on にして手で実行すると、その週の分を送る。次の月曜を待つなら手で実行しない）
+
+### 戻し方
+- すぐ止める：WEEKLY_PUNCH_NOTIFY を削除（コードの変更・再公開は不要）。トリガーも消すときは AC_removeWeeklyPunchTrigger
+- コードを戻す：AC_removeWeeklyPunchTrigger を実行してから、コード.gs を `a426cee1c0a84a7c`（12a）に戻し、Webアプリを再公開
+
 ## 2026-11-13 確認用の関数 punchKindCheck（tools/punchKindCheck.gs・読み取りだけ・本番のファイルには入れない）
 - 目的：打刻漏れの文に「出勤」「退勤」を書けるかを決める前に、打刻の数で見分けられるかを本番のデータで確かめる（11/13 安藤さんの指示）
 - King of Time の API の資料：日別勤怠（daily-workings）には打刻の時刻が無く、isError は「エラー勤務状況」のみ（理由・種類の説明なし）。日別打刻（timerecord）の code は 1：出勤・2：退勤・3：休憩開始・4：休憩終了、1回の期間は最大62日

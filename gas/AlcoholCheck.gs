@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-12a';
+var AC_CODE_VERSION = '2026-11-13a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -1756,13 +1756,14 @@ var AC_SETTINGS_SHOWN = {
   NOTICE_DEPT_CHANGE: '未設定＝keep（所属が変わっても個人の設定を引き継ぐ／reset＝新しい所属の初期値に戻す）',
   ALERT_TO_GROUP: '未設定＝飲酒検知を勤怠管理グループにも送る（"false" で管理者だけ）',
   NIGHT_WATCH: '未設定＝夜の取り込みを22:45に見守る（"false" で停止）',
+  WEEKLY_PUNCH_NOTIFY: '未設定＝毎週月曜の打刻漏れの催促をしない（record＝送らずに「通知送信履歴」へ文面ごと記録／on＝本人へ1人1通で送信。お知らせ設定の ATT-02 に従う）',
 };
 var AC_SETTINGS_PRESENCE = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_ADMIN_USER_ID', 'EMPLOYEE_MASTER_ID', 'TOT_SYNC_SECRET', 'TOT_FOLDER_ID',
   'ATTENDANCE_FORM_ID', 'ATTENDANCE_RESPONSE_ID', 'TEST_CODES', 'INQ_SPREADSHEET_ID',
   'LEAVE_REQUEST_EXCLUDE_CODES'];
 var AC_KNOWN_TRIGGERS = ['alcoholCheckMorning', 'alcoholCheckBeforeWork', 'alcoholCheckEvening', 'alcoholCheckAfterWork', 'alcoholCheckAlerts',
   'alcoholCheckImportTot', 'alcoholCheckOnAttendanceForm', 'INQ_remind',
-  'alcoholCheckLeaveRequestNotice', 'alcoholCheckNightRelayWatch'];
+  'alcoholCheckLeaveRequestNotice', 'alcoholCheckNightRelayWatch', 'alcoholCheckWeeklyPunchReminder'];
 
 /**
  * 純粋関数：設定の一覧（文字の行）。秘密の値・ID・社員番号は表示せず「設定あり／なし」だけ。
@@ -2706,6 +2707,171 @@ function AC_pick(list, today) {
   return list[n % list.length];
 }
 
+// ---------------- 毎週月曜10:00の本人向けの打刻漏れの催促（版 2026-11-13a） ----------------
+// 当月1日〜前日の「まだ申請していない打刻漏れ」（TOTのエラー勤務）を、本人へ1人1通にまとめて知らせる。月末までに打刻修正申請をしてもらう。
+// 対象は夜のお知らせ（E-40）と同じ：従業員マスタで LINE確認済み・退職でない・TOTコードが分かる人。お知らせ停止中・マスタに無い人は除く。
+// お知らせ設定は ATT-02（夜のお知らせと同じ判定）。打刻申請・スケジュール申請が申請中・承認済みの日は外す（AC_requestedDays）。
+// WEEKLY_PUNCH_NOTIFY：未設定＝何もしない／record＝送らずに「通知送信履歴」へ文面ごと記録／on＝送信（DRY_RUN=false のときだけ。ほかの通知と同じ）。
+// 同じ人へは同じ週（月曜はじまり）に1通だけ：記録は att:週の月曜:weeklypunch:TOTコード（record は末尾 :rec、除外は :ex。40日で自動で消える）。
+// データは朝7:05に届いて保存された tot-latest.json。今日のデータでない・申請や勤務のデータが無い／読めないときは誰にも送らず、管理者へ知らせる（CRIT-04）。
+
+/** 毎週の催促で、申請があれば外す申請の種類（夜のお知らせと同じ） */
+var AC_WEEKLY_PUNCH_REQUEST_TYPES = ['timerecords', 'schedules'];
+
+/** 純粋関数：その週の月曜（YYYY-MM-DD） */
+function AC_weekMonday(today) {
+  var dow = new Date(today + 'T00:00:00+09:00').getDay();
+  return AC_addDays_(today, -((dow + 6) % 7));
+}
+
+/**
+ * 純粋関数：毎週の催促の対象（当月1日〜前日のエラー勤務のうち、申請中・承認済みの申請が無い日）。
+ * 戻り値：{ ok（勤務・申請のデータがあり読み取りエラーが無い）, reason, byTot: { TOTコード: [日付…（古い順）] }, order: [TOTコード…], requested（申請があったので外した日数） }
+ */
+function AC_weeklyPunchItems(R, today) {
+  R = R || {};
+  var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0 };
+  var bad = function (a) { return !Array.isArray(a) || a.some(function (x) { return x && x._error; }); };
+  if (!Array.isArray(R.employees) || bad(R.workings)) { out.reason = '勤務のデータが無い、または読み取りエラー'; return out; }
+  var req = AC_requestedDays(R, AC_WEEKLY_PUNCH_REQUEST_TYPES);
+  if (!req.ok) { out.reason = '申請のデータが無い、または読み取りエラー'; return out; }
+  out.ok = true;
+  var codeByKey = AC_totCodeByKey_(R.employees), from = today.slice(0, 8) + '01', seen = {};
+  AC_totFlat_(R.workings).forEach(function (w) {
+    var tot = codeByKey[w && w.employeeKey];
+    if (!tot || w.isError !== true || !w.date || w.date < from || w.date >= today) return;
+    var t = AC_totKey(tot), k = t + ':' + w.date;
+    if (seen[k]) return;
+    seen[k] = 1;
+    if (req.days[k]) { out.requested++; return; }
+    if (!out.byTot[t]) { out.byTot[t] = []; out.order.push(t); }
+    out.byTot[t].push(w.date);
+  });
+  out.order.forEach(function (t) { out.byTot[t].sort(); });
+  return out;
+}
+
+/** 純粋関数：毎週の催促の文面（テンプレート weeklyPunch。「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行が入る） */
+function AC_weeklyPunchMessage(dates, today, overrides) {
+  var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
+  return AC_render('weeklyPunch', today, { dates: (dates || []).map(function (d) { return '・' + md(d); }).join('\n') }, overrides);
+}
+
+/**
+ * 毎週の催促の本体。o.mode：preview（送らない・記録しない）／record（記録だけ）／on（o.live が true のときだけ送信）。
+ * 戻り値：{ counts: { people, dates, sent, recorded, failed, already, requested, setting, paused, noMaster, unreg }, people: [{ dates, text, line }] }
+ */
+function AC_weeklyPunchRun_(R, mv, today, o) {
+  o = o || {};
+  var preview = o.mode === 'preview', sendLive = o.mode === 'on' && o.live === true;
+  var plan = AC_weeklyPunchItems(R, today);
+  var counts = { people: 0, dates: 0, sent: 0, recorded: 0, failed: 0, already: 0, requested: plan.requested, setting: 0, paused: 0, noMaster: 0, unreg: 0 };
+  if (!plan.ok) return { ok: false, reason: plan.reason, counts: counts, people: [] };
+  var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
+  var week = AC_weekMonday(today), overrides = o.overrides || AC_templateOverrides_(), people = [], logs = [];
+  var setOn = function (code) {
+    if (typeof AC_noticeEffective !== 'function' || typeof AC_noticeIndex_ !== 'function') return true;   // Notices.gs が無いとき
+    try { return !!AC_noticeEffective(AC_noticeIndex_(), 'ATT-02', code); } catch (e) { Logger.log('お知らせ設定を読めませんでした（この人には送りません）'); return false; }
+  };
+  var nname = ((typeof AC_NOTICE_BY_ID !== 'undefined' && AC_NOTICE_BY_ID['ATT-02'] && AC_NOTICE_BY_ID['ATT-02'].name) || '打刻漏れ') + '（毎週月曜の催促）';
+  var row = function (key, code, result, text) { return [now, 'ATT-02', nname, '本人', code ? "'" + code : '', key, result, '', text || '']; };
+  var exclude = function (key, code, why) {
+    if (preview || state.getProperty(key + ':ex')) return;   // 除外の記録は1人1週1回
+    state.setProperty(key + ':ex', now.toISOString());
+    logs.push(row(key, code, '除外（' + why + '）'));
+  };
+  plan.order.forEach(function (t) {
+    var key = 'att:' + week + ':weeklypunch:' + t, code = codeOfTot[t] || '';
+    if (state.getProperty(key) || (!sendLive && !preview && state.getProperty(key + ':rec'))) { counts.already++; return; }   // 同じ週は1通だけ
+    if (!code) { counts.noMaster++; exclude(key, code, '従業員マスタに無い'); return; }
+    if (AC_isPaused(pauseIdx, code, today)) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
+    var dates = plan.byTot[t].filter(function (d) { return !AC_isPaused(pauseIdx, code, d); });   // 停止期間中の日は外す
+    if (!dates.length) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
+    if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
+    var text = AC_weeklyPunchMessage(dates, today, overrides), to = line[t];
+    if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }
+    counts.people++; counts.dates += dates.length;
+    if (preview) { people.push({ dates: dates, text: text, line: true }); return; }
+    if (sendLive) {
+      try { AC_pushTo_(to.userId, text); state.setProperty(key, now.toISOString()); logs.push(row(key, code, '送信', text)); counts.sent++; }
+      catch (e) { counts.failed++; logs.push(row(key, code, '送信失敗', text)); }   // 記録しないので、同じ週にもう一度実行すれば送り直す
+    } else {
+      state.setProperty(key + ':rec', now.toISOString());
+      logs.push(row(key, code, o.mode === 'on' ? '記録（DRY_RUN のため送信しない）' : '記録（送信しない）', text));
+      counts.recorded++;
+    }
+  });
+  if (logs.length) AC_nightSelfLog_(logs);
+  return { ok: true, reason: '', counts: counts, people: people };
+}
+
+/** 保存済みの朝のデータ（tot-latest.json）を読む。今日のデータでなければ null と理由 */
+function AC_weeklyPunchData_(today) {
+  var data = AC_readTotLatest_();
+  if (!data) return { R: null, reason: 'TOTのデータ（tot-latest.json）が無い、または読めない' };
+  if (String(data.today || '') !== today) return { R: null, reason: '今朝のTOTのデータが届いていない（最後のデータ：' + String(data.today || '不明') + '）' };
+  return { R: data.results || {}, reason: '' };
+}
+
+/** トリガーから（毎週月曜10時台）。手動で実行してもよい（同じ週の2回目は送らない） */
+function alcoholCheckWeeklyPunchReminder() {
+  var props = PropertiesService.getScriptProperties();
+  var mode = String(props.getProperty('WEEKLY_PUNCH_NOTIFY') || '').trim();
+  if (mode !== 'record' && mode !== 'on') { Logger.log('毎週の打刻漏れの催促：WEEKLY_PUNCH_NOTIFY が未設定のため何もしません'); return null; }
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { Logger.log('毎週の打刻漏れの催促：ほかの実行中のため、今回は行いません'); return null; }
+  try {
+    var today = AC_today_(), d = AC_weeklyPunchData_(today), res;
+    if (d.R) res = AC_weeklyPunchRun_(d.R, AC_masterSheet_().getDataRange().getValues(), today, { mode: mode, live: props.getProperty('DRY_RUN') === 'false' });
+    var reason = d.R ? (res.ok ? '' : res.reason) : d.reason;
+    if (reason) {
+      Logger.log('毎週の打刻漏れの催促：' + reason + 'ため、誰にも送りません');
+      AC_adminNotice_('weeklypunch', '【エラー】毎週月曜の打刻漏れの催促を送れませんでした🙇‍♀️\n（' + reason + '）\n今週は誰にも送っていません。VPSの取り込み（tot-relay.log）をご確認ください。');
+      return null;
+    }
+    var c = res.counts;
+    Logger.log('毎週の打刻漏れの催促（' + mode + '）：送る人 ' + c.people + '人・打刻漏れ ' + c.dates + '件／送信 ' + c.sent + '人・記録 ' + c.recorded + '人・失敗 ' + c.failed
+      + '人・今週は送信済み ' + c.already + '人／外した：申請済み ' + c.requested + '件・お知らせ設定OFF ' + c.setting + '人・お知らせ停止中 ' + c.paused
+      + '人・LINE未登録 ' + c.unreg + '人・従業員マスタに無い ' + c.noMaster + '人');
+    return c;
+  } finally { lock.releaseLock(); }
+}
+
+/** 手動確認用：今、毎週の催促を実行したら何人に・何件・どんな文面で送るか（送らない・記録しない。氏名・社員番号は出さない） */
+function alcoholCheckWeeklyPunchPreview() {
+  var data = AC_readTotLatest_();
+  if (!data || !data.today) { Logger.log('毎週の打刻漏れの催促（確認のみ）：tot-latest.json が無い、または読めません'); return null; }
+  var today = String(data.today), now = AC_today_();
+  var res = AC_weeklyPunchRun_(data.results || {}, AC_masterSheet_().getDataRange().getValues(), today, { mode: 'preview' });
+  var mode = String(PropertiesService.getScriptProperties().getProperty('WEEKLY_PUNCH_NOTIFY') || '').trim() || '未設定';
+  var lines = ['毎週の打刻漏れの催促（確認のみ・送信しない）', 'WEEKLY_PUNCH_NOTIFY：' + mode,
+    'データ：' + today + (today === now ? '' : '（今日 ' + now + ' のデータではありません。月曜10時の実行では送りません）') + '・期間 ' + today.slice(0, 8) + '01〜前日'];
+  if (!res.ok) { lines.push('送りません：' + res.reason); Logger.log(lines.join('\n')); return res; }
+  var c = res.counts, sample = res.people.filter(function (p) { return p.line; })[0] || res.people[0];
+  lines.push('送る人数：' + c.people + '人・打刻漏れ ' + c.dates + '件',
+    '外した件数：申請済み ' + c.requested + '件（打刻申請・スケジュール申請が申請中・承認済みの日）／お知らせ設定OFF ' + c.setting + '人／LINE未登録 ' + c.unreg
+      + '人／お知らせ停止中 ' + c.paused + '人／従業員マスタに無い ' + c.noMaster + '人',
+    '', '文面の例：', sample ? sample.text : '（送る人がいません）');
+  Logger.log(lines.join('\n'));
+  return res;
+}
+
+/** トリガーを作る（毎週月曜10時台。同じトリガーは消してから作るので重複しない） */
+function AC_setupWeeklyPunchTrigger() {
+  AC_removeWeeklyPunchTrigger();
+  var b = function () { return ScriptApp.newTrigger('alcoholCheckWeeklyPunchReminder').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(10).inTimezone(AC_TZ); };
+  try { b().nearMinute(0).create(); }
+  catch (e) { b().create(); }   // 分の指定ができない場合は10時台のどこか
+  Logger.log('毎週の打刻漏れの催促のトリガーを作りました（毎週月曜 10時台）');
+}
+
+/** このトリガーだけを消す（ほかのトリガーは消さない） */
+function AC_removeWeeklyPunchTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'alcoholCheckWeeklyPunchReminder') ScriptApp.deleteTrigger(t);
+  });
+}
+
 // ---------------- LINE文面（REBIRTH管理本部の標準ルール） ----------------
 // 「丁寧で親しみやすく、相手への気遣いが自然に伝わる文章」。事務的すぎず、馴れ馴れしすぎず。
 // 文面は「固定テンプレート＋気遣いの一文（{care}）」で作る。AIは使わない（費用ゼロ）。
@@ -2724,6 +2890,7 @@ var AC_TEMPLATES = {
   thanks10: ['お疲れ様です！😊\n\nアルコールチェックの入力が、10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanksN: ['お疲れ様です！😊\n\nアルコールチェックの入力が、{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
   punch: ['お疲れ様です！😊\n\n{date}の勤怠について、打刻が確認できていません。\n\nお手数ですが、Touch On Timeでご確認いただき、必要に応じて打刻修正の申請をお願いします！\n\nよろしくお願いします！'],
+  weeklyPunch: ['お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n{dates}\n→ Touch On Timeでご確認いただき、「打刻修正申請」をお願いいたします。\n月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\nご確認のほどよろしくお願いいたします！'],
   todayNoClockOut: ['お疲れ様です！😊\n\n本日の退勤打刻が、まだ確認できていません。\n\n現在も勤務中の場合は、退勤時の打刻を忘れずにお願いします！\n\nすでに退勤されている場合は、Touch On Timeから打刻修正の申請をお願いします。\n\n遅い時間までお疲れ様です。\n体調にもお気をつけください😊'],
   todayNoClockIn: ['お疲れ様です！😊\n\n本日は出勤予定となっていますが、出勤打刻が確認できませんでした。\n\n出勤されていた場合は、Touch On Timeから打刻修正の申請をお願いします。\n\nお休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームから報告をお願いします。\n\n▼ 勤怠連絡フォーム\n' + AC_FORM_URL + '\n\nよろしくお願いします！'],
   ot30: ['お疲れ様です！😊\n\n今月の残業時間が30時間に達しましたので、お知らせします📢\n\n現在の残業時間：{hours}時間\n\nお忙しい時期かと思いますが、無理をせず、体調にもお気をつけください。\n\n引き続きよろしくお願いします！'],
@@ -3668,7 +3835,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

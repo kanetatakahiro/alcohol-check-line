@@ -142,12 +142,14 @@ function AC_alcoholNoticeId(tag, scope) {
 
 /**
  * 純粋関数：「お知らせ設定」の行の追加・更新の計画（従業員マスタから）。
- * opts：{ exclude: { 社員番号: true }（希望休の除外の引き継ぎ）, deptChange: 'keep'|'reset', deptDefault: fn(id, dept) }
+ * opts：{ exclude: { 社員番号: true }（希望休の除外の引き継ぎ）, deptChange: 'keep'|'reset', deptDefault: fn(id, dept),
+ *         header（今のシートの見出し。版 2026-11-13g：列の並びを変えたシートでも、新しい行・初期値に戻す値を見出しの通知IDの列に入れる） }
  * 戻り値：{ header, add: [行], updates: [{ index, cells: { 列番号: 値 } }], history: [行] }
  */
 function AC_noticeSyncPlan(masterValues, settingValues, today, opts) {
   opts = opts || {};
-  var header = AC_NS_FIXED.concat(AC_NOTICES.map(AC_noticeHeader));
+  var header = opts.header && opts.header.length ? opts.header.slice() : AC_NS_FIXED.concat(AC_NOTICES.map(AC_noticeHeader));
+  var ids = header.map(function (h, j) { return j < AC_NS_FIXED.length ? null : AC_noticeIdOf(h); });   // 列ごとの通知ID（通知でない列は null）
   var dd = opts.deptDefault || AC_noticeDeptDefault, ex = opts.exclude || {}, reset = opts.deptChange === 'reset';
   var have = {}, out = { header: header, add: [], updates: [], history: [] };
   (settingValues || []).forEach(function (r, i) { if (i > 0) { var c = AC_cellCode_(r[0]); if (c && !(c in have)) have[c] = i; } });
@@ -161,7 +163,7 @@ function AC_noticeSyncPlan(masterValues, settingValues, today, opts) {
     var state = String(r[AC_COL.status] || '').trim() === '退職' || AC_isRetired(r[AC_COL.retiredOn], today) ? '退職' : '在籍';
     if (!(code in have)) {
       if (state === '退職') return;   // 退職した人の行は新しく作らない
-      out.add.push(["'" + code, name, dept, state].concat(AC_NOTICES.map(function (n) { return n.id === 'ATT-01' && ex[code] ? false : dd(n.id, dept); })));
+      out.add.push(["'" + code, name, dept, state].concat(ids.slice(AC_NS_FIXED.length).map(function (id) { return !id ? '' : id === 'ATT-01' && ex[code] ? false : dd(id, dept); })));
       out.history.push(["'" + code, name, '追加（所属の初期値）' + (ex[code] ? '・希望休はOFF（除外の社員番号から引き継ぎ）' : ''), '', dept]);
       return;
     }
@@ -172,19 +174,20 @@ function AC_noticeSyncPlan(masterValues, settingValues, today, opts) {
     if (oldDept !== dept) {
       cells[2] = dept;
       out.history.push(["'" + code, name, reset ? '所属変更（新しい所属の初期値に戻した）' : '所属変更（個人の設定を引き継いだ）', oldDept, dept]);
-      if (reset) AC_NOTICES.forEach(function (n, j) { cells[AC_NS_FIXED.length + j] = dd(n.id, dept); });
+      if (reset) ids.forEach(function (id, j) { if (id) cells[j] = dd(id, dept); });
     }
     if (Object.keys(cells).length) out.updates.push({ index: have[code], cells: cells });
   });
   return out;
 }
 
-/** 純粋関数：所属別の初期値の表（従業員マスタの所属＋（その他の所属）） */
-function AC_noticeDeptRows(masterValues) {
+/** 純粋関数：所属別の初期値の表（従業員マスタの所属＋（その他の所属））。header（任意）：今のシートの見出し（版 2026-11-13g：その列の並びで作る） */
+function AC_noticeDeptRows(masterValues, header) {
   var depts = [];
   (masterValues || []).forEach(function (r, i) { var d = i > 0 ? String(r[AC_COL.dept] || '').trim() : ''; if (d && depts.indexOf(d) === -1) depts.push(d); });
   depts.push(AC_NS_OTHER_DEPT);
-  return depts.map(function (d) { return [d].concat(AC_NOTICES.map(function (n) { return AC_noticeDeptDefault(n.id, d === AC_NS_OTHER_DEPT ? '' : d); })); });
+  var ids = header && header.length ? header.slice(1).map(AC_noticeIdOf) : AC_NOTICES.map(function (n) { return n.id; });
+  return depts.map(function (d) { return [d].concat(ids.map(function (id) { return id ? AC_noticeDeptDefault(id, d === AC_NS_OTHER_DEPT ? '' : d) : ''; })); });
 }
 
 // ---------------- 判定（既存の通知から呼ぶ） ----------------
@@ -272,13 +275,13 @@ function alcoholCheckSetupNoticeSettings() {
     dept.getRange(2, 2, rows.length, AC_NOTICES.length).insertCheckboxes();
   } else {
     AC_noticeAddCols_(dept, 1, function (id, row) { var d = String(row[0] || '').trim(); return AC_noticeDeptDefault(id, d === AC_NS_OTHER_DEPT ? '' : d); });   // 版 2026-11-13d
-    var have = {};
-    dept.getDataRange().getValues().slice(1).forEach(function (r) { have[String(r[0]).trim()] = true; });
-    var add = rows.filter(function (r) { return !have[r[0]]; });
+    var dv0 = dept.getDataRange().getValues(), have = {};
+    dv0.slice(1).forEach(function (r) { have[String(r[0]).trim()] = true; });
+    var add = AC_noticeDeptRows(mv, dv0[0]).filter(function (r) { return !have[r[0]]; });   // 版 2026-11-13g：今の見出しの並びで足す
     if (add.length) {
       var at = dept.getLastRow() + 1;
-      dept.getRange(at, 1, add.length, dh.length).setValues(add);
-      dept.getRange(at, 2, add.length, AC_NOTICES.length).insertCheckboxes();
+      dept.getRange(at, 1, add.length, dv0[0].length).setValues(add);
+      dept.getRange(at, 2, add.length, dv0[0].length - 1).insertCheckboxes();
     }
   }
   AC_nsSheet_(ss, AC_NS_HIST_SHEET, AC_NS_HIST_HEADER);
@@ -332,6 +335,7 @@ function AC_noticeSync_(ss, mv) {
   // 版 2026-11-13d：あとから足した通知（ATT-11 など）の列が無ければ、見出しと今の行のチェックボックス（所属の初期値）を末尾に足す
   if (!created) AC_noticeAddCols_(sh, AC_NS_FIXED.length, function (id, row) { return AC_noticeDeptDefault(id, String(row[2] || '').trim()); });
   var values = sh.getDataRange().getValues();
+  if (!created) header = values[0].map(function (h) { return String(h == null ? '' : h); });   // 版 2026-11-13g：今の見出しの並び（列を動かしても値がずれない）
   var ex = {};
   if (created) AC_parseCodeList(props.getProperty('LEAVE_REQUEST_EXCLUDE_CODES')).forEach(function (c) { ex[c] = true; });   // 初回だけ引き継ぐ
   var dv = ss.getSheetByName(AC_NS_DEPT_SHEET) ? ss.getSheetByName(AC_NS_DEPT_SHEET).getDataRange().getValues() : null;
@@ -343,12 +347,12 @@ function AC_noticeSync_(ss, mv) {
     if (!d && o && typeof o[id] === 'boolean' && !/リスタイル/.test(dept)) return o[id];
     return AC_noticeDeptDefault(id, dept);
   };
-  var plan = AC_noticeSyncPlan(mv, values, AC_today_(), { exclude: ex, deptChange: props.getProperty('NOTICE_DEPT_CHANGE') === 'reset' ? 'reset' : 'keep', deptDefault: deptDefault });
+  var plan = AC_noticeSyncPlan(mv, values, AC_today_(), { exclude: ex, deptChange: props.getProperty('NOTICE_DEPT_CHANGE') === 'reset' ? 'reset' : 'keep', deptDefault: deptDefault, header: header });
   plan.updates.forEach(function (u) { Object.keys(u.cells).forEach(function (c) { sh.getRange(u.index + 1, Number(c) + 1).setValue(u.cells[c]); }); });
   if (plan.add.length) {
     var at = sh.getLastRow() + 1;
     sh.getRange(at, 1, plan.add.length, header.length).setValues(plan.add);
-    sh.getRange(at, AC_NS_FIXED.length + 1, plan.add.length, AC_NOTICES.length).insertCheckboxes();
+    sh.getRange(at, AC_NS_FIXED.length + 1, plan.add.length, header.length - AC_NS_FIXED.length).insertCheckboxes();
   }
   if (plan.history.length) {
     var hs = AC_nsSheet_(ss, AC_NS_HIST_SHEET, AC_NS_HIST_HEADER), now = new Date();

@@ -36,7 +36,7 @@
  *  B3. 反映できたら（スケジュールを書いた・申請を承認した）本人へ1通（通知ID ATT-11。お知らせ設定・お知らせ停止はほかの本人向けと同じ判定）。
  *      TOT_WRITE=on かつ DRY_RUN=false のときだけ送る。それ以外は送る予定の文を「TOT反映」シートの「本人へのお知らせ」に記録する。
  */
-var SCH_VERSION = '2026-11-13f';
+var SCH_VERSION = '2026-11-13g';
 var SCH_SHEET = 'TOT反映';
 var SCH_LOG_SHEET = 'TOT反映の記録';
 var SCH_HEADER = ['受付番号', '状態', '受付日時', '社員番号', '氏名', '区分', '開始日', '終了日', '変更後の休みの日', '入力者',
@@ -308,11 +308,15 @@ function SCH_requestLines(reqs) {
 
 /**
  * 純粋関数：本人へのお知らせの文。days：スケジュールを変えた日（休みの変更は使わない）。rejected：棄却した申請の日
+ * 版 2026-11-13g：誰からの連絡かを入れる。入力者（c.by）が本人以外なら「{入力者}さんよりご連絡をいただき、」、
+ * 本人（または入力者が空）なら「勤怠変更フォームにてご入力いただいた内容で、」（本人かどうかは打刻のお知らせの【勤怠の変更】と同じ比べ方）
  */
 function SCH_selfMessage(c, days, rejected) {
   var head = c.changeTo ? AC_mdw_(c.from) + 'の休みを' + AC_mdw_(c.changeTo) + 'に変更しました。'
     : (days && days.length ? days : SCH_days(c)).map(AC_mdw_).join('、') + 'は' + c.label + 'としてスケジュールを変更しました。';
-  var lines = ['お疲れ様です😊', head];
+  var by = String(c.by || '').trim().replace(/[\s　]*さん$/, '');
+  var self = !by || AC_nameKey_(by) === AC_nameKey_(c.name || '');
+  var lines = ['お疲れ様です😊', (self ? '勤怠変更フォームにてご入力いただいた内容で、' : by + 'さんよりご連絡をいただき、') + head];
   if (rejected && rejected.length) lines.push(rejected.map(AC_mdw_).join('、') + 'のスケジュール申請は、勤怠変更フォームの内容で反映したため取り下げとしました。');
   return lines.concat(['Touch On Timeでの申請は不要です。', 'ご確認のほどよろしくお願いいたします！']).join('\n');
 }

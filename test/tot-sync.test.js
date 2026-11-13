@@ -350,11 +350,13 @@ test('13d 純粋関数：同じ人・同じ日の申請中のスケジュール�
 
 test('13d 純粋関数：本人へのお知らせの文（1日・何日か・休みの変更・棄却したとき）', () => {
   const X = setup().g.ctx;
-  const c = { label: '欠勤', from: '2026-11-20', until: '2026-11-20', changeTo: '' };
-  assert.equal(X.SCH_selfMessage(c, ['2026-11-20'], []), 'お疲れ様です😊\n11/20（金）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  const c = { label: '欠勤', from: '2026-11-20', until: '2026-11-20', changeTo: '', by: '上長 太郎', name: '試験 一郎' };
+  assert.equal(X.SCH_selfMessage(c, ['2026-11-20'], []), 'お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11/20（金）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  // 版 2026-11-13g：本人の入力（入力者が空も）は「勤怠変更フォームにてご入力いただいた内容で、」
+  for (const by of ['試験一郎さん', '']) assert.equal(X.SCH_selfMessage({ ...c, by }, ['2026-11-20'], []), 'お疲れ様です😊\n勤怠変更フォームにてご入力いただいた内容で、11/20（金）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
   assert.match(X.SCH_selfMessage({ ...c, label: '有給休暇', until: '2026-11-21' }, ['2026-11-20', '2026-11-21'], []), /11\/20（金）、11\/21（土）は有給休暇として/);
-  const sw = X.SCH_selfMessage({ label: '休みの変更', from: '2026-11-12', until: '2026-11-12', changeTo: '2026-11-15' }, null, []);
-  assert.match(sw, /^お疲れ様です😊\n11\/12（木）の休みを11\/15（日）に変更しました。\nTouch On Timeでの申請は不要です。/);
+  const sw = X.SCH_selfMessage({ label: '休みの変更', from: '2026-11-12', until: '2026-11-12', changeTo: '2026-11-15', by: '上長 太郎', name: '試験 一郎' }, null, []);
+  assert.match(sw, /^お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11\/12（木）の休みを11\/15（日）に変更しました。\nTouch On Timeでの申請は不要です。/);
   assert.match(X.SCH_selfMessage(c, ['2026-11-20'], ['2026-11-20']), /変更しました。\n11\/20（金）のスケジュール申請は、勤怠変更フォームの内容で反映したため取り下げとしました。\nTouch On Timeでの申請は不要です。/);
 });
 
@@ -396,7 +398,7 @@ test('13d 申請を承認する：受け渡しに method=approve と申請。結
   assert.match(grp.text, /ご本人のスケジュール申請を承認しました[\s\S]*対象の日：11\/16（月）[\s\S]*申請の承認は元に戻せません/);
   const self = ps.find((f) => f.body.to === U(1));
   assert.ok(self, '本人へ1通');
-  assert.equal(self.body.messages[0].text, 'お疲れ様です😊\n11/16（月）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  assert.equal(self.body.messages[0].text, 'お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11/16（月）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
   [c] = cases(g, mf);
   assert.equal(c.state, '反映済み');
   const v = sheet(mf).dump()[1];
@@ -461,7 +463,7 @@ test('13d 本人へのお知らせ：record は送らず記録だけ／DRY_RUN�
   const a = setup({ TOT_WRITE: 'record' });
   submit(a.g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
   press(a.g, btnData(cardOf(a.g), 0));
-  assert.match(sheet(a.mf).dump()[1][25], /^記録のみ（TOT_WRITE=record）：お疲れ様です😊\n11\/16（月）は欠勤として/);
+  assert.match(sheet(a.mf).dump()[1][25], /^記録のみ（TOT_WRITE=record）：お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11\/16（月）は欠勤として/);
   assert.equal(pushes(a.g).some((f) => f.body.to === U(1)), false);
   const done = (g) => {
     submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });

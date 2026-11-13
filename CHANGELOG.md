@@ -1,5 +1,41 @@
 # 変更履歴
 
+## 2026-11-13 勤怠連絡フォームの承認 → TOT のスケジュールへの自動反映（コード.gs 版 2026-11-13c・gas/TotSync.gs・src/tot-write.js・ブランチ feature/notification-settings・本番未導入）
+- 11/13 安藤さんの指示で実装。設計と決まったこと：docs/TOT_SCHEDULE_SYNC_DESIGN.md の「9. 実装」
+- 対象：勤怠連絡フォームの欠勤（休暇区分 3）・有給休暇（1）・休みの変更（公休 9 と出勤予定の日を入れ替える）。休日出勤・打刻の修正・遅刻・早退・その他は対象外
+- 流れ：フォーム送信 → 「TOT反映」シートに承認待ち、勤怠管理グループへ承認のカード（A-44）→ ボタン（勤怠管理グループのメンバー・合言葉・同じイベントの2回目でないことを確かめる）→ 反映待ち → VPS（src/tot-write.js、10分ごと）が受け取り、打刻とスケジュールを読み直して PUT → 結果をグループへ（A-47、反映済みには「元に戻す」ボタン）
+- 過ぎた日・打刻のある日は書かない（本人のスケジュール申請に戻す。【勤怠の変更】の文はそのまま送る）。受付のときに分かれば「対象外」（A-45）
+- 【勤怠の変更】（E-40・E-42・E-78）：反映待ち・反映中・反映済み・元に戻す待ち・元に戻し中の連絡の分は送らない（AC_formSplit の skip に entry.synced）
+- 切り替え：スクリプトプロパティ TOT_WRITE（未設定＝何もしない／record＝承認のカードまで・承認は記録のみ／on＝書き込む）、VPS の .env の TOT_WRITE_TOKEN（無ければ書かない）。**TOT_WRITE が未設定のあいだは、今までと動きが変わらない**（「TOT反映」シートが無ければ読まない）
+- 仕組みのエラー・3時間以上止まっている反映は管理者へ（A-48・1日1回）。見守りは朝・夜の中継の受け取りのとき
+- ログ・GitHub に氏名・LINE ID・従業員識別キー・トークン・時刻・備考を出さない。VPS へは従業員識別キーと日付だけを渡す
+- 指紋：コード.gs `8b0d5fc58a2432cf`（版 2026-11-13c）、TotSync.gs `ae9d4b768b9a7e8a`（新しいファイル）、src/tot-write.js `864a50283b3bb1ca`（新しいファイル）。Inquiry.gs・LeaveRequest.gs・Notices.gs・src/tot-relay.js（`82e456a1a4feae56`）は変更なし
+- テスト：test/tot-sync.test.js 16件・test/tot-write.test.js 9件を追加（全252件成功）
+- 資料：docs/TOT_SCHEDULE_SYNC_DESIGN.md（9. 実装）、docs/MESSAGES_INVENTORY.md（A-44〜A-48）
+- 本番・VPS・Touch On Time は変更なし
+
+### 本番に入れる手順（Apps Script：Claude または安藤さん）
+1. 本番のコード.gs が `fdb8e69730475c28`（版 2026-11-13b）であることを確かめ、`8b0d5fc58a2432cf`（版 2026-11-13c）に差し替えて保存
+2. 新しいスクリプトファイル「TotSync」を作り、gas/TotSync.gs の中身を貼って保存（`ae9d4b768b9a7e8a`）
+3. Webアプリを既存デプロイの編集で新しいバージョンとして公開（doPost に type を足したため）
+4. TOT_WRITE は**まだ設定しない**。この時点では動きは今までと同じ（任意で SCH_setup を実行するとシートを作り、ログに「TOT_WRITE=off」）
+5. 試験：TOT_WRITE=record にすると、次のフォーム送信から承認のカードが勤怠管理グループに届く。承認しても TOT には書かない（「TOT反映」シートの「反映する内容（予定）」で中身を確かめる）
+
+### VPS に入れる手順（安藤さんがシリアルコンソールで。書き込み用のトークンが届いてから）
+1. `cd ~/alcohol-check-line`
+2. 置き換えではなく新しいファイル：`curl -fsSL https://raw.githubusercontent.com/kanetatakahiro/alcohol-check-line/{コミット}/src/tot-write.js -o src/tot-write.js`（{コミット} は CHANGELOG のこの項を入れたコミット）
+3. 指紋：`perl -0pe 's/\n+\z//' src/tot-write.js | shasum -a 256 | cut -c1-16` → `864a50283b3bb1ca`
+4. 読み込みの確認（TOT・Apps Script へは接続しない）：`node -e "import('./src/tot-write.js').then(m=>console.log(m.safeToRun(new Date('2026-11-13T12:00:00+09:00')), m.safeToRun(new Date('2026-11-13T08:25:00+09:00'))))"` → `true false`
+5. .env に `TOT_WRITE_TOKEN=…` を1行足す（エディタで直接。チャット・ログに書かない）。`chmod 600 .env`
+6. 試し実行（TOT は読むだけ・Apps Script の状態も変えない。TOT_WRITE=on で承認済みのものがあるときだけ中身が出る）：`node --env-file=.env src/tot-write.js --dry-run`
+7. cron：`crontab -e` で、今の tot-relay の行と同じ書き方（node のパス）で1行足す：`3-59/10 7-22 * * * cd ~/alcohol-check-line && node --env-file=.env src/tot-write.js >> ~/tot-write.log 2>&1`（7:03〜22:53 の10分ごと。中継の 7:05・22:30 と重ならない）
+8. Apps Script の TOT_WRITE=on。最初は管理本部の人の未来の日で1件だけ試し、元に戻すも試す
+- src/tot-relay.js・crontab の今の行は変えない。VPS の作業ツリーは main と差分があるので、git pull はしない
+
+### 戻し方
+- すぐ止める：スクリプトプロパティ TOT_WRITE を削除（カード・ボタン・受け渡しが止まる）。VPS は crontab の tot-write の行を消す
+- コード.gs を `fdb8e69730475c28`（13b）に戻し、TotSync.gs を削除して、Webアプリを再公開。「TOT反映」「TOT反映の記録」シートは残してよい（読まれない）
+
 ## 2026-11-13 設計メモ：勤怠変更連絡フォームの承認 → Touch On Time のスケジュールへの自動反映（調査と設計だけ・実装なし）
 - docs/TOT_SCHEDULE_SYNC_DESIGN.md を作成（11/13 安藤さんの要望）。API の資料（https://developer.kingoftime.jp/）の原文で、日別スケジュールの登録・更新・削除の項目と制限、休暇区分データ、申請の承認 API、利用の制限を確認
 - 結論：書き込みは VPS の中継から（トークンの許可IPが VPS のため）。先にトークンの書き込みの権限・全日休暇の取得方法・休暇区分のコードを確かめる

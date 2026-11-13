@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-13b';
+var AC_CODE_VERSION = '2026-11-13c';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -322,6 +322,7 @@ function AC_handleTotRaw_(body) {
   });
   if (failed.length) AC_adminNotice_('totfetch', '【エラー】TOTから一部のデータを読み取れませんでした🙇‍♀️\n対象：' + failed.join('、')
     + '\nTOTのトークンの権限・許可IP（133.167.110.249）が変わっていないか確認してください。');
+  if (typeof SCH_watch_ === 'function') SCH_watch_();   // 版 2026-11-13c：TOT への反映が止まっていないか
   try { AC_processTotRaw_(body); } catch (e) {
     Logger.log('TOT処理の失敗：%s', e && e.message);
     AC_adminNotice_('totprocess', '【エラー】TOTの勤怠データの処理中に問題がありました🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
@@ -916,6 +917,13 @@ function alcoholCheckOnAttendanceForm(e) {
       } catch (e2) { Logger.log('勤怠管理グループの読み込みに失敗'); }
     }
     if (!adminSent) AC_pushLine_(adminText);
+    // 版 2026-11-13c：欠勤・有給休暇・休みの変更は、TOT への反映の承認のカードを勤怠管理グループへ（TOT_WRITE が未設定なら何もしない）
+    if (typeof SCH_onForm_ === 'function') {
+      try { SCH_onForm_(ans, plan, isTest); } catch (es) {
+        Logger.log('TOT反映の受付の失敗：%s', es && es.message);
+        AC_adminNotice_('totwriteform', '【エラー】勤怠連絡フォームの TOT への反映の受付で問題がありました🙇‍♀️ 「TOT反映」シートをご確認ください。\n（' + (es && es.message ? es.message : '不明なエラー') + '）');
+      }
+    }
   } catch (err) {
     Logger.log('フォーム処理の失敗：%s', err && err.message);
     AC_adminNotice_('form', '【エラー】勤怠連絡フォームの処理中に問題がありました🙇‍♀️ フォームの回答をご確認ください。');
@@ -984,7 +992,11 @@ function AC_handleGroupEvent_(ev) {
     AC_pushLine_('【グループLINE】公式LINEがグループから退出しました（「LINEグループ」シートを「退出」にしました）。');
     return;
   }
-  if (ev.type === 'postback') { if (typeof INQ_onGroupPostback_ === 'function') INQ_onGroupPostback_(ev); return; }   // 問い合わせのボタン（gas/Inquiry.gs）
+  if (ev.type === 'postback') {
+    if (/^sch\|/.test(String(ev.postback && ev.postback.data || ''))) { if (typeof SCH_onGroupPostback_ === 'function') SCH_onGroupPostback_(ev); return; }   // TOT反映のボタン（gas/TotSync.gs・版 2026-11-13c）
+    if (typeof INQ_onGroupPostback_ === 'function') INQ_onGroupPostback_(ev);   // 問い合わせのボタン（gas/Inquiry.gs）
+    return;
+  }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
   var depts = AC_parseDeptRegistration(ev.message.text);
   if (!depts) return;   // グループの普段の会話には反応しない
@@ -2858,6 +2870,8 @@ function AC_formEntries_() {
         if (head.indexOf(AC_FORM_Q.by) === -1 || head.indexOf(AC_FORM_Q.kind) === -1 || head.indexOf(AC_FORM_Q.from) === -1) return;
         if (AC_formEntriesFromValues(sh.getDataRange().getValues(), out)) found++;
       });
+      // 版 2026-11-13c：管理本部が TOT に反映する（した）連絡に synced を付ける（【勤怠の変更】の文を送らない）
+      if (found && typeof SCH_markSynced === 'function') SCH_markSynced(out, SCH_syncedKeys_());
       res = found ? { ok: true, byCode: out } : { ok: false, reason: '回答シートが見つからない' };
     }
   } catch (e) { res = { ok: false, reason: '回答シートを読めない' }; }
@@ -2888,7 +2902,7 @@ function AC_formChangeKey(e, tot) {
 /**
  * 純粋関数：1人分の打刻の項目の日を、フォームの連絡でまとめる。
  * dates：打刻の項目の日。entries：その人の連絡。req：AC_requestedDays(R, ['timerecords','schedules']).days。tot：TOTコード
- * 戻り値：{ groups: [{ entry, dates, key, skip（期間の全部の日が申請済み） }], rest: [連絡の無い日] }
+ * 戻り値：{ groups: [{ entry, dates, key, skip（期間の全部の日が申請済み、または管理本部が TOT に反映する・した〔entry.synced・版 2026-11-13c〕） }], rest: [連絡の無い日] }
  */
 function AC_formSplit(dates, entries, req, tot) {
   var covers = function (e, d) { return e.change ? (d === e.from || d === e.changeTo) : (d >= e.from && d <= e.until); };
@@ -2900,7 +2914,7 @@ function AC_formSplit(dates, entries, req, tot) {
     if (!hit) { if (rest.indexOf(d) === -1) rest.push(d); return; }
     var key = AC_formChangeKey(hit, tot), g = byKey[key];
     if (!g) {
-      g = byKey[key] = { entry: hit, dates: [], key: key, skip: AC_formDays(hit).every(function (x) { return !!(req || {})[t + ':' + x]; }) };
+      g = byKey[key] = { entry: hit, dates: [], key: key, skip: !!hit.synced || AC_formDays(hit).every(function (x) { return !!(req || {})[t + ':' + x]; }) };
       groups.push(g);
     }
     if (g.dates.indexOf(d) === -1) g.dates.push(d);
@@ -3621,6 +3635,9 @@ function doPost(e) {
   try {
     var body = JSON.parse(e && e.postData ? e.postData.contents : '{}');
     if (body.type === 'tot-raw') return ContentService.createTextOutput(AC_handleTotRaw_(body));
+    // 版 2026-11-13c：TOT のスケジュールへの自動反映（gas/TotSync.gs）。VPS の src/tot-write.js が反映待ちを取りに来て、結果を返す
+    if (body.type === 'tot-write-queue') return ContentService.createTextOutput(typeof SCH_handleQueue_ === 'function' ? SCH_handleQueue_(body) : 'NG');
+    if (body.type === 'tot-write-result') return ContentService.createTextOutput(typeof SCH_handleResult_ === 'function' ? SCH_handleResult_(body) : 'NG');
     (body.events || []).forEach(AC_handleEvent_);
   } catch (err) {
     Logger.log('Webhook処理エラー：%s', err && err.message ? err.message : '');

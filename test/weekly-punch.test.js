@@ -192,7 +192,7 @@ test('毎週の催促：トリガーは月曜10時台の1本だけ（作り直�
   assert.equal(g.triggers.length, before + 1);
   g.ctx.AC_removeWeeklyPunchTrigger();
   assert.equal(g.triggers.length, before);
-  assert.equal(g.ctx.AC_CODE_VERSION, '2026-11-13a');
+  assert.ok(g.ctx.AC_CODE_VERSION >= '2026-11-13a');   // 13a 以降の版に含まれる
   const t = [...g.ctx.AC_settingsReport({ WEEKLY_PUNCH_NOTIFY: 'record' }, [{ fn: 'alcoholCheckWeeklyPunchReminder', type: '時間主導' }], {})].join('\n');
   assert.match(t, /WEEKLY_PUNCH_NOTIFY：record/);
   assert.ok(!t.includes('※このコードの関数ではありません'));

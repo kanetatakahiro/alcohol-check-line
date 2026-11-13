@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-13a';
+var AC_CODE_VERSION = '2026-11-13b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -556,7 +556,7 @@ function AC_pauseIndex(rows, toDate) {
     if (i === 0) return;
     var code = AC_cellCode_(r[0]), from = toDate(r[2]), until = String(r[3] || '').trim() ? toDate(r[3]) : '9999-12-31';
     if (!code || !from || !until) return;
-    (out[code] = out[code] || []).push({ from: from, until: until, attendanceOnly: /勤怠のみ/.test(String(r[5] || '')) });
+    (out[code] = out[code] || []).push({ from: from, until: until, attendanceOnly: /勤怠のみ/.test(String(r[5] || '')), form: /^フォーム：/.test(String(r[4] || '')) });   // form：勤怠連絡フォームから入った行
   });
   return out;
 }
@@ -621,7 +621,7 @@ function AC_addPause_(name, from, until, memo) {
 //  ・いずれも管理者のLINEへ内容を知らせる。回答は従業員マスタの回答シートにも残る
 // TOTを修正できるのは本人（打刻の申請）と管理本部だけ。上司は閲覧のみ。休み・欠勤など当月の変更はこのフォームで連絡してもらう
 var AC_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSfMc6SWJkjnJfqPfobUJt1NDvzQTuSjir97IMW_YTOctLJvFw/viewform';
-var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', 'その他'];
+var AC_FORM_KINDS = ['欠勤', '有給休暇', '休みの変更（シフト交換など）', '打刻の修正', '遅刻', '早退', '休日出勤', 'その他'];   // 休日出勤は版 2026-11-13b（本番のフォームには先に追加済み。お知らせ停止には入れない）
 var AC_FORM_Q = { by: '入力者（あなたのお名前）', approver: '承認者（ご本人が入力するときのみ）', who: '対象者', kind: '区分', from: '日付（開始日）', until: '終了日（何日か続くとき）',
   changeTo: '変更後の休みの日（休みの変更のときだけ）', reason: '理由・連絡事項' };
 var AC_FORM_HELP = { from: '休みの変更のときは、もともと休みだった日を入れてください',
@@ -1324,24 +1324,46 @@ function AC_punchSelfNotices_(R, mv, ss, today, props) {
   var live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
   var list = AC_punchSelfNotices(R, mv, today);
   var pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date(), rows = [], overrides = AC_templateOverrides_();
+  // 版 2026-11-13b：勤怠連絡フォームの連絡（読めないときは今までどおり）
+  var forms = list.length ? AC_formEntries_() : { ok: false }, formsOk = forms.ok, reqAll = AC_requestedDays(R, ['timerecords', 'schedules']).days;
   list.forEach(function (g) {
     // 同じ日の打刻漏れは1回だけ知らせる（夜の既存の勤怠通知で送った日も除く）。お知らせ停止の期間中の日・停止中の人は除く
     var kind = live ? ':punchself:' : ':punchrec:';   // 送信の記録は「sent:日付:…」（8日後に自動で消える）。記録のみは別の名前
     var skip = {}, dates = g.dates.filter(function (d) {
-      if (AC_isPaused(pauseIdx, g.code, today) || AC_isPaused(pauseIdx, g.code, d)) { skip[d] = 'お知らせ停止中'; return false; }
+      if (AC_isPausedForPunch(pauseIdx, g.code, today, formsOk) || AC_isPausedForPunch(pauseIdx, g.code, d, formsOk)) { skip[d] = 'お知らせ停止中'; return false; }
       if (state.getProperty('sent:' + d + kind + g.code) || state.getProperty('att:' + d + ':punch:' + g.tot)) { skip[d] = 'お知らせ済み'; return false; }
       return true;
     });
+    // 版 2026-11-13b：フォームの連絡の期間に入る日は【勤怠の変更】にまとめる（同じ連絡は1回だけ。夜のお知らせで送った連絡も除く）
+    var groups = [], fsuf = live ? '' : ':e42rec';
+    if (formsOk && dates.length && (forms.byCode[g.code] || []).length) {
+      var sp = AC_formSplit(dates, forms.byCode[g.code], reqAll, g.tot);
+      sp.groups.forEach(function (fg) {
+        if (fg.skip) { fg.dates.forEach(function (d) { skip[d] = '勤怠変更フォームの期間が申請済み'; }); return; }
+        if (state.getProperty(fg.key) || (fsuf && state.getProperty(fg.key + fsuf))) { fg.dates.forEach(function (d) { skip[d] = 'お知らせ済み（勤怠変更フォーム）'; }); return; }
+        groups.push(fg);
+      });
+      dates = sp.rest;
+    }
     var text = '', result;
-    if (dates.length && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('ATT-02', g.code, today).send) { result = '送らない（お知らせ設定でOFF）'; dates = []; }
-    else if (!dates.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
+    if ((dates.length || groups.length) && typeof AC_noticeCheck_ === 'function' && !AC_noticeCheck_('ATT-02', g.code, today).send) { result = '送らない（お知らせ設定でOFF）'; dates = []; groups = []; }
+    else if (!dates.length && !groups.length) result = '送らない（' + Object.keys(skip).map(function (d) { return d + '：' + skip[d]; }).join('／') + '）';
     else {
-      text = AC_punchSelfMessage(dates, null, overrides, today, g.kinds);
+      text = groups.length
+        ? AC_nightSelfMessage(dates.map(function (d) { return { kind: 'punch', date: d, punchKind: (g.kinds || {})[d] || '' }; })
+          .concat(groups.map(function (fg) { return { kind: 'formchg', date: fg.entry.from, entry: fg.entry, name: g.name }; })), today)
+        : AC_punchSelfMessage(dates, null, overrides, today, g.kinds);
       if (!live) result = '記録のみ（送信しない）';
       else {
         try { AC_pushTo_(g.userId, text); result = '送信'; } catch (e) { result = '送信失敗'; }
       }
-      if (result !== '送信失敗') dates.forEach(function (d) { state.setProperty('sent:' + d + kind + g.code, now.toISOString()); });
+      if (result !== '送信失敗') {
+        dates.forEach(function (d) { state.setProperty('sent:' + d + kind + g.code, now.toISOString()); });
+        groups.forEach(function (fg) {
+          state.setProperty(fg.key + fsuf, now.toISOString());
+          fg.dates.forEach(function (d) { state.setProperty('sent:' + d + kind + g.code, now.toISOString()); });
+        });
+      }
     }
     rows.push([now, "'" + g.code, g.name, g.dates.join('、'), text, result]);
   });
@@ -1990,13 +2012,14 @@ function AC_nightSelfMessage(items, today) {
     return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）';
   };
   var h = function (min) { return (Math.floor(min / 6) / 10).toFixed(1); };
-  var order = { noClockOut: 0, noClockIn: 1, punch: 2, ot30: 3, ot45: 4 };
+  var order = { noClockOut: 0, noClockIn: 1, punch: 2, formchg: 3, ot30: 4, ot45: 5 };
   var list = (items || []).slice().sort(function (a, b) { return (order[a.kind] - order[b.kind]) || ((a.date || '') < (b.date || '') ? -1 : (a.date || '') > (b.date || '') ? 1 : 0); });
-  var punch = [], ot = [], form = false;
+  var punch = [], ot = [], form = false, changes = [], who = '';
   list.forEach(function (it) {
     if (it.kind === 'noClockOut') punch.push('・本日' + md(today) + 'の退勤打刻がまだ確認できません。勤務中の場合は、退勤時に打刻をお願いいたします。');
     else if (it.kind === 'noClockIn') { punch.push('・本日' + md(today) + 'は出勤予定ですが、出勤打刻が確認できません。'); form = true; }
     else if (it.kind === 'punch') punch.push('・' + md(it.date) + 'の' + AC_punchKindLabel(it.punchKind) + 'が確認できません。');   // 版 2026-11-13a：出勤・退勤の区別
+    else if (it.kind === 'formchg') { changes.push(it.entry); who = it.name || who; }   // 版 2026-11-13b：勤怠連絡フォームの連絡
     else if (it.kind === 'ot30') ot.push('・今月の残業時間が30時間を超えました（現在 ' + h(it.min) + '時間）。無理のない働き方を心がけてください。');
     else if (it.kind === 'ot45') ot.push('・今月の残業時間が45時間に達しました（現在 ' + h(it.min) + '時間）。今後の業務量について、上長にご相談ください。');
   });
@@ -2005,8 +2028,9 @@ function AC_nightSelfMessage(items, today) {
     parts.push('【打刻】\n' + punch.join('\n') + '\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。'
       + (form ? '\n→ お休みに変更となった場合は、Touch On Timeから欠勤の申請をお願いいたします。申請メッセージには欠勤のご連絡と、承認いただいた上長の氏名を必ずご記入ください。' : ''));
   }
+  if (changes.length) parts.push(AC_formChangeBlock(changes, who));
   if (ot.length) parts.push('【今月の残業】\n' + ot.join('\n'));
-  parts.push(form ? 'ご対応のほどよろしくお願いいたします！' : 'ご確認のほどよろしくお願いいたします！');   // 当日の出勤打刻なしがあるときは締めを変える
+  parts.push((changes.length ? AC_FORM_ASK + '\n' : '') + (form ? 'ご対応のほどよろしくお願いいたします！' : 'ご確認のほどよろしくお願いいたします！'));   // 当日の出勤打刻なしがあるときは締めを変える
   return parts.join('\n\n').slice(0, 4900);
 }
 
@@ -2021,7 +2045,9 @@ function AC_nightSelfRun_(R, mv, today, o) {
   var itemInfo = {};
   var items = AC_nightSelfItems(R, today, o.withToday, itemInfo);
   var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
-  var counts = { people: 0, sent: 0, recorded: 0, excluded: 0, unreg: 0, failed: 0, kinds: {}, reasons: {},
+  // 版 2026-11-13b：勤怠連絡フォームの連絡（読めないときは今までどおり）
+  var forms = AC_formEntries_(), formsOk = forms.ok, names = AC_nameByCode_(mv), reqAll = AC_requestedDays(R, AC_NIGHT_REQUEST_TYPES).days;
+  var counts = { people: 0, sent: 0, recorded: 0, excluded: 0, unreg: 0, failed: 0, kinds: {}, reasons: {}, formRequested: 0, formsOk: formsOk,
     requested: itemInfo.requested, noRequests: itemInfo.noRequests, noRequestsSkipped: itemInfo.noRequestsSkipped };
   if (itemInfo.noRequests) Logger.log('夜の本人向け：申請のデータが無い（または読み取りエラー）ため、打刻の項目 %s件を送りません（残業の項目は送ります）', itemInfo.noRequestsSkipped);
   var people = [], testLines = [], logs = [];
@@ -2048,10 +2074,28 @@ function AC_nightSelfRun_(R, mv, today, o) {
     var keep = byTot[t].filter(function (it) {
       if (state.getProperty(it.key)) return false;   // 送信済み（今までの1通ずつの送信の記録も見る）
       if (!code) { exclude(it, code, '従業員マスタに無い'); return false; }
-      if (AC_isPaused(pauseIdx, code, today) || (it.date && AC_isPaused(pauseIdx, code, it.date))) { exclude(it, code, 'お知らせ停止中'); return false; }
+      var isP = AC_PUNCH_ITEM_KINDS[it.kind] ? function (d) { return AC_isPausedForPunch(pauseIdx, code, d, formsOk); } : function (d) { return AC_isPaused(pauseIdx, code, d); };
+      if (isP(today) || (it.date && isP(it.date))) { exclude(it, code, 'お知らせ停止中'); return false; }
       if (!setOn(it.nid, code)) { exclude(it, code, 'お知らせ設定でOFF'); return false; }
       return true;
     });
+    // 版 2026-11-13b：フォームの連絡の期間に入る打刻の項目は、連絡ごとに【勤怠の変更】の1項目（formchg）にまとめる
+    if (formsOk && code && (forms.byCode[code] || []).length) {
+      var dayOf = function (it) { return it.date || today; };
+      var sp = AC_formSplit(keep.filter(function (it) { return AC_PUNCH_ITEM_KINDS[it.kind]; }).map(dayOf), forms.byCode[code], reqAll, t);
+      var cov = {}, made = {}, next = [];
+      sp.groups.forEach(function (g) { g.dates.forEach(function (d) { cov[d] = g; }); });
+      keep.forEach(function (it) {
+        var g = AC_PUNCH_ITEM_KINDS[it.kind] && cov[dayOf(it)];
+        if (!g) { next.push(it); return; }
+        if (g.skip) { if (!made[g.key]) { made[g.key] = 1; counts.formRequested++; } return; }   // 期間の全部の日が申請済み
+        if (state.getProperty(g.key)) return;   // 同じ連絡は1回だけ（送信済み）
+        var f = made[g.key];
+        if (!f) { f = made[g.key] = { tot: it.tot, kind: 'formchg', nid: 'ATT-02', key: g.key, date: g.entry.from, entry: g.entry, name: names[code] || '', covered: [] }; next.push(f); }
+        f.covered.push(it);
+      });
+      keep = next;
+    }
     if (o.test && !preview) {   // ATTENDANCE_TEST：本人ではなく管理者へまとめて1通（今までと同じ。文面はまとめた形）
       var tItems = keep.filter(function (it) { return !state.getProperty(it.key + ':test'); });
       if (tItems.length) {
@@ -2069,14 +2113,14 @@ function AC_nightSelfRun_(R, mv, today, o) {
     if (sendLive) {
       try {
         AC_pushTo_(to.userId, text);
-        fresh.forEach(function (it, i) { state.setProperty(it.key, now.toISOString()); logs.push(row(it, code, '送信', i === 0 ? text : '')); });
+        fresh.forEach(function (it, i) { state.setProperty(it.key, now.toISOString()); (it.covered || []).forEach(function (c) { state.setProperty(c.key, now.toISOString()); }); logs.push(row(it, code, '送信', i === 0 ? text : '')); });
         counts.sent++;
       } catch (e) {   // 記録しないので、次の晩にもう一度送る
         counts.failed++;
         fresh.forEach(function (it, i) { logs.push(row(it, code, '送信失敗', i === 0 ? text : '')); });
       }
     } else {
-      fresh.forEach(function (it, i) { state.setProperty(it.key + ':rec', now.toISOString()); logs.push(row(it, code, o.mode === 'on' ? '記録（DRY_RUN のため送信しない）' : '記録（送信しない）', i === 0 ? text : '')); });
+      fresh.forEach(function (it, i) { state.setProperty(it.key + ':rec', now.toISOString()); (it.covered || []).forEach(function (c) { state.setProperty(c.key + ':rec', now.toISOString()); }); logs.push(row(it, code, o.mode === 'on' ? '記録（DRY_RUN のため送信しない）' : '記録（送信しない）', i === 0 ? text : '')); });
       counts.recorded++;
     }
   });
@@ -2120,6 +2164,8 @@ function alcoholCheckNightSelfPreview() {
     '除外：' + reasons,
     '申請があったので送らない：' + (c.requested || 0) + '件（打刻申請・スケジュール申請が申請中・承認済みの日）'
       + (c.noRequests ? '／申請のデータが無い（または読み取りエラー）ため、打刻の項目 ' + c.noRequestsSkipped + '件を送らない' : ''),
+    '勤怠連絡フォーム：' + (c.formsOk ? '【勤怠の変更】の連絡 ' + (k.formchg || 0) + '件／期間の全部の日が申請済みで送らない連絡 ' + (c.formRequested || 0) + '件'
+      : '回答を読めないため、今までどおりの文（お知らせ停止も今までどおり）'),
   ];
   res.people.filter(function (p) { return p.line; }).slice(0, 3).forEach(function (p, i) { lines.push('―― 文面の例' + (i + 1) + '（' + p.kinds.length + '項目）――\n' + p.text); });
   Logger.log(lines.join('\n'));
@@ -2740,6 +2786,152 @@ function AC_pick(list, today) {
   return list[n % list.length];
 }
 
+// ---------------- 勤怠連絡フォームの連絡を、打刻のお知らせに【勤怠の変更】として入れる（版 2026-11-13b） ----------------
+// 11/12 夜、上長がフォームで休日出勤と連絡済みの人に、打刻修正の依頼が届いた（安藤さんの指摘）。
+// 対象：夜のお知らせ（E-40）・管理本部の本人へのお知らせ（E-42）・毎週月曜の催促（E-78）の打刻の項目（打刻漏れ・当日の打刻なし）。
+// 打刻の項目の日が、同じ人のフォームの回答（欠勤・有給休暇・休みの変更・休日出勤）の期間に入るなら、打刻修正のお願いではなく【勤怠の変更】の文にする。
+//  - 何日か続く連絡は、期間の全部の日をまとめて1行（打刻漏れが出ていない日も含める）
+//  - 期間の全部の日に ToT の打刻申請・スケジュール申請（申請中・承認済み）があれば、その連絡の分は送らない（一部だけなら送る）
+//  - 同じ日に回答が2つ以上あるときは、あとから送られた回答を使う
+//  - 遅刻・早退・打刻の修正・その他の回答は使わない（今までどおり）
+// フォームから入った「お知らせ停止」（欠勤・有給休暇・休みの変更。止めるお知らせ＝全部）は、打刻の項目では無視する（アルコールチェックなどは今までどおり止める）。
+// 手で入れたお知らせ停止・「打刻の修正」の停止（勤怠のみ）は今までどおり何も送らない。
+// フォームの回答シートが読めないときは、今までどおりの文（停止も今までどおり）で送り、実行ログに出す。
+
+/** 【勤怠の変更】にするフォームの区分（label は文に入れる言葉。休みの変更は別の文） */
+var AC_FORM_CHANGE_KINDS = [{ re: /欠勤/, label: '欠勤' }, { re: /有給/, label: '有給休暇' }, { re: /休日出勤/, label: '休日出勤' }, { re: /休みの変更/, label: '休みの変更', change: true }];
+/** 打刻の項目（フォームの連絡でまとめる・フォームの停止を無視する種類） */
+var AC_PUNCH_ITEM_KINDS = { punch: 1, noClockIn: 1, noClockOut: 1 };
+var AC_FORM_ASK = 'ご不明な点がございましたら、このトークでご連絡ください。';
+
+/** 純粋関数：「11/12（木）」 */
+function AC_mdw_(d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; }
+
+/** 純粋関数：セルの値を YYYY-MM-DD に（日付型、「2026/11/12」「2026-11-12」の文字）。読めなければ '' */
+function AC_formDate_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]') return isNaN(v) ? '' : Utilities.formatDate(v, AC_TZ, 'yyyy-MM-dd');
+  var m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/.exec(String(v == null ? '' : v).trim());
+  return m ? m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2) : '';
+}
+
+/**
+ * 純粋関数：回答シートの値（1行目が設問の名前）から、【勤怠の変更】に使う連絡を out（{ 社員番号: [連絡…] }）に足す。回答シートでなければ null。
+ * 連絡：{ code, by（入力者）, kind（区分）, label, change（休みの変更）, from, until, changeTo, ts（送信日時の数）, order（行の順） }
+ */
+function AC_formEntriesFromValues(values, out) {
+  out = out || {};
+  var head = ((values && values[0]) || []).map(function (h) { return String(h == null ? '' : h).trim(); });
+  var col = function (t) { return head.indexOf(t); };
+  var cBy = col(AC_FORM_Q.by), cKind = col(AC_FORM_Q.kind), cFrom = col(AC_FORM_Q.from), cUntil = col(AC_FORM_Q.until), cTo = col(AC_FORM_Q.changeTo), cTs = col('タイムスタンプ'), cWho = [];
+  head.forEach(function (h, i) { if (AC_isWhoTitle(h)) cWho.push(i); });
+  if (cKind === -1 || cFrom === -1 || !cWho.length) return null;
+  for (var i = 1; i < values.length; i++) {
+    var r = values[i] || [];
+    var pick = AC_whoFromResponses(cWho.map(function (c) { return { title: head[c], value: r[c] }; }));
+    var code = AC_codeFromChoice(pick.who), kind = String(r[cKind] == null ? '' : r[cKind]).trim(), k = null;
+    AC_FORM_CHANGE_KINDS.forEach(function (x) { if (!k && x.re.test(kind)) k = x; });
+    var from = AC_formDate_(r[cFrom]), until = (cUntil === -1 ? '' : AC_formDate_(r[cUntil])) || from, changeTo = cTo === -1 ? '' : AC_formDate_(r[cTo]);
+    if (!code || pick.conflict || !k || !from) continue;
+    if (until < from) { var t = from; from = until; until = t; }
+    if (k.change) { if (!changeTo) continue; until = from; }   // 変更後の日が無い休みの変更は使わない（お知らせ停止にも入っていない）
+    var ts = r[cTs], tsNum = Object.prototype.toString.call(ts) === '[object Date]' ? ts.getTime() : 0;
+    (out[code] = out[code] || []).push({ code: code, by: cBy === -1 ? '' : String(r[cBy] == null ? '' : r[cBy]).trim(), kind: kind, label: k.label, change: !!k.change,
+      from: from, until: until, changeTo: k.change ? changeTo : '', ts: tsNum, order: i });
+  }
+  return out;
+}
+
+/** 勤怠連絡フォームの回答シート（ATTENDANCE_RESPONSE_ID、無ければ従業員マスタのファイルの、設問の名前が並んだシート）を読む。1回の実行で1回だけ読む */
+var AC_FORM_ENTRIES_CACHE = null;
+function AC_formEntries_() {
+  if (AC_FORM_ENTRIES_CACHE) return AC_FORM_ENTRIES_CACHE;
+  var res;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var id = props.getProperty('ATTENDANCE_RESPONSE_ID') || props.getProperty('EMPLOYEE_MASTER_ID'), out = {}, found = 0;
+    if (!props.getProperty('ATTENDANCE_FORM_ID') || !id) res = { ok: false, reason: 'ATTENDANCE_FORM_ID または回答の置き場所が未設定' };
+    else {
+      SpreadsheetApp.openById(id).getSheets().forEach(function (sh) {
+        var lc = sh.getLastColumn();
+        if (!lc) return;
+        var head = sh.getRange(1, 1, 1, lc).getValues()[0].map(function (h) { return String(h == null ? '' : h).trim(); });
+        if (head.indexOf(AC_FORM_Q.by) === -1 || head.indexOf(AC_FORM_Q.kind) === -1 || head.indexOf(AC_FORM_Q.from) === -1) return;
+        if (AC_formEntriesFromValues(sh.getDataRange().getValues(), out)) found++;
+      });
+      res = found ? { ok: true, byCode: out } : { ok: false, reason: '回答シートが見つからない' };
+    }
+  } catch (e) { res = { ok: false, reason: '回答シートを読めない' }; }
+  if (!res.ok) Logger.log('勤怠連絡フォームの回答を読めませんでした（' + res.reason + '）。打刻のお知らせは今までどおりの文で送ります');
+  AC_FORM_ENTRIES_CACHE = res;
+  return res;
+}
+
+/** 純粋関数：お知らせ停止のうち、打刻の項目を止めるものか。フォームの回答シートが読めるときは、フォームから入った「全部」の停止を数えない */
+function AC_isPausedForPunch(index, code, date, formsOk) {
+  if (!formsOk) return AC_isPaused(index, code, date);
+  return ((index || {})[AC_cellCode_(code)] || []).some(function (p) { return date >= p.from && date <= p.until && !(p.form && !p.attendanceOnly); });
+}
+
+/** 純粋関数：連絡の対象の日（休みの変更はもとの休みの日と変更後の日。何日か続くときは全部の日。最大62日） */
+function AC_formDays(e) {
+  if (e.change) return [e.from, e.changeTo];
+  var out = [], d = e.from;
+  while (d <= e.until && out.length < 62) { out.push(d); d = AC_addDays_(d, 1); }
+  return out;
+}
+
+/** 純粋関数：連絡ごとの記録のキー（同じ連絡を夜のお知らせで2回送らない。40日で自動で消える att: の形） */
+function AC_formChangeKey(e, tot) {
+  return 'att:' + e.from + ':formchg:' + AC_totKey(tot) + ':' + (e.change ? 'to' + e.changeTo : e.until) + ':' + e.label;
+}
+
+/**
+ * 純粋関数：1人分の打刻の項目の日を、フォームの連絡でまとめる。
+ * dates：打刻の項目の日。entries：その人の連絡。req：AC_requestedDays(R, ['timerecords','schedules']).days。tot：TOTコード
+ * 戻り値：{ groups: [{ entry, dates, key, skip（期間の全部の日が申請済み） }], rest: [連絡の無い日] }
+ */
+function AC_formSplit(dates, entries, req, tot) {
+  var covers = function (e, d) { return e.change ? (d === e.from || d === e.changeTo) : (d >= e.from && d <= e.until); };
+  var later = function (a, b) { return a.ts !== b.ts ? a.ts > b.ts : a.order > b.order; };
+  var byKey = {}, groups = [], rest = [], t = AC_totKey(tot);
+  (dates || []).forEach(function (d) {
+    var hit = null;
+    (entries || []).forEach(function (e) { if (covers(e, d) && (!hit || later(e, hit))) hit = e; });
+    if (!hit) { if (rest.indexOf(d) === -1) rest.push(d); return; }
+    var key = AC_formChangeKey(hit, tot), g = byKey[key];
+    if (!g) {
+      g = byKey[key] = { entry: hit, dates: [], key: key, skip: AC_formDays(hit).every(function (x) { return !!(req || {})[t + ':' + x]; }) };
+      groups.push(g);
+    }
+    if (g.dates.indexOf(d) === -1) g.dates.push(d);
+  });
+  groups.sort(function (a, b) { return a.entry.from < b.entry.from ? -1 : a.entry.from > b.entry.from ? 1 : 0; });
+  return { groups: groups, rest: rest };
+}
+
+/** 純粋関数：連絡1つ分の2行（「・○○さんより、…」と「→ Touch On Timeから…」）。name は送る相手の氏名（入力者が本人かを比べるだけ） */
+function AC_formChangeLines(e, name) {
+  var by = String(e.by || '').trim().replace(/[\s　]*さん$/, '');
+  var head = !by || AC_nameKey_(by) === AC_nameKey_(name) ? '・勤怠変更フォームより、' : '・' + by + 'さんより、';
+  if (e.change) return [head + AC_mdw_(e.from) + 'の休みを' + AC_mdw_(e.changeTo) + 'に変更するとご連絡をいただいています。',
+    '→ Touch On Timeから、' + AC_mdw_(e.from) + 'と' + AC_mdw_(e.changeTo) + 'の両日について「スケジュール申請」をお願いいたします。'];
+  if (e.from !== e.until) return [head + AC_mdw_(e.from) + '〜' + AC_mdw_(e.until) + 'は' + e.label + 'とご連絡をいただいています。',
+    '→ Touch On Timeから、各日の「スケジュール申請」をお願いいたします。'];
+  return [head + AC_mdw_(e.from) + 'は' + e.label + 'とご連絡をいただいています。', '→ Touch On Timeから「スケジュール申請」をお願いいたします。'];
+}
+
+/** 純粋関数：【勤怠の変更】のかたまり。entries：[連絡…] */
+function AC_formChangeBlock(entries, name) {
+  return '【勤怠の変更】\n' + (entries || []).map(function (e) { return AC_formChangeLines(e, name).join('\n'); }).join('\n');
+}
+
+/** 純粋関数：従業員マスタの 社員番号 → 氏名 */
+function AC_nameByCode_(mv) {
+  var out = {};
+  for (var i = 1; i < (mv || []).length; i++) { var c = AC_cellCode_(mv[i][AC_COL.code]); if (c) out[c] = String(mv[i][AC_COL.name] || '').trim(); }
+  return out;
+}
+
 // ---------------- 毎週月曜10:00の本人向けの打刻漏れの催促（版 2026-11-13a） ----------------
 // 当月1日〜前日の「まだ申請していない打刻漏れ」（TOTのエラー勤務）を、本人へ1人1通にまとめて知らせる。月末までに打刻修正申請をしてもらう。
 // 対象は夜のお知らせ（E-40）と同じ：従業員マスタで LINE確認済み・退職でない・TOTコードが分かる人。お知らせ停止中・マスタに無い人は除く。
@@ -2764,12 +2956,13 @@ function AC_weekMonday(today) {
  */
 function AC_weeklyPunchItems(R, today) {
   R = R || {};
-  var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0, kinds: {} };
+  var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0, kinds: {}, reqDays: {} };
   var bad = function (a) { return !Array.isArray(a) || a.some(function (x) { return x && x._error; }); };
   if (!Array.isArray(R.employees) || bad(R.workings)) { out.reason = '勤務のデータが無い、または読み取りエラー'; return out; }
   var req = AC_requestedDays(R, AC_WEEKLY_PUNCH_REQUEST_TYPES);
   if (!req.ok) { out.reason = '申請のデータが無い、または読み取りエラー'; return out; }
   out.ok = true;
+  out.reqDays = req.days;
   var codeByKey = AC_totCodeByKey_(R.employees), from = today.slice(0, 8) + '01', seen = {}, kinds = AC_punchKindIndex(R);
   AC_totFlat_(R.workings).forEach(function (w) {
     var tot = codeByKey[w && w.employeeKey];
@@ -2790,10 +2983,16 @@ function AC_weeklyPunchItems(R, today) {
  * 純粋関数：毎週の催促の文面（テンプレート weeklyPunch。「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行が入る）。
  * kinds（任意）：{ 日付: 'in'／'out'／'both' }。分かる日は「・11/5（木）出勤の打刻」の形（分からない日は日付だけ）
  */
-function AC_weeklyPunchMessage(dates, today, overrides, kinds) {
+function AC_weeklyPunchMessage(dates, today, overrides, kinds, changes, name) {
   var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
   var line = function (d) { var k = kinds && kinds[d]; return '・' + md(d) + (k ? AC_punchKindLabel(k) : ''); };
-  return AC_render('weeklyPunch', today, { dates: (dates || []).map(line).join('\n') }, overrides);
+  if (!(changes && changes.length)) return AC_render('weeklyPunch', today, { dates: (dates || []).map(line).join('\n') }, overrides);
+  // 版 2026-11-13b：【勤怠の変更】があるとき。テンプレートの最後の段落（締め）の前に入れ、締めの前に問い合わせの一文。打刻漏れの日が無ければ {dates} の段落を除く
+  var MARK = '\u0001DATES\u0001';
+  var paras = AC_render('weeklyPunch', today, { dates: dates && dates.length ? dates.map(line).join('\n') : MARK }, overrides).split('\n\n')
+    .filter(function (p) { return p.indexOf(MARK) === -1; });
+  var last = paras.length > 1 ? paras.pop() : 'ご確認のほどよろしくお願いいたします！';
+  return paras.concat([AC_formChangeBlock(changes, name), AC_FORM_ASK + '\n' + last]).join('\n\n').slice(0, 4900);
 }
 
 /**
@@ -2804,10 +3003,12 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
   o = o || {};
   var preview = o.mode === 'preview', sendLive = o.mode === 'on' && o.live === true;
   var plan = AC_weeklyPunchItems(R, today);
-  var counts = { people: 0, dates: 0, sent: 0, recorded: 0, failed: 0, already: 0, requested: plan.requested, setting: 0, paused: 0, noMaster: 0, unreg: 0 };
+  var counts = { people: 0, dates: 0, sent: 0, recorded: 0, failed: 0, already: 0, requested: plan.requested, setting: 0, paused: 0, noMaster: 0, unreg: 0, changes: 0, formRequested: 0 };
   if (!plan.ok) return { ok: false, reason: plan.reason, counts: counts, people: [] };
   var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
   var week = AC_weekMonday(today), overrides = o.overrides || AC_templateOverrides_(), people = [], logs = [];
+  var forms = plan.order.length ? AC_formEntries_() : { ok: false }, formsOk = forms.ok, names = AC_nameByCode_(mv);   // 版 2026-11-13b
+  counts.formsOk = formsOk;
   var setOn = function (code) {
     if (typeof AC_noticeEffective !== 'function' || typeof AC_noticeIndex_ !== 'function') return true;   // Notices.gs が無いとき
     try { return !!AC_noticeEffective(AC_noticeIndex_(), 'ATT-02', code); } catch (e) { Logger.log('お知らせ設定を読めませんでした（この人には送りません）'); return false; }
@@ -2823,13 +3024,22 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     var key = 'att:' + week + ':weeklypunch:' + t, code = codeOfTot[t] || '';
     if (state.getProperty(key) || (!sendLive && !preview && state.getProperty(key + ':rec'))) { counts.already++; return; }   // 同じ週は1通だけ
     if (!code) { counts.noMaster++; exclude(key, code, '従業員マスタに無い'); return; }
-    if (AC_isPaused(pauseIdx, code, today)) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
-    var dates = plan.byTot[t].filter(function (d) { return !AC_isPaused(pauseIdx, code, d); });   // 停止期間中の日は外す
+    var isP = function (d) { return AC_isPausedForPunch(pauseIdx, code, d, formsOk); };   // フォームから入った停止（全部）は打刻の項目では数えない
+    if (isP(today)) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
+    var dates = plan.byTot[t].filter(function (d) { return !isP(d); });   // 停止期間中の日は外す
     if (!dates.length) { counts.paused++; exclude(key, code, 'お知らせ停止中'); return; }
+    var changes = [];
+    if (formsOk && (forms.byCode[code] || []).length) {   // フォームの連絡の期間に入る日は【勤怠の変更】に（毎週、未申請なら出す）
+      var sp = AC_formSplit(dates, forms.byCode[code], plan.reqDays, t);
+      sp.groups.forEach(function (g) { if (g.skip) counts.formRequested++; else changes.push(g.entry); });
+      dates = sp.rest;
+      if (!dates.length && !changes.length) return;   // 連絡の期間が全部申請済み
+    }
     if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
     var dk = {};
     dates.forEach(function (d) { if (plan.kinds[t + ':' + d]) dk[d] = plan.kinds[t + ':' + d]; });
-    var text = AC_weeklyPunchMessage(dates, today, overrides, dk), to = line[t];
+    var text = AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
+    counts.changes += changes.length;
     if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }
     counts.people++; counts.dates += dates.length;
     if (preview) { people.push({ dates: dates, text: text, line: true }); return; }
@@ -2892,6 +3102,8 @@ function alcoholCheckWeeklyPunchPreview() {
   lines.push('送る人数：' + c.people + '人・打刻漏れ ' + c.dates + '件',
     '外した件数：申請済み ' + c.requested + '件（打刻申請・スケジュール申請が申請中・承認済みの日）／お知らせ設定OFF ' + c.setting + '人／LINE未登録 ' + c.unreg
       + '人／お知らせ停止中 ' + c.paused + '人／従業員マスタに無い ' + c.noMaster + '人',
+    '勤怠連絡フォーム：' + (c.formsOk ? '【勤怠の変更】の連絡 ' + c.changes + '件／期間の全部の日が申請済みで送らない連絡 ' + c.formRequested + '件'
+      : '回答を読めないため、今までどおりの文（お知らせ停止も今までどおり）'),
     '', '文面の例：', sample ? sample.text : '（送る人がいません）');
   Logger.log(lines.join('\n'));
   return res;
@@ -3876,7 +4088,7 @@ if (typeof module !== 'undefined') {
     AC_thanksMessage: AC_thanksMessage, AC_streak: AC_streak, AC_isMilestone: AC_isMilestone, AC_thanksTargets: AC_thanksTargets,
     AC_buildDay: AC_buildDay, AC_recipientsFor: AC_recipientsFor, AC_weatherFromJma: AC_weatherFromJma, AC_warningsFromJma: AC_warningsFromJma, AC_careKey: AC_careKey, AC_tempLabel: AC_tempLabel, AC_weatherSamples: AC_weatherSamples, AC_dropOldCareDefaults: AC_dropOldCareDefaults, AC_findAlerts: AC_findAlerts,
     AC_notTargetReason: AC_notTargetReason, AC_isNormalResult: AC_isNormalResult, AC_deviceCodes: AC_deviceCodes,
-    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
+    AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_formEntriesFromValues: AC_formEntriesFromValues, AC_formSplit: AC_formSplit, AC_formChangeLines: AC_formChangeLines, AC_isPausedForPunch: AC_isPausedForPunch, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
     AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };

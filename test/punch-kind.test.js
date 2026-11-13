@@ -116,3 +116,53 @@ test('13e 毎週月曜の催促（E-78）：二重打刻は「・11/9（月）�
   const text = X.AC_weeklyPunchMessage(dates, TODAY, {}, kinds);
   assert.ok(text.includes('・11/2（月）\n・11/6（金）退勤の打刻\n・11/7（土）出勤の打刻\n・11/8（日）出勤・退勤の打刻\n・11/9（月）退勤の打刻が2回\n・11/10（火）出勤の打刻が2回\n・11/11（水）退勤の打刻\n・11/12（木）\n'), text);
 });
+
+// ---------------- 版 2026-11-13f：休みの日の打刻（全日休暇の日に出勤・退勤の打刻がある） ----------------
+const OFF = { holidaysObtained: { fulltimeHoliday: { code: 9, name: '公休' } } };
+const RH = () => ({
+  employees: EMP,
+  // 11/9 公休・出勤1退勤1／11/10 公休・出勤1退勤2（二重打刻より先）／11/11 公休・打刻なし（両方なし）／11/12 出勤日・出勤1退勤0
+  workings: [{ dailyWorkings: [{ ...E('2026-11-09'), ...OFF }, { ...E('2026-11-10'), ...OFF }, { ...E('2026-11-11'), ...OFF }, E('2026-11-12')] }],
+  timerecord: [{ dailyWorkings: [T2('2026-11-09', [1, 2]), T2('2026-11-10', [1, 2, 2]), T2('2026-11-11', [3]), T2('2026-11-12', [1])] }],
+  requests: [], schedules: [],
+});
+
+test('13f 判定：全日休暇の日に出勤か退勤の打刻が1回以上あれば「休みの日の打刻」（判定の最初）。打刻が無ければ今までどおり', () => {
+  const X = gas().ctx;
+  assert.deepEqual({ ...X.AC_punchKindIndex(RH()) }, { '1:2026-11-09': 'holiday', '1:2026-11-10': 'holiday', '1:2026-11-11': 'both', '1:2026-11-12': 'out' });
+  assert.deepEqual([[1, 0], [0, 1], [1, 2], [2, 2], [0, 0]].map(([a, b]) => X.AC_punchKindClass(a, b, true)), ['holiday', 'holiday', 'holiday', 'holiday', 'both']);
+  assert.equal(X.AC_punchKindClass(1, 2, false), 'dup:out:2');
+  assert.equal(X.AC_isFullHoliday({ holidaysObtained: { fulltimeHoliday: null } }), false);
+  assert.equal(X.AC_isFullHoliday({ holidaysObtained: { fulltimeHoliday: { code: 1 } } }), true);
+});
+
+test('13f 夜のお知らせ（E-40）・E-42：「は休みの予定ですが、出勤・退勤の打刻があります。」とスケジュール申請の案内', () => {
+  const X = gas().ctx;
+  const text = X.AC_nightSelfMessage([...X.AC_nightSelfItems(RH(), TODAY, false)].map((x) => ({ ...x })), TODAY);
+  assert.equal(text, 'お疲れ様です😊\n勤怠のお知らせです。\n\n【打刻】\n・11/9（月）は休みの予定ですが、出勤・退勤の打刻があります。\n・11/10（火）は休みの予定ですが、出勤・退勤の打刻があります。\n'
+    + '・11/11（水）の出勤・退勤の打刻が確認できません。\n・11/12（木）の退勤の打刻が確認できません。\n'
+    + '→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。\n'
+    + '→ 休日出勤の場合は、Touch On Timeから「スケジュール申請」をお願いいたします。\n\nご確認のほどよろしくお願いいたします！');
+  const list = [...X.AC_punchSelfNotices(RH(), MASTER, TODAY)].map((x) => ({ ...x, kinds: { ...x.kinds } }));
+  assert.equal(X.AC_punchSelfMessage(['2026-11-09'], null, {}, TODAY, list[0].kinds),
+    'お疲れ様です😊\n勤怠のお知らせです。\n\n【打刻】\n・11/9（月）は休みの予定ですが、出勤・退勤の打刻があります。\n→ 休日出勤の場合は、Touch On Timeから「スケジュール申請」をお願いいたします。\n\nご確認のほどよろしくお願いいたします！');
+});
+
+test('13f 毎週月曜の催促（E-78）：「・11/9（月）休みの日の打刻」', () => {
+  const X = gas().ctx;
+  const plan = X.AC_weeklyPunchItems(RH(), TODAY);
+  const dates = [...plan.byTot['1']], kinds = {};
+  dates.forEach((d) => { if (plan.kinds['1:' + d]) kinds[d] = plan.kinds['1:' + d]; });
+  assert.ok(X.AC_weeklyPunchMessage(dates, TODAY, {}, kinds).includes('・11/9（月）休みの日の打刻\n・11/10（火）休みの日の打刻\n・11/11（水）出勤・退勤の打刻\n・11/12（木）退勤の打刻\n'));
+});
+
+test('13f フォームに同じ日の休日出勤の連絡があれば【勤怠の変更】を優先（休みの日の打刻の行は出さない）', () => {
+  const X = gas().ctx;
+  const entry = { code: '90001', by: '上長 太郎', kind: '休日出勤', label: '休日出勤', change: false, from: '2026-11-09', until: '2026-11-09', changeTo: '', ts: 1, order: 1 };
+  const sp = X.AC_formSplit(['2026-11-09', '2026-11-12'], [entry], {}, '001');
+  assert.deepEqual([...sp.rest], ['2026-11-12']);
+  assert.deepEqual([...sp.groups[0].dates], ['2026-11-09']);
+  const text = X.AC_nightSelfMessage([{ kind: 'punch', date: '2026-11-12', punchKind: 'out' }, { kind: 'formchg', date: '2026-11-09', entry, name: '試験 一郎' }], TODAY);
+  assert.ok(!/休みの予定ですが/.test(text));
+  assert.match(text, /【勤怠の変更】\n・上長 太郎さんより、11\/9（月）は休日出勤とご連絡をいただいています。\n→ Touch On Timeから「スケジュール申請」をお願いいたします。/);
+});

@@ -71,9 +71,10 @@ test('打刻漏れ：管理本部・在籍・LINE確認済みの本人だけ、�
   assert.deepEqual(list.map((x) => [x.code, x.dates]), [['90001', ['2026-10-22', '2026-10-25']]]);
   assert.equal(list[0].userId, U(1));
   const one = g.ctx.AC_punchSelfMessage(['2026-10-22'], null, {}, '2026-10-27');
-  assert.match(one, /10\/22（木）の勤怠について、打刻が確認できていません/);
+  // 版 2026-11-13e：夜のお知らせ（E-40）と同じ形・同じ口調
+  assert.equal(one, 'お疲れ様です😊\n勤怠のお知らせです。\n\n【打刻】\n・10/22（木）の打刻の内容をご確認ください。\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。\n\nご確認のほどよろしくお願いいたします！');
   const two = g.ctx.AC_punchSelfMessage(['2026-10-22', '2026-10-25'], null, {}, '2026-10-27');
-  assert.match(two, /10\/22（木）、10\/25（日）の勤怠について/);
+  assert.match(two, /・10\/22（木）の打刻の内容をご確認ください。\n・10\/25（日）の打刻の内容をご確認ください。/);
   assert.ok(!/二郎|三郎|四郎/.test(two));
 });
 
@@ -87,7 +88,7 @@ test('打刻漏れ：未設定なら何もしない／record は送らずに「�
   assert.equal(hourly(g2).length, 0);
   const rec = ss2.getSheetByName('打刻漏れ本人通知').dump();
   assert.deepEqual(rec.slice(1).map((r) => [r[1], r[3], r[5]]), [['90001', '2026-10-22、2026-10-25', '記録のみ（送信しない）']]);
-  assert.match(rec[1][4], /10\/22（木）、10\/25（日）/);
+  assert.match(rec[1][4], /・10\/22（木）の[\s\S]*・10\/25（日）の/);
   assert.equal(ss2.getSheetByName('承認待ち本人通知'), null);   // 承認待ちの設定は未設定のまま
 });
 
@@ -96,15 +97,15 @@ test('打刻漏れ：on で本人へ1通。同じ日の打刻漏れは次の日�
   putLatest(g, RES);
   const p1 = hourly(g);
   assert.deepEqual(p1.map((f) => f.body.to), [U(1)]);
-  assert.match(p1[0].body.messages[0].text, /10\/22（木）、10\/25（日）/);
+  assert.match(p1[0].body.messages[0].text, /・10\/22（木）の[\s\S]*・10\/25（日）の/);
   // 翌日：10/26 に新しいエラー、10/22・10/25 は申請がまだ（＝知らせ済みなので繰り返さない）
   g.clock.now = new Date('2026-10-28T07:10:00+09:00').getTime();
   const WORK2 = [...WORK, day('2026-10-26', [W('k501', '2026-10-26', true)])];
   putLatest(g, { ...RES, workings: WORK2 }, '2026-10-28', '2026-10-28T07:05:30+09:00');
   const p2 = hourly(g);
   assert.deepEqual(p2.map((f) => f.body.to), [U(1), U(2)]);   // 一郎：新しい10/26だけ／二郎：前日まで「今日」だった10/27
-  assert.match(p2[0].body.messages[0].text, /10\/26（月）の勤怠について/);
-  assert.match(p2[1].body.messages[0].text, /10\/27（火）の勤怠について/);
+  assert.match(p2[0].body.messages[0].text, /・10\/26（月）の打刻の内容をご確認ください。/);
+  assert.match(p2[1].body.messages[0].text, /・10\/27（火）の打刻の内容をご確認ください。/);
   assert.ok(!/10\/22|10\/25/.test(p2[0].body.messages[0].text));
   // 3日目：新しい日が無ければ送らない（記録は「送らない」）
   g.clock.now = new Date('2026-10-29T07:10:00+09:00').getTime();

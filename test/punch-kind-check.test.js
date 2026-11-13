@@ -10,10 +10,13 @@ const T = (k, date, codes) => ({ employeeKey: k, date, timeRecord: codes.map((c)
 function setup({ mode = 'morning', results } = {}) {
   const g = createGas({ files: ['AlcoholCheck.gs', '../tools/punchKindCheck.gs'], now: TODAY + 'T12:00:00+09:00' });
   const R = results || {
-    employees: [{ key: 'k1', code: '101' }, { key: 'k2', code: '102' }, { key: 'k3', code: '103' }],
+    employees: [{ key: 'k1', code: '101' }, { key: 'k2', code: '102' }, { key: 'k3', code: '103' }, { key: 'k4', code: '104' }],
     workings: [{ dailyWorkings: [
-      W('k1', '2026-11-12', true),   // 出勤 > 退勤
-      W('k1', '2026-11-11', true),   // 退勤 > 出勤
+      W('k1', '2026-11-12', true),   // 退勤なし（出勤1・退勤0）
+      W('k1', '2026-11-11', true),   // 出勤なし（出勤0・退勤1）
+      W('k4', '2026-11-12', true),   // 退勤の二重打刻（出勤1・退勤2）
+      W('k4', '2026-11-11', true),   // 出勤の二重打刻（出勤2・退勤1）
+      W('k4', '2026-11-10', true),   // 退勤なし（出勤2・退勤0）
       W('k2', '2026-11-10', true),   // 打刻なし（timerecord に行が無い）
       W('k2', '2026-11-09', true),   // 打刻なし（行はあるが出勤・退勤が0。休憩だけ）
       W('k3', '2026-11-08', true),   // 同じ数
@@ -26,6 +29,7 @@ function setup({ mode = 'morning', results } = {}) {
     timerecord: [{ dailyWorkings: [
       T('k1', '2026-11-12', [1, 3, 4]), T('k1', '2026-11-11', [2]), T('k2', '2026-11-09', [3, 4]),
       T('k3', '2026-11-08', [1, 2, 1, 2]), T('k1', '2026-11-07', [1, 2]),
+      T('k4', '2026-11-12', [1, 2, 2]), T('k4', '2026-11-11', [1, 1, 2]), T('k4', '2026-11-10', [1, 3, 4, 1]),
     ] }],
     requests: [], schedules: [],
   };
@@ -33,19 +37,19 @@ function setup({ mode = 'morning', results } = {}) {
   return g;
 }
 
-test('punchKindCheck：エラー勤務の日を5つに分けて件数だけを出す（直近7日とデータ全体）', () => {
+test('punchKindCheck：エラー勤務の日を7つに分けて件数だけを出す（直近7日とデータ全体）', () => {
   const g = setup();
   const n = g.fetches.length;
   const r = g.ctx.punchKindCheck();
   assert.equal(r.from, '2026-11-06');
   assert.equal(r.to, '2026-11-12');
-  assert.deepEqual({ ...r.recent }, { total: 5, inMore: 1, outMore: 1, none: 2, same: 1, outOfRange: 0 });
-  assert.deepEqual({ ...r.all }, { total: 7, inMore: 1, outMore: 1, none: 2, same: 1, outOfRange: 2 });
+  assert.deepEqual({ ...r.recent }, { total: 8, noOut: 2, noIn: 1, noBoth: 2, dupIn: 1, dupOut: 1, same: 1, outOfRange: 0 });
+  assert.deepEqual({ ...r.all }, { total: 10, noOut: 2, noIn: 1, noBoth: 2, dupIn: 1, dupOut: 1, same: 1, outOfRange: 2 });
   assert.equal(g.fetches.length, n);   // 送信なし
   const log = g.logs.join('\n');
-  assert.match(log, /直近7日.*：5件（出勤 > 退勤 1件／退勤 > 出勤 1件／打刻なし 2件／同じ数 1件／timerecord の期間外 0件）/);
-  assert.match(log, /データ全体.*：7件/);
-  for (const s of ['k1', 'k2', 'k3', '101', '102', '103', 'T09:00']) assert.ok(!log.includes(s), s + ' をログに出さない');
+  assert.match(log, /直近7日.*：8件（退勤なし 2件／出勤なし 1件／両方なし 2件／出勤の二重打刻 1件／退勤の二重打刻 1件／同じ数 1件／timerecord の期間外 0件）/);
+  assert.match(log, /データ全体.*：10件/);
+  for (const s of ['k1', 'k2', 'k3', 'k4', '101', '102', '103', '104', 'T09:00']) assert.ok(!log.includes(s), s + ' をログに出さない');
 });
 
 test('punchKindCheck：書き込みをしない（ファイル・スクリプトプロパティ・シート）', () => {

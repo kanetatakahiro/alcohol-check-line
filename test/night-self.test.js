@@ -74,7 +74,7 @@ test('夜の本人向け：on で1人1通。4項目が重なっても1通／チ�
   const self = toSelf(p);
   assert.deepEqual(self.map((f) => f.body.to), [U(1), U(2), U(3)]);              // 四郎さん（全部OFF）・五郎さん（LINE未登録）には送らない
   const t1 = text(self[0]);
-  assert.match(t1, /本日11\/12（木）の退勤打刻がまだ確認できません。/); assert.match(t1, /・11\/10（火）の打刻が確認できません。/); assert.match(t1, /・11\/11（水）の打刻が確認できません。/);
+  assert.match(t1, /本日11\/12（木）の退勤打刻がまだ確認できません。/); assert.match(t1, /・11\/10（火）の打刻の内容をご確認ください。/); assert.match(t1, /・11\/11（水）の打刻の内容をご確認ください。/);
   assert.match(t1, /45時間に達しました（現在 46\.0時間）/); assert.match(t1, /Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」/);
   assert.ok(!/30時間/.test(t1));
   assert.match(text(self[1]), /出勤予定ですが、出勤打刻が確認できません。/); assert.match(text(self[1]), /Touch On Timeから欠勤の申請/); assert.ok(!/勤怠連絡フォーム|docs\.google/.test(text(self[1])));
@@ -185,9 +185,9 @@ test('夜の本人向け：文面（打刻だけ／打刻＋残業30時間／残
   const tail = 'ご確認のほどよろしくお願いいたします！';
   const guide = '→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。';
   const a = X.AC_nightSelfMessage([{ kind: 'punch', date: '2026-11-09' }], '2026-11-12');
-  assert.equal(a, [head, '【打刻】\n・11/9（月）の打刻が確認できません。\n' + guide, tail].join('\n\n'));
+  assert.equal(a, [head, '【打刻】\n・11/9（月）の打刻の内容をご確認ください。\n' + guide, tail].join('\n\n'));
   const b = X.AC_nightSelfMessage([{ kind: 'ot30', min: 1860 }, { kind: 'punch', date: '2026-11-10' }, { kind: 'punch', date: '2026-11-09' }], '2026-11-12');
-  assert.equal(b, [head, '【打刻】\n・11/9（月）の打刻が確認できません。\n・11/10（火）の打刻が確認できません。\n' + guide,
+  assert.equal(b, [head, '【打刻】\n・11/9（月）の打刻の内容をご確認ください。\n・11/10（火）の打刻の内容をご確認ください。\n' + guide,
     '【今月の残業】\n・今月の残業時間が30時間を超えました（現在 31.0時間）。無理のない働き方を心がけてください。', tail].join('\n\n'));
   const c = X.AC_nightSelfMessage([{ kind: 'ot45', min: 2760 }], '2026-11-12');
   assert.equal(c, [head, '【今月の残業】\n・今月の残業時間が45時間に達しました（現在 46.0時間）。今後の業務量について、上長にご相談ください。', tail].join('\n\n'));
@@ -246,7 +246,7 @@ test('夜の本人向け（2026-11-12a）：申請中・承認済みの日は送
   const p = toSelf(night(g, '2026-11-12', reqResults()));
   assert.deepEqual(p.map((f) => f.body.to), [U(1)]);                                 // 二郎さん・三郎さんには1通も送らない
   const s = text(p[0]);
-  assert.match(s, /・11\/9（月）の打刻が確認できません。/); assert.match(s, /・11\/10（火）の打刻が確認できません。/);
+  assert.match(s, /・11\/9（月）の打刻の内容をご確認ください。/); assert.match(s, /・11\/10（火）の打刻の内容をご確認ください。/);
   assert.ok(!/11\/7|11\/8/.test(s));                                                // 申請中・承認済みの日は出さない
   assert.ok(!/出勤打刻が確認できません/.test(s));
   // 外した項目は送信履歴にも、送った記録（att:）にも残さない（申請が取り消されたら次の晩に送れる）

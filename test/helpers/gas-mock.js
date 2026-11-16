@@ -97,7 +97,10 @@ class Store {
  * files：gas/ 以下のファイル名。clock.now を変えると「今」が変わる。
  * line.members：グループID → {userId: 表示名}（メンバーのプロフィール取得の応答）
  */
+// 免許証（gas/License.gs）の回帰確認：LIC_REGRESSION=1 のときは、コード.gs を読むテストすべてに License.gs を足し、LICENSE_MODE=on にして既存のテストを流す
+const LIC_REGRESSION = process.env.LIC_REGRESSION === '1';
 export function createGas({ files, now, shared }) {
+  if (LIC_REGRESSION && files.includes('AlcoholCheck.gs') && !files.includes('License.gs')) files = [...files, 'License.gs'];
   const clock = shared ? shared.clock : { now: new Date(now).getTime() };
   const RealDate = Date;
   class FakeDate extends RealDate {
@@ -108,7 +111,7 @@ export function createGas({ files, now, shared }) {
   const scriptProps = new Store(), userProps = new Store();
   const cache = {};
   const fetches = [];
-  const line = { members: {}, profiles: {}, pushFail: new Set() };
+  const line = { members: {}, profiles: {}, pushFail: new Set(), contents: {} };   // contents：メッセージID → { type }（画像の取り出しの応答）
   const logs = [];
   const triggers = [];
   const fmtDate = (d, tz, f) => {
@@ -117,7 +120,7 @@ export function createGas({ files, now, shared }) {
     return f.replace('yyyy', p.year).replace('MM', p.month).replace('dd', p.day).replace('HH', p.hour).replace('mm', p.minute).replace('ss', p.second);
   };
   // ドライブ（「TOT取り込み」フォルダ1つだけの模擬）：drive.files[ファイル名] = { content, updated(ミリ秒) }
-  const drive = { files: {} };
+  const drive = { files: {}, folders: {} };   // folders：ID → 模擬のフォルダ（免許証の写真など。drive.newFolder(id) で作る）
   const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
   const fileObj = (name) => ({
     getName: () => name, getId: () => 'file-' + name,
@@ -131,9 +134,18 @@ export function createGas({ files, now, shared }) {
     getFilesByName: (n) => iter(Object.hasOwn(drive.files, n) ? [fileObj(n)] : []),
     createFile: (n, t) => { drive.files[n] = { content: t, updated: clock.now }; return fileObj(n); },
   };
+  // 写真などを入れる模擬のフォルダ（ファイル：{ id, name, type, trashed }）
+  let fileSeq = 0;
+  drive.newFolder = (id) => {
+    const files = [];
+    const wrap = (f) => ({ getId: () => f.id, getName: () => f.name, isTrashed: () => f.trashed, setTrashed: (v) => { f.trashed = !!v; }, getMimeType: () => f.type });
+    drive.folders[id] = { id, files, getId: () => id, getFiles: () => iter(files.map(wrap)),
+      createFile: (blob) => { const f = { id: 'photo-' + ++fileSeq, name: blob.getName(), type: blob.getContentType(), trashed: false }; files.push(f); return wrap(f); } };
+    return drive.folders[id];
+  };
   const ctx = {
     Date: FakeDate,
-    DriveApp: { getFolderById: () => folder, getFoldersByName: () => iter([folder]), createFolder: () => folder },
+    DriveApp: { getFolderById: (id) => drive.folders[id] || folder, getFoldersByName: () => iter([folder]), createFolder: () => folder },
     MimeType: { PLAIN_TEXT: 'text/plain' },
     console,
     Logger: { log: (...a) => { logs.push(a.join(' ')); } },
@@ -143,7 +155,7 @@ export function createGas({ files, now, shared }) {
       newDataValidation: () => ({ requireValueInList() { return this; }, build() { return {}; } }),
     },
     PropertiesService: { getScriptProperties: () => scriptProps, getUserProperties: () => userProps },
-    CacheService: { getScriptCache: () => ({ get: (k) => (Object.hasOwn(cache, k) ? cache[k] : null), put: (k, v) => { cache[k] = v; } }) },
+    CacheService: { getScriptCache: () => ({ get: (k) => (Object.hasOwn(cache, k) ? cache[k] : null), put: (k, v) => { cache[k] = v; }, remove: (k) => { delete cache[k]; } }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, tryLock() { return true; }, releaseLock() {} }) },
     ContentService: { createTextOutput: (t) => ({ text: t, getContent: () => t }) },
     Utilities: {
@@ -160,6 +172,14 @@ export function createGas({ files, now, shared }) {
         let code = 200, text = '{}';
         const mem = /\/v2\/bot\/group\/([^/]+)\/member\/([^/?]+)$/.exec(url);
         const prof = /\/v2\/bot\/profile\/([^/?]+)$/.exec(url);
+        const content = /^https:\/\/api-data\.line\.me\/v2\/bot\/message\/([^/]+)\/content$/.exec(url);
+        if (content) {   // 画像の取り出し（中身は持たない。種類だけ）
+          const c = line.contents[decodeURIComponent(content[1])];
+          if (!c) return { getResponseCode: () => 404, getContentText: () => '{}' };
+          let bname = null;
+          const blob = { getContentType: () => c.type || 'image/jpeg', getName: () => bname, setName: (n) => { bname = n; return blob; } };
+          return { getResponseCode: () => 200, getContentText: () => '', getBlob: () => blob };
+        }
         if (mem) {
           const g = decodeURIComponent(mem[1]), u = decodeURIComponent(mem[2]);
           if (line.members[g] && Object.hasOwn(line.members[g], u)) text = JSON.stringify({ displayName: line.members[g][u], userId: u });
@@ -194,6 +214,7 @@ export function createGas({ files, now, shared }) {
     module: { exports: {} },
   };
   vm.createContext(ctx);
+  if (LIC_REGRESSION) scriptProps.setProperty('LICENSE_MODE', 'on');
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
   return { ctx, clock, sheets, drive, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };

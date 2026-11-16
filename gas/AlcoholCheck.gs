@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-16a';
+var AC_CODE_VERSION = '2026-11-16b';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -3735,6 +3735,7 @@ function AC_handleEvent_(ev) {
   var src = ev && ev.source;
   if (src && (src.type === 'group' || src.type === 'room')) { AC_handleGroupEvent_(ev); return; }
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
+  if (typeof LIC_onUserEvent_ === 'function' && LIC_onUserEvent_(ev)) return;   // 運転免許証（gas/License.gs・版 2026-11-16b）：「免許更新」・免許のボタン・受付中の写真だけ。LICENSE_MODE=on のときだけ
   if (ev.type === 'follow') {
     AC_replySelf_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
     return;

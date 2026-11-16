@@ -4,6 +4,7 @@
  * - 翌月分の希望休の申請期限（毎月15日まで・ToTから申請）だけを案内する。「有給」という言葉・残りの日数は送らない
  * - 時刻指定のトリガー（毎月10日・12時台）から動く。受信処理（doPost）は使わない・変えない
  * - 有給の年5日の見守り（管理者向け・AC_paidLeaveStatus）は変えない
+ * - 版 2026-11-16a：本人へは AC_pushSelf_ で送る（最後に「※このメッセージはAIによる自動送信です。」）
  *
  * 設定（スクリプトプロパティ）
  *   LEAVE_REQUEST_NOTIFY：未設定＝何もしない／record＝送らずに「希望休案内」シートへ記録／on＝送る（DRY_RUN=false のときだけ。10日だけ）
@@ -113,7 +114,7 @@ function alcoholCheckLeaveRequestNotice() {
       if (state.getProperty(key)) { counts.already++; return; }   // 同じ月はもう送った（シートにも書かない）
       if (!live) { result = '記録のみ（送信しない）'; counts.sent++; }
       else {
-        try { AC_pushTo_(p.userId, text); state.setProperty(key, now.toISOString()); result = '送信'; counts.sent++; }
+        try { AC_pushSelf_(p.userId, text); state.setProperty(key, now.toISOString()); result = '送信'; counts.sent++; }
         catch (e) { result = '送信失敗'; counts.failed++; }
       }
       rows.push([now, v.target, "'" + p.code, p.name, result, text]);

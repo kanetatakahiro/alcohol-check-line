@@ -398,7 +398,7 @@ test('13d 申請を承認する：受け渡しに method=approve と申請。結
   assert.match(grp.text, /ご本人のスケジュール申請を承認しました[\s\S]*対象の日：11\/16（月）[\s\S]*申請の承認は元に戻せません/);
   const self = ps.find((f) => f.body.to === U(1));
   assert.ok(self, '本人へ1通');
-  assert.equal(self.body.messages[0].text, 'お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11/16（月）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！');
+  assert.equal(self.body.messages[0].text, 'お疲れ様です😊\n上長 太郎さんよりご連絡をいただき、11/16（月）は欠勤としてスケジュールを変更しました。\nTouch On Timeでの申請は不要です。\nご確認のほどよろしくお願いいたします！\n\n※このメッセージはAIによる自動送信です。');   // 版 2026-11-16a：最後にAIの一文
   [c] = cases(g, mf);
   assert.equal(c.state, '反映済み');
   const v = sheet(mf).dump()[1];

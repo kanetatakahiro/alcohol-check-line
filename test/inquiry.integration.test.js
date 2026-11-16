@@ -257,7 +257,7 @@ test('INQ結合: リマインド（未完了だけ・前日から継続・0件�
   const p = since(g, n).push;
   assert.equal(p.length, 1);
   assert.equal(p[0].body.to, GROUP);
-  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（前日から）\n要約：その他／金曜の相談\n内容：「金曜の相談」');
+  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（1日前から・11/6受付）\n要約：その他／金曜の相談\n内容：「金曜の相談」');
   g.scriptProps.setProperty('INQ_REMIND_DAYS', 'weekdays');
   const m = g.fetches.length;
   g.ctx.INQ_remind();

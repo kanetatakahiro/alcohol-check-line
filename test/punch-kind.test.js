@@ -63,7 +63,7 @@ test('出勤・退勤の区別：毎週月曜の催促（E-78）は「・11/5（
   const dates = [...plan.byTot['1']], kinds = {};
   dates.forEach((d) => { if (plan.kinds['1:' + d]) kinds[d] = plan.kinds['1:' + d]; });
   const text = X.AC_weeklyPunchMessage(dates, TODAY, {}, kinds);
-  assert.ok(text.includes('【申請が確認できていない打刻漏れ】\n・11/2（月）\n・11/6（金）\n・11/9（月）退勤の打刻\n・11/10（火）出勤の打刻\n・11/11（水）出勤・退勤の打刻\n・11/12（木）\n→ Touch On Time'), text);
+  assert.ok(text.includes('【申請が確認できていない打刻漏れ】\n・11/2（月）\n・11/6（金）\n・11/9（月）退勤の打刻\n・11/10（火）出勤の打刻\n・11/11（水）出勤・退勤の打刻\n・11/12（木）\n→ 打刻漏れは、Touch On Timeから「打刻修正申請」をお願いいたします。\n月末'), text);   // 版 2026-11-16a：案内は種類ごと
 });
 
 // ---------------- 版 2026-11-13e：判定の直し（11/13 安藤さんの指摘：出勤1・退勤2 の人に「打刻が確認できていません」） ----------------

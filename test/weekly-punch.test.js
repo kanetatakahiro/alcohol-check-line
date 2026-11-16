@@ -64,18 +64,19 @@ const run = (g) => {
   return { c, push: g.fetches.slice(n).filter((f) => f.url.endsWith('/push')) };
 };
 const toSelf = (list) => list.filter((f) => f.body.to !== ADMIN);
+const NOTE = '\n\n※このメッセージはAIによる自動送信です。';   // 版 2026-11-16a：本人へ送る文の最後（記録の文面には入らない）
 const text = (f) => f.body.messages[0].text;
 const logRows = (mf) => { const sh = mf.getSheetByName('通知送信履歴'); return sh ? sh.getDataRange().getValues().slice(1).filter((r) => String(r[2]).includes('毎週月曜')) : []; };
 
 const EXPECT = 'お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n・11/2（月）\n・11/9（月）\n・11/10（火）\n'
-  + '→ Touch On Timeでご確認いただき、「打刻修正申請」をお願いいたします。\n月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\nご確認のほどよろしくお願いいたします！';
+  + '→ 打刻漏れは、Touch On Timeから「打刻修正申請」をお願いいたします。\n月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\nご確認のほどよろしくお願いいたします！';
 
 test('毎週の催促：on で1人1通。申請中・承認済みの日は外し、却下・申請なしの日だけ。前月と当日は入らない／全部申請済み・ATT-02 OFF・停止中・LINE未登録には送らない', () => {
   const { g, mf } = setup({ WEEKLY_PUNCH_NOTIFY: 'on' });
   save(g);
   const { c, push } = run(g);
   assert.deepEqual(push.map((f) => f.body.to), [U(1)]);                       // 管理者へのエラー通知も無し
-  assert.equal(text(push[0]), EXPECT);
+  assert.equal(text(push[0]), EXPECT + NOTE);
   assert.deepEqual({ people: c.people, dates: c.dates, sent: c.sent, requested: c.requested, setting: c.setting, paused: c.paused, unreg: c.unreg, noMaster: c.noMaster },
     { people: 1, dates: 3, sent: 1, requested: 4, setting: 1, paused: 1, unreg: 1, noMaster: 1 });
   const rows = logRows(mf);

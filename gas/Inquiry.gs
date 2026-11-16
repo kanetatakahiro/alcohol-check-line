@@ -32,11 +32,16 @@
  *  管理本部が列を並べ替え・非表示にしても動く。見出しが見つからない・同じ見出しが2つある列があれば、その処理だけをやめてエラーを記録する
  *  （受付は本文を「やりとり」に「受付（保留：列の見出し）」で残し、管理者へ1日1回知らせる。doPost は止めない）。
  *
+ * 返信が要らないLINE（版 2026-11-16a）：本文が「承知しました」「了解です」「ありがとうございます」「よろしくお願いします」とその言い換えだけ（スタンプだけも）のとき、
+ *  案件を「対応済み」（完了者「AI（自動）」）にし、勤怠管理グループへのお知らせ（ボタン付き）・追記の通知を送らない。受信記録に「自動で対応済み」と残す。
+ *  新しい受付と、対応中の案件への追記が対象。未対応の案件への追記（質問のあとの「よろしくお願いします」など）と、要注意（⚠）の分類は閉じない。
+ *  案件の無い人のスタンプは今までどおり定型連絡（案件にしない）。
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-10e';   // INQ_remind だけ版 2026-11-13d で変更（TOT反映の承認待ちを足す。問い合わせの動きは同じ）
+var INQ_VERSION = '2026-11-16a';   // 版 2026-11-16a：まとめの「何日前から」、返信が要らないLINEの自動の対応済み、本人への案内の最後のAIの一文
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
 var INQ_SHEET_CASE = '問い合わせ';
@@ -192,6 +197,63 @@ function INQ_isRoutine(text, extraWords) {
   for (var i = 0; i < 3; i++) t = t.replace(/(しました|します|でした|です|ました|ます)$/, '');
   var list = INQ_words_(INQ_ROUTINE_WORDS, extraWords).map(function (w) { return INQ_nfkc(w).replace(/[\s　]+/g, ''); });
   return list.indexOf(t) !== -1;
+}
+
+/**
+ * 版 2026-11-16a：返信が要らない言葉（承知・了解・お礼・よろしく、とその言い換え）。前後の挨拶（お疲れ様です など）は付いていてもよい
+ */
+var INQ_ACK_WORDS = ['承知いたしました', '承知致しました', '承知しました', '承知です', '了解いたしました', '了解致しました', '了解しました', '了解です', '了解',
+  'りょうかいです', 'りょうかいしました', 'りょうかい', 'かしこまりました', 'わかりました', '分かりました', '解りました',
+  'ありがとうございました', 'ありがとうございます', '有難うございました', '有難うございます', '有り難うございました', '有り難うございます', 'ありがとうです', 'ありがとう',
+  'よろしくお願いいたします', 'よろしくお願い致します', 'よろしくお願いします', 'よろしくおねがいします', 'よろしくおねがいいたします',
+  '宜しくお願いいたします', '宜しくお願い致します', '宜しくお願いします'];
+var INQ_ACK_GREETINGS = ['お疲れ様です', 'お疲れさまです', 'おつかれさまです', 'お疲れ様でした', 'お疲れさまでした', 'おつかれさまでした', 'お疲れ様', 'お疲れさま', 'おつかれさま'];
+var INQ_AUTO_DONE_BY = 'AI（自動）';
+
+/**
+ * 純粋関数（版 2026-11-16a）：本文が返信の要らない言葉だけでできているか。
+ * 空白・句読点・記号（。！!など）・絵文字と、挨拶（お疲れ様です など）を除き、残りが INQ_ACK_WORDS の言葉だけ（1つ以上）なら true。
+ * ほかの文が少しでも残れば false（人が確認する側に倒す）
+ */
+function INQ_isAckOnly(text) {
+  var t = INQ_nfkc(text)
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
+    .replace(/[\s。、．，.,!?！？・~〜…:：;；"'“”‘’()（）「」『』\[\]【】♪☆★]+/g, '');
+  if (!t) return false;
+  var norm = function (w) { return INQ_nfkc(w); };
+  var words = INQ_ACK_WORDS.map(norm), greet = INQ_ACK_GREETINGS.map(norm), all = words.concat(greet);
+  all.sort(function (a, b) { return b.length - a.length; });
+  var hits = 0;
+  while (t) {
+    var m = null;
+    for (var i = 0; i < all.length; i++) if (t.indexOf(all[i]) === 0) { m = all[i]; break; }
+    if (!m) return false;
+    if (words.indexOf(m) !== -1) hits++;
+    t = t.slice(m.length);
+  }
+  return hits > 0;
+}
+
+/** 純粋関数（版 2026-11-16a）：LINEのメッセージが返信の要らないものか（スタンプだけ、または INQ_isAckOnly の文。LINE絵文字は除いて判定） */
+function INQ_isAckMessage(message) {
+  var m = message || {};
+  if (m.type === 'sticker') return true;
+  if (m.type !== 'text') return false;
+  var t = String(m.text || '');
+  (Array.isArray(m.emojis) ? m.emojis.slice() : []).sort(function (a, b) { return (b.index || 0) - (a.index || 0); }).forEach(function (e) {
+    var i = Number(e && e.index), n = Number(e && e.length) || 0;
+    if (i >= 0 && n > 0) t = t.slice(0, i) + t.slice(i + n);
+  });
+  return INQ_isAckOnly(t);
+}
+
+/**
+ * 純粋関数（版 2026-11-16a）：自動で「対応済み」にするか。
+ * isNew：新しい受付（state は未使用）／追記なら、その案件が対応中のときだけ（未対応への追記は質問の続きのことがあるため閉じない）。要注意（⚠）の分類は閉じない
+ */
+function INQ_shouldAutoClose(isAck, isNew, state, category) {
+  if (!isAck || INQ_isSensitiveCategory(category)) return false;
+  return isNew ? true : state === INQ_STATE.doing;
 }
 
 /** 数字の間の空白・ハイフン類を詰める（カード番号・電話番号の区切り） */
@@ -365,10 +427,22 @@ function INQ_summaryParts_(c) {
   return { category: cat, point: pt };
 }
 
-/** 純粋関数：状況（対応中なら担当。受付が今日より前なら「（前日から）」） */
+/**
+ * 純粋関数：状況（対応中なら担当）。now があれば、受付からの日数（日本時間の日付の差）と受付日を付ける（版 2026-11-16a）。
+ * 例：「未対応（今日から）」「未対応（1日前から・11/15受付）」「対応中（担当：○○）（3日前から・11/12受付）」。
+ * now が無いとき（受付時のお知らせ）は付けない
+ */
 function INQ_stateLabel(c, now) {
   var st = c.state === INQ_STATE.doing ? INQ_STATE.doing + '（担当：' + (c.staff || '未設定') + '）' : c.state;
-  return st + (now && c.at && INQ_ymd_(c.at) < INQ_ymd_(now) ? '（前日から）' : '');
+  if (!now || !c.at) return st;
+  var days = INQ_daysBetween(INQ_ymd_(c.at), INQ_ymd_(now));
+  if (days <= 0) return st + '（今日から）';
+  var p = INQ_ymd_(c.at).split('-');
+  return st + '（' + days + '日前から・' + Number(p[1]) + '/' + Number(p[2]) + '受付）';
+}
+/** 純粋関数：日付（YYYY-MM-DD）の差の日数 */
+function INQ_daysBetween(fromYmd, toYmd) {
+  return Math.round((Date.parse(toYmd + 'T00:00:00Z') - Date.parse(fromYmd + 'T00:00:00Z')) / 86400000);
 }
 
 /** 純粋関数：1件分の行（名前・状況・要約・内容） */
@@ -391,14 +465,14 @@ function INQ_newCaseMessage(c) {
     type: 'flex', altText: (title + ' ' + who).slice(0, 400),
     contents: { type: 'bubble',
       body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [{ type: 'text', text: title, weight: 'bold', wrap: true }]
-        .concat(INQ_caseLines(c, c.at).map(function (l) { return { type: 'text', text: l, wrap: true, size: 'sm' }; })) },
+        .concat(INQ_caseLines(c, null).map(function (l) { return { type: 'text', text: l, wrap: true, size: 'sm' }; })) },
       footer: { type: 'box', layout: 'horizontal', spacing: 'sm', contents: [btn('対応します', 'take', '対応します'), btn('対応済みにする', 'done', '対応済みにします')] } },
   };
 }
 
 /** 純粋関数：新しい問い合わせの通知の文字だけの版（ボタンを送れないときの管理者向け） */
 function INQ_newCaseText(c) {
-  return ['【問い合わせ】' + INQ_mdhm_(c.at)].concat(INQ_caseLines(c, c.at)).join('\n');
+  return ['【問い合わせ】' + INQ_mdhm_(c.at)].concat(INQ_caseLines(c, null)).join('\n');
 }
 
 /** 純粋関数：対応中の案件への追記の短い通知 */
@@ -666,21 +740,23 @@ function INQ_receive_(ev, mode) {
   var secretWords = props.getProperty('INQ_SECRET_WORDS');
   var secret = raw !== null && INQ_hasSecret(raw, secretWords);
   var stored = raw === null ? '（スタンプ）' : secret ? INQ_maskSecret(raw, secretWords) : raw;
-  var routine = raw === null || INQ_isRoutine(raw, props.getProperty('INQ_ROUTINE_WORDS'));
+  var routine = raw !== null && INQ_isRoutine(raw, props.getProperty('INQ_ROUTINE_WORDS'));
+  var ack = INQ_isAckMessage(ev.message);   // 版 2026-11-16a：返信が要らないLINE（スタンプだけを含む）
   var after = null;
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     if (INQ_isDuplicate_(ev, received)) return;
     var mid = (ev.message && ev.message.id) || '';
-    if (routine) {
+    var toRoutine = function () {
       INQ_sheet_(ss, INQ_SHEET_ROUTINE, INQ_ROUTINE_HEADER).appendRow([now, match.code ? "'" + match.code : '', match.name || who, uid, stored, ev.webhookEventId || '']);
       INQ_markSeen_(ev, received, '定型連絡');
-      return;
-    }
+    };
+    if (routine) { toRoutine(); return; }
     var sh = INQ_sheet_(ss, INQ_SHEET_CASE, INQ_CASE_HEADER), log = INQ_sheet_(ss, INQ_SHEET_LOG, INQ_LOG_HEADER);
     var cs;
     try { cs = INQ_caseSheet_(sh); } catch (ce) {
+      if (raw === null) { toRoutine(); return; }   // スタンプは今までどおり定型連絡（案件の列が読めなくても止めない）
       if (ce && ce.inqCols) {   // 列の見出しに問題：案件にはせず、本文を「やりとり」に残してから、エラーとして管理者へ（INQ_fail_）
         log.appendRow([now, '', '受付（保留：列の見出し）', stored, uid, ev.webhookEventId || '', "'" + mid]);
         INQ_markSeen_(ev, received, '保留（列の見出し）');
@@ -688,18 +764,28 @@ function INQ_receive_(ev, mode) {
       throw ce;
     }
     var C = cs.cols.col, cases = cs.cases, open = INQ_openCaseOf(cases, uid);
+    var autoDone = function (c, row) {   // 版 2026-11-16a：自動で対応済み（完了者「AI（自動）」・完了日時）
+      INQ_setCell_(sh, row, C, 'state', INQ_STATE.done);
+      INQ_setCell_(sh, row, C, 'doneBy', INQ_AUTO_DONE_BY);
+      INQ_setCell_(sh, row, C, 'doneAt', now);
+      log.appendRow([now, c.id, '対応済み（自動：返信不要）', '', uid, ev.webhookEventId || '', '']);
+    };
+    if (raw === null && !(open && INQ_shouldAutoClose(ack, false, open.state, INQ_summaryParts_(open).category))) { toRoutine(); return; }   // 案件の無い人・未対応の案件のスタンプは今までどおり
     if (open) {
-      var notify = INQ_shouldNotifyAppend(open.state, open.appendNoticeAt ? open.appendNoticeAt.getTime() : 0, now.getTime());
+      var closeIt = INQ_shouldAutoClose(ack, false, open.state, INQ_summaryParts_(open).category);
+      var notify = !closeIt && INQ_shouldNotifyAppend(open.state, open.appendNoticeAt ? open.appendNoticeAt.getTime() : 0, now.getTime());
       INQ_setCell_(sh, open.row, C, 'lastAt', now);
       INQ_setCell_(sh, open.row, C, 'appends', open.appends + 1);
       if (secret && !open.secret) INQ_setCell_(sh, open.row, C, 'secret', true);
       if (notify && mode === 'on') INQ_setCell_(sh, open.row, C, 'appendNoticeAt', now);
       log.appendRow([now, open.id, '追記', stored, uid, ev.webhookEventId || '', "'" + mid]);
-      INQ_markSeen_(ev, received, '追記 ' + open.id);
+      if (closeIt) autoDone(open, open.row);
+      INQ_markSeen_(ev, received, '追記 ' + open.id + (closeIt ? '（自動で対応済み：返信不要）' : ''));
       open.who = INQ_caseWho(open);
-      after = { kind: 'append', c: open, notify: notify };
+      after = { kind: 'append', c: open, notify: notify, auto: closeIt };
     } else {
       var cls = INQ_classify(stored);
+      var closeNew = INQ_shouldAutoClose(ack, true, '', cls.category);
       var c = { id: INQ_nextId(cases.map(function (x) { return x.id; }), today), state: INQ_STATE.open, who: who, at: now,
         head: INQ_head(stored), secret: secret, token: INQ_token_(),
         name: match.name ? match.name + (match.retired ? '（退職）' : '') : '', dept: match.dept || '', link: INQ_LINK_LABEL[match.link],
@@ -710,11 +796,12 @@ function INQ_receive_(ev, mode) {
         token: c.token, eventId: ev.webhookEventId || '' });
       sh.appendRow(row);
       log.appendRow([now, c.id, '受付', stored, uid, ev.webhookEventId || '', "'" + mid]);
-      INQ_markSeen_(ev, received, '受付 ' + c.id);
-      after = { kind: 'new', c: c };
+      if (closeNew) autoDone(c, sh.getLastRow());
+      INQ_markSeen_(ev, received, '受付 ' + c.id + (closeNew ? '（自動で対応済み：返信不要）' : ''));
+      after = { kind: 'new', c: c, auto: closeNew };
     }
   } finally { lock.releaseLock(); }
-  if (mode !== 'on' || !after) return;
+  if (mode !== 'on' || !after || after.auto) return;   // 自動で対応済みにしたときは、勤怠管理グループへのお知らせ・未登録の人への案内を送らない
   if (after.kind === 'new') INQ_send_([INQ_newCaseMessage(after.c)], INQ_newCaseText(after.c));
   else if (after.notify) INQ_send_([{ type: 'text', text: INQ_appendText(after.c) }], INQ_appendText(after.c));
   if (match.link === 'unregistered') INQ_guideOnce_(ss, uid, ev.replyToken);
@@ -732,7 +819,7 @@ function INQ_guideOnce_(ss, uid, replyToken) {
     for (var i = 1; i < v.length; i++) if (String(v[i][0]) === uid) return;
     sh.appendRow([uid, new Date()]);
   } finally { lock.releaseLock(); }
-  AC_reply_(replyToken, INQ_GUIDE_TEXT);
+  AC_replySelf_(replyToken, INQ_GUIDE_TEXT);
 }
 
 // ---- 入口：勤怠管理グループのボタン（postback） ----
@@ -798,7 +885,7 @@ function INQ_button_(ev, p, uid, name) {
         taken: what + 'を、' + name + 'さんが対応中にしました。',
         done: what + 'を対応済みにしました（' + name + 'さん）。',
         alreadyDoing: what + 'は、' + (c.staff || '担当者') + 'さんが対応中です。',
-        alreadyDone: what + 'は対応済みです（' + when(c.doneAt) + '・' + (c.doneBy || '担当者') + 'さん）。',
+        alreadyDone: what + 'は対応済みです（' + when(c.doneAt) + '・' + (c.doneBy === INQ_AUTO_DONE_BY ? c.doneBy : (c.doneBy || '担当者') + 'さん') + '）。',
       }[d.reason];
     }
   } catch (err) {
@@ -1080,7 +1167,7 @@ function INQ_preview() {
 // Node.jsのテストから純粋関数を読み込むため（コード.gs の書き出しに追加する）
 if (typeof module !== 'undefined') {
   module.exports = Object.assign(module.exports || {}, { INQ_VERSION: INQ_VERSION, INQ_STATE: INQ_STATE, INQ_nfkc: INQ_nfkc,
-    INQ_isRoutine: INQ_isRoutine, INQ_hasSecret: INQ_hasSecret, INQ_maskSecret: INQ_maskSecret, INQ_head: INQ_head,
+    INQ_isRoutine: INQ_isRoutine, INQ_isAckOnly: INQ_isAckOnly, INQ_isAckMessage: INQ_isAckMessage, INQ_shouldAutoClose: INQ_shouldAutoClose, INQ_daysBetween: INQ_daysBetween, INQ_AUTO_DONE_BY: INQ_AUTO_DONE_BY, INQ_hasSecret: INQ_hasSecret, INQ_maskSecret: INQ_maskSecret, INQ_head: INQ_head,
     INQ_messageSummary: INQ_messageSummary, INQ_matchEmployee: INQ_matchEmployee, INQ_whoLabel: INQ_whoLabel,
     INQ_parsePostback: INQ_parsePostback, INQ_postbackData: INQ_postbackData, INQ_decide: INQ_decide, INQ_nextId: INQ_nextId,
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,

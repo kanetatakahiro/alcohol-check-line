@@ -40,7 +40,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-13f';
+var AC_CODE_VERSION = '2026-11-16a';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -413,7 +413,7 @@ function AC_processTotRaw_(body) {
       var to = line[AC_totKey(tot)];
       if (!to) { unreg++; return; }
       if (!notify) return;
-      try { AC_pushTo_(to.userId, build()); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
+      try { AC_pushSelf_(to.userId, build()); state.setProperty(key, new Date().toISOString()); sent++; } catch (e) { Logger.log('勤怠通知の失敗'); }
     };
     var overrides = AC_templateOverrides_(), infection = AC_infection_(today);
     var careCtx = function (tot) {   // 天気以外の気遣い。1日の最初のLINEだけ／感染症の注意は1人7日に1回
@@ -1200,7 +1200,7 @@ function AC_selfRequestNotices_(pend, mv, ss, today, props) {
     else if (state.getProperty(key)) result = '送信済みのため送らない';
     else if (!live) { AC_requestSeenMark_(state, ns, g.items, today); result = '記録のみ（送信しない）'; }
     else {
-      try { AC_pushTo_(g.userId, g.text); state.setProperty(key, now.toISOString()); AC_requestSeenMark_(state, ns, g.items, today); result = '送信'; }
+      try { AC_pushSelf_(g.userId, g.text); state.setProperty(key, now.toISOString()); AC_requestSeenMark_(state, ns, g.items, today); result = '送信'; }
       catch (e) { result = '送信失敗'; }   // 記録しないので、翌日にもう一度知らせる
     }
     rows.push([now, "'" + g.code, g.name, g.items.length, g.text, result]);
@@ -1408,7 +1408,7 @@ function AC_punchSelfNotices_(R, mv, ss, today, props) {
         .concat(groups.map(function (fg) { return { kind: 'formchg', date: fg.entry.from, entry: fg.entry, name: g.name }; })), today);
       if (!live) result = '記録のみ（送信しない）';
       else {
-        try { AC_pushTo_(g.userId, text); result = '送信'; } catch (e) { result = '送信失敗'; }
+        try { AC_pushSelf_(g.userId, text); result = '送信'; } catch (e) { result = '送信失敗'; }
       }
       if (result !== '送信失敗') {
         dates.forEach(function (d) { state.setProperty('sent:' + d + kind + g.code, now.toISOString()); });
@@ -2171,7 +2171,7 @@ function AC_nightSelfRun_(R, mv, today, o) {
     if (!to) { counts.unreg++; fresh.forEach(function (it) { exclude(it, code, 'LINE未登録'); }); return; }
     if (sendLive) {
       try {
-        AC_pushTo_(to.userId, text);
+        AC_pushSelf_(to.userId, text);
         fresh.forEach(function (it, i) { state.setProperty(it.key, now.toISOString()); (it.covered || []).forEach(function (c) { state.setProperty(c.key, now.toISOString()); }); logs.push(row(it, code, '送信', i === 0 ? text : '')); });
         counts.sent++;
       } catch (e) {   // 記録しないので、次の晩にもう一度送る
@@ -2391,7 +2391,7 @@ function AC_dispatch_(kind) {
     if (typeof text === 'function') text = text(!!state.getProperty(careKey)).text;
     try {
       if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
-      else if (reg) AC_pushTo_(reg.userId, text);
+      else if (reg) AC_pushSelf_(reg.userId, text);
       else { unregistered.push(name); return; }
       state.setProperty(dedupe, new Date().toISOString());
       state.setProperty(careKey, '1');   // この人への今日の最初のLINEを送った
@@ -3041,16 +3041,38 @@ function AC_weeklyPunchItems(R, today) {
 }
 
 /**
+ * 純粋関数（版 2026-11-16a）：毎週の催促の案内。出てくる行の種類の案内だけを、打刻漏れ → 二重打刻 → 休みの日の打刻 の順に並べる。
+ * 種類が分からない日（直近7日より前など）・出勤／退勤／両方の打刻が無い日は「打刻漏れ」。日が無ければ空
+ */
+var AC_WEEKLY_PUNCH_GUIDE = {
+  miss: '→ 打刻漏れは、Touch On Timeから「打刻修正申請」をお願いいたします。',
+  dup: '→ 二重打刻は、「打刻修正申請」で不要な打刻の削除をお願いいたします。',
+  holiday: '→ 休みの日の打刻は、休日出勤の場合、Touch On Timeから「スケジュール申請」をお願いいたします。',
+};
+var AC_WEEKLY_PUNCH_OLD_GUIDE = '→ Touch On Timeでご確認いただき、「打刻修正申請」をお願いいたします。';   // 版 2026-11-13g までの案内（1つだけ）
+function AC_weeklyPunchGuides(dates, kinds) {
+  var has = {};
+  (dates || []).forEach(function (d) {
+    var k = (kinds && kinds[d]) || '';
+    has[k === 'holiday' ? 'holiday' : AC_punchDup(k) ? 'dup' : 'miss'] = true;
+  });
+  return ['miss', 'dup', 'holiday'].filter(function (g) { return has[g]; }).map(function (g) { return AC_WEEKLY_PUNCH_GUIDE[g]; });
+}
+
+/**
  * 純粋関数：毎週の催促の文面（テンプレート weeklyPunch。「LINE文面」シートで直せる。{dates} に「・11/5（木）」の行が入る）。
  * kinds（任意）：{ 日付: 'in'／'out'／'both' }。分かる日は「・11/5（木）出勤の打刻」の形（分からない日は日付だけ）
  */
 function AC_weeklyPunchMessage(dates, today, overrides, kinds, changes, name) {
   var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
   var line = function (d) { var k = kinds && kinds[d]; return '・' + md(d) + (k ? AC_punchKindLabel(k) : ''); };
-  if (!(changes && changes.length)) return AC_render('weeklyPunch', today, { dates: (dates || []).map(line).join('\n') }, overrides);
+  var guides = AC_weeklyPunchGuides(dates, kinds).join('\n') || '\u0001DATES\u0001';   // 日が無いとき（【勤怠の変更】だけ）は、下で {dates} の段落ごと除く
+  // 版 2026-11-16a：案内は {guides}。「LINE文面」シートの文面が前の案内の1行のままでも、その行を種類ごとの案内に置き換える
+  var render = function (ds) { return AC_render('weeklyPunch', today, { dates: ds, guides: guides }, overrides).split(AC_WEEKLY_PUNCH_OLD_GUIDE).join(guides); };
+  if (!(changes && changes.length)) return render((dates || []).map(line).join('\n'));
   // 版 2026-11-13b：【勤怠の変更】があるとき。テンプレートの最後の段落（締め）の前に入れ、締めの前に問い合わせの一文。打刻漏れの日が無ければ {dates} の段落を除く
   var MARK = '\u0001DATES\u0001';
-  var paras = AC_render('weeklyPunch', today, { dates: dates && dates.length ? dates.map(line).join('\n') : MARK }, overrides).split('\n\n')
+  var paras = render(dates && dates.length ? dates.map(line).join('\n') : MARK).split('\n\n')
     .filter(function (p) { return p.indexOf(MARK) === -1; });
   var last = paras.length > 1 ? paras.pop() : 'ご確認のほどよろしくお願いいたします！';
   return paras.concat([AC_formChangeBlock(changes, name), AC_FORM_ASK + '\n' + last]).join('\n\n').slice(0, 4900);
@@ -3105,7 +3127,7 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     counts.people++; counts.dates += dates.length;
     if (preview) { people.push({ dates: dates, text: text, line: true }); return; }
     if (sendLive) {
-      try { AC_pushTo_(to.userId, text); state.setProperty(key, now.toISOString()); logs.push(row(key, code, '送信', text)); counts.sent++; }
+      try { AC_pushSelf_(to.userId, text); state.setProperty(key, now.toISOString()); logs.push(row(key, code, '送信', text)); counts.sent++; }
       catch (e) { counts.failed++; logs.push(row(key, code, '送信失敗', text)); }   // 記録しないので、同じ週にもう一度実行すれば送り直す
     } else {
       state.setProperty(key + ':rec', now.toISOString());
@@ -3204,7 +3226,7 @@ var AC_TEMPLATES = {
   thanks10: ['お疲れ様です！😊\n\nアルコールチェックの入力が、10勤務日連続となりました！✨\n\n継続してのご対応ありがとうございます。\n\n引き続きよろしくお願いします！'],
   thanksN: ['お疲れ様です！😊\n\nアルコールチェックの入力が、{n}勤務日連続となりました！✨\n\nいつもご協力ありがとうございます。\n\n引き続きよろしくお願いします！'],
   punch: ['お疲れ様です！😊\n\n{date}の勤怠について、打刻が確認できていません。\n\nお手数ですが、Touch On Timeでご確認いただき、必要に応じて打刻修正の申請をお願いします！\n\nよろしくお願いします！'],
-  weeklyPunch: ['お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n{dates}\n→ Touch On Timeでご確認いただき、「打刻修正申請」をお願いいたします。\n月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\nご確認のほどよろしくお願いいたします！'],
+  weeklyPunch: ['お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n{dates}\n{guides}\n月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\nご確認のほどよろしくお願いいたします！'],
   todayNoClockOut: ['お疲れ様です！😊\n\n本日の退勤打刻が、まだ確認できていません。\n\n現在も勤務中の場合は、退勤時の打刻を忘れずにお願いします！\n\nすでに退勤されている場合は、Touch On Timeから打刻修正の申請をお願いします。\n\n遅い時間までお疲れ様です。\n体調にもお気をつけください😊'],
   todayNoClockIn: ['お疲れ様です！😊\n\n本日は出勤予定となっていますが、出勤打刻が確認できませんでした。\n\n出勤されていた場合は、Touch On Timeから打刻修正の申請をお願いします。\n\nお休みに変更となった場合は、上長の承認を得たうえで、勤怠連絡フォームから報告をお願いします。\n\n▼ 勤怠連絡フォーム\n' + AC_FORM_URL + '\n\nよろしくお願いします！'],
   ot30: ['お疲れ様です！😊\n\n今月の残業時間が30時間に達しましたので、お知らせします📢\n\n現在の残業時間：{hours}時間\n\nお忙しい時期かと思いますが、無理をせず、体調にもお気をつけください。\n\n引き続きよろしくお願いします！'],
@@ -3649,6 +3671,22 @@ function AC_pushLine_(text) {
   AC_pushTo_(PropertiesService.getScriptProperties().getProperty('LINE_ADMIN_USER_ID'), text);
 }
 
+/**
+ * 版 2026-11-16a：仕組みが本人（従業員）へ自動で送るメッセージの最後の一文。本人へ送るところ（AC_pushSelf_・AC_replySelf_）で1回だけ足す。
+ * 「LINE文面」シートで文面を上書きしていても付く。勤怠管理グループ・管理者へのお知らせ（AC_pushTo_・AC_pushLine_・AC_reply_）には付けない
+ */
+var AC_AI_NOTE = '※このメッセージはAIによる自動送信です。';
+/** 純粋関数：文の最後に、空行を1つ入れて AC_AI_NOTE を足す。すでに入っていれば足さない（2回付かない） */
+function AC_withAiNote(text) {
+  var t = String(text == null ? '' : text).replace(/\s+$/, '');
+  if (t.indexOf(AC_AI_NOTE) !== -1) return t;
+  return (t ? t + '\n\n' : '') + AC_AI_NOTE;
+}
+/** 本人（従業員）の1対1のトークへ送る（最後に AC_AI_NOTE） */
+function AC_pushSelf_(to, text) { AC_pushTo_(to, AC_withAiNote(text)); }
+/** 本人（従業員）の1対1のトークへの返信（最後に AC_AI_NOTE） */
+function AC_replySelf_(replyToken, text) { AC_reply_(replyToken, AC_withAiNote(text)); }
+
 function AC_pushTo_(to, text) {
   var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!token || !to) throw AC_error_('LINEの設定がありません');
@@ -3698,7 +3736,7 @@ function AC_handleEvent_(ev) {
   if (src && (src.type === 'group' || src.type === 'room')) { AC_handleGroupEvent_(ev); return; }
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (ev.type === 'follow') {
-    AC_reply_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
+    AC_replySelf_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
     return;
   }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') { if (typeof INQ_onUserEvent_ === 'function') INQ_onUserEvent_(ev); return; }   // 問い合わせ（gas/Inquiry.gs）
@@ -3750,7 +3788,7 @@ function AC_handleEvent_(ev) {
           : '本人確認のうえ、従業員マスタの「LINE確認済み」にチェックをお願いします。'));
     } catch (e) { Logger.log('管理者への登録連絡に失敗'); }
   }
-  AC_reply_(ev.replyToken, replies[result]);
+  AC_replySelf_(ev.replyToken, replies[result]);
 }
 
 function AC_isUserId(v) { return typeof v === 'string' && /^U[0-9a-f]{32}$/.test(v); }
@@ -4155,5 +4193,5 @@ if (typeof module !== 'undefined') {
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_punchKindClass: AC_punchKindClass, AC_punchLine: AC_punchLine, AC_isFullHoliday: AC_isFullHoliday, AC_formEntriesFromValues: AC_formEntriesFromValues, AC_formSplit: AC_formSplit, AC_formChangeLines: AC_formChangeLines, AC_isPausedForPunch: AC_isPausedForPunch, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
-    AC_CODE_VERSION: AC_CODE_VERSION, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };
+    AC_CODE_VERSION: AC_CODE_VERSION, AC_withAiNote: AC_withAiNote, AC_AI_NOTE: AC_AI_NOTE, AC_weeklyPunchGuides: AC_weeklyPunchGuides, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };
 }

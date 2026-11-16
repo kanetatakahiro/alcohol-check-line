@@ -36,7 +36,7 @@
  *  B3. 反映できたら（スケジュールを書いた・申請を承認した）本人へ1通（通知ID ATT-11。お知らせ設定・お知らせ停止はほかの本人向けと同じ判定）。
  *      TOT_WRITE=on かつ DRY_RUN=false のときだけ送る。それ以外は送る予定の文を「TOT反映」シートの「本人へのお知らせ」に記録する。
  */
-var SCH_VERSION = '2026-11-13g';
+var SCH_VERSION = '2026-11-16a';   // 版 2026-11-16a：ATT-11 の最後に「※このメッセージはAIによる自動送信です。」（AC_pushSelf_）
 var SCH_SHEET = 'TOT反映';
 var SCH_LOG_SHEET = 'TOT反映の記録';
 var SCH_HEADER = ['受付番号', '状態', '受付日時', '社員番号', '氏名', '区分', '開始日', '終了日', '変更後の休みの日', '入力者',
@@ -550,7 +550,7 @@ function SCH_selfNotify_(c, text) {
     if (AC_isPausedForPunch(AC_pauseIndex_(), c.code, today, true)) return '送らない（お知らせ停止中）：' + text;
     var live = SCH_mode_() === 'on' && PropertiesService.getScriptProperties().getProperty('DRY_RUN') === 'false';
     if (!live) return '記録のみ（DRY_RUN）：' + text;
-    AC_pushTo_(uid, text);
+    AC_pushSelf_(uid, text);
     if (typeof AC_noticeLog_ === 'function') AC_noticeLog_([[new Date(), SCH_SELF_NOTICE_ID, 'スケジュール変更のお知らせ', '本人', "'" + c.code, c.id, '送信', '']]);
     return '送信済み：' + text;
   } catch (e) { Logger.log('TOT反映の本人へのお知らせに失敗'); return '送信失敗：' + text; }

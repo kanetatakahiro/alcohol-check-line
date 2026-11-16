@@ -79,19 +79,20 @@ const night = (g, today = '2026-11-13') => {
 };
 const textTo = (push, c) => { const f = push.find((x) => x.body.to === U(c)); return f ? f.body.messages[0].text : null; };
 const ASK_END = 'ご不明な点がございましたら、このトークでご連絡ください。\nご確認のほどよろしくお願いいたします！';
+const NOTE = '\n\n※このメッセージはAIによる自動送信です。';   // 版 2026-11-16a：本人へ送る文の最後
 
 test('フォーム：休日出勤（上長が入力）＋フォームの無い打刻漏れ（混在）は1通に【打刻】と【勤怠の変更】', () => {
   const { g } = setup({ ATTENDANCE_NOTIFY: 'on' });
   const t1 = textTo(night(g), 1);
   assert.equal(t1, 'お疲れ様です😊\n勤怠のお知らせです。\n\n【打刻】\n・11/9（月）の打刻の内容をご確認ください。\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。\n\n'
-    + '【勤怠の変更】\n・上長 太郎さんより、11/12（木）は休日出勤とご連絡をいただいています。\n→ Touch On Timeから「スケジュール申請」をお願いいたします。\n\n' + ASK_END);
+    + '【勤怠の変更】\n・上長 太郎さんより、11/12（木）は休日出勤とご連絡をいただいています。\n→ Touch On Timeから「スケジュール申請」をお願いいたします。\n\n' + ASK_END + NOTE);
 });
 
 test('フォーム：お知らせ停止中の欠勤（フォームから入った停止）でも、打刻の項目は【勤怠の変更】で送る。本人の入力は「勤怠変更フォームより、」・何日か続く連絡は期間の全部の日', () => {
   const { g } = setup({ ATTENDANCE_NOTIFY: 'on' });
   const t2 = textTo(night(g), 2);
   assert.equal(t2, 'お疲れ様です😊\n勤怠のお知らせです。\n\n【勤怠の変更】\n・勤怠変更フォームより、11/10（火）〜11/11（水）は欠勤とご連絡をいただいています。\n'
-    + '→ Touch On Timeから、各日の「スケジュール申請」をお願いいたします。\n\n' + ASK_END);
+    + '→ Touch On Timeから、各日の「スケジュール申請」をお願いいたします。\n\n' + ASK_END + NOTE);
   // アルコールチェックなどほかのお知らせは今までどおり止まる（停止の索引そのものは変えない）
   const idx = g.ctx.AC_pauseIndex_();
   assert.equal(g.ctx.AC_isPaused(idx, '90002', '2026-11-10'), true);
@@ -103,7 +104,7 @@ test('フォーム：手で入れたお知らせ停止の日は今までどお�
   const { g } = setup({ ATTENDANCE_NOTIFY: 'on' });
   const t3 = textTo(night(g), 3);
   assert.equal(t3, 'お疲れ様です😊\n勤怠のお知らせです。\n\n【打刻】\n・11/11（水）の打刻の内容をご確認ください。\n→ Touch On Timeでご確認いただき、打刻漏れがあった場合は「打刻修正申請」をお願いいたします。\n\n'
-    + 'ご確認のほどよろしくお願いいたします！');   // 11/8（手で入れた停止）は入らない・【勤怠の変更】も入らない
+    + 'ご確認のほどよろしくお願いいたします！' + NOTE);   // 11/8（手で入れた停止）は入らない・【勤怠の変更】も入らない
 });
 
 test('フォーム：休みの変更は「の休みを…に変更する」と両日のスケジュール申請。期間の一部だけ申請済みなら送り、全部申請済みの連絡は送らない。遅刻は今までどおり', () => {
@@ -152,7 +153,7 @@ test('フォーム：管理本部の本人へのお知らせ（E-42）と毎週�
   const e42 = a.g.fetches.slice(n).filter((f) => f.url.endsWith('/push') && f.body.to === U(4));
   assert.equal(e42.length, 1);
   assert.match(e42[0].body.messages[0].text, /【勤怠の変更】\n・上長 太郎さんより、11\/7（土）の休みを11\/14（土）に変更するとご連絡をいただいています。/);
-  assert.ok(e42[0].body.messages[0].text.endsWith(ASK_END));
+  assert.ok(e42[0].body.messages[0].text.endsWith(ASK_END + NOTE));
   // E-78：月曜。一郎は【申請が確認できていない打刻漏れ】と【勤怠の変更】の両方
   const w = setup({ WEEKLY_PUNCH_NOTIFY: 'on' }, '2026-11-16T10:00:00+09:00');
   const save = (today) => { w.g.drive.files['tot-latest.json'] = { content: JSON.stringify({ today, mode: 'morning', fetchedAt: 'x', results: results(today) }), updated: new Date(today + 'T07:05:30+09:00').getTime() }; };
@@ -162,9 +163,9 @@ test('フォーム：管理本部の本人へのお知らせ（E-42）と毎週�
   w.g.ctx.alcoholCheckWeeklyPunchReminder();
   const wk = w.g.fetches.slice(m).filter((f) => f.url.endsWith('/push'));
   const t1 = textTo(wk, 1);
-  assert.equal(t1, 'お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n・11/9（月）\n→ Touch On Timeでご確認いただき、「打刻修正申請」をお願いいたします。\n'
+  assert.equal(t1, 'お疲れ様です😊\n今月の打刻のお知らせです。\n\n【申請が確認できていない打刻漏れ】\n・11/9（月）\n→ 打刻漏れは、Touch On Timeから「打刻修正申請」をお願いいたします。\n'
     + '月末までにご申請いただけますと、月初の勤怠の締めがスムーズになります。\n\n【勤怠の変更】\n・上長 太郎さんより、11/12（木）は休日出勤とご連絡をいただいています。\n'
-    + '→ Touch On Timeから「スケジュール申請」をお願いいたします。\n\n' + ASK_END);
+    + '→ Touch On Timeから「スケジュール申請」をお願いいたします。\n\n' + ASK_END + NOTE);
   const t2 = textTo(wk, 2);   // フォームの連絡だけの人：打刻漏れの段落は入れない
   assert.ok(t2.startsWith('お疲れ様です😊\n今月の打刻のお知らせです。\n\n【勤怠の変更】\n・勤怠変更フォームより、11/10（火）〜11/11（水）は欠勤'));
   assert.ok(!t2.includes('【申請が確認できていない打刻漏れ】'));

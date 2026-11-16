@@ -5,15 +5,17 @@
  * - 毎朝（licenseDaily）：在籍者をタブに足す／免許の有無が空欄の人の一覧／登録のお願い・催促／期限の30日前・7日前・当日・期限切れのお知らせ
  * - LINE（doPost から LIC_onUserEvent_）：「免許更新」「免許登録」の言葉・免許のボタン・受付中（30分）の写真だけを扱う。それ以外は今までどおり
  * - 写真はスクリプトプロパティ LICENSE_FOLDER_ID のフォルダに「社員番号_YYYYMMDD」で保存し、その人の古い写真はゴミ箱へ（最新の1枚だけ残す）
- * - 動作モード LICENSE_MODE：未設定・off＝何もしない／record＝送る予定の文を「免許証お知らせ記録」に書くだけ（LINE は送らない・受け口も今までどおり）／
+ * - 動作モード LICENSE_MODE：未設定・off＝何もしない／record＝送る予定の文を「免許証お知らせ記録」に書くだけ（LINE は送らない・受け口も今までどおり。
+ *   同じ人・同じ期限・同じ段階は1回だけ記録し、「記録済み」の列で管理）／
  *   on＝送る（DRY_RUN が false のときだけ。それ以外は record と同じ）
  * - お知らせ設定（SAF-01）の「受け取らない」は適用しない（安全に関わるため全員必須）
  * - 写真・有効期限・氏名はログ（Logger）に書かない
  */
 var LIC_VERSION = '2026-11-16b';
 var LIC_SHEET = '免許証管理';
-var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '備考'];
-var LIC_KEYS = ['code', 'name', 'has', 'exp', 'state', 'file', 'reportAt', 'log', 'note'];   // LIC_HEADER と同じ並び
+// 「送信記録」は実際に送ったもの（on）、「記録済み」は送らずに記録したもの（record・DRY_RUN）。同じ人・同じ期限・同じ段階をそれぞれ1回だけにする
+var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考'];
+var LIC_KEYS = ['code', 'name', 'has', 'exp', 'state', 'file', 'reportAt', 'log', 'rec', 'note'];   // LIC_HEADER と同じ並び
 var LIC_RECORD_SHEET = '免許証お知らせ記録';
 var LIC_RECORD_HEADER = ['日時', 'モード', '種類', '送信先', '社員番号', '文面', '結果'];
 var LIC_STATE = { wait: '登録待ち', ok: '登録済み', soon: '更新待ち', over: '期限切れ報告なし', check: '要確認',
@@ -107,7 +109,7 @@ function LIC_rows(values, col) {
     var r = values[i], code = AC_cellCode_(r[col.code]);
     if (!code) continue;
     out.push({ i: i, code: code, name: String(r[col.name] || '').trim(), has: LIC_hasValue(r[col.has]), exp: LIC_parseYmd(r[col.exp]),
-      state: String(r[col.state] || '').trim(), file: String(r[col.file] || '').trim(), log: String(r[col.log] == null ? '' : r[col.log]) });
+      state: String(r[col.state] || '').trim(), file: String(r[col.file] || '').trim(), log: String(r[col.log] == null ? '' : r[col.log]), rec: String(r[col.rec] == null ? '' : r[col.rec]) });
   }
   return out;
 }
@@ -229,16 +231,17 @@ function LIC_groupText(kind, list) {
 }
 
 /**
- * 純粋関数：毎朝の処理の計画。people：LIC_people、rows：LIC_rows、only：'reg' なら登録まわりだけ（licenseRegisterSend）
+ * 純粋関数：毎朝の処理の計画。people：LIC_people、rows：LIC_rows、only：'reg' なら登録まわりだけ（licenseRegisterSend）、
+ * recordOnly：送らずに記録するとき（record・DRY_RUN）は「記録済み」の列で、送るときは「送信記録」の列で、済んだものを判定する
  * 戻り値 { add: [person], states: [{i, state}], self: [{row, kind, mark:{label,key}, marks}], groups: {ask, noline, noreg, over: [{row, ...}]} }
  */
-function LIC_plan(people, rows, today, only) {
+function LIC_plan(people, rows, today, only, recordOnly) {
   var plan = { add: [], states: [], self: [], groups: { ask: [], noline: [], noreg: [], over: [] } };
   var inTab = {};
   rows.forEach(function (r) { inTab[r.code] = true; });
   Object.keys(people).forEach(function (code) { if (!inTab[code]) plan.add.push(people[code]); });
   rows.forEach(function (r) {
-    var p = people[r.code], retired = !p, st = LIC_statusFor(r, retired, today), log = LIC_parseLog(r.log);
+    var p = people[r.code], retired = !p, st = LIC_statusFor(r, retired, today), log = LIC_parseLog(recordOnly ? r.rec : r.log);
     if (st !== r.state) plan.states.push({ i: r.i, state: st });
     if (retired || r.has === 'なし') return;
     var who = { row: r, code: r.code, name: (p && p.name) || r.name, exp: r.exp, userId: p.userId };
@@ -354,7 +357,7 @@ function LIC_run_(only) {
     var master = AC_masterSheet_(), ss = master.getParent(), mv = master.getDataRange().getValues();
     var people = LIC_people(mv, today), t = LIC_tab_(ss);
     var rows = LIC_rows(t.sh.getDataRange().getValues(), t.col);
-    var plan = LIC_plan(people, rows, today, only);
+    var plan = LIC_plan(people, rows, today, only, !live);
     if (plan.add.length) {   // 在籍者でタブにいない人を足す（免許の有無は空欄）
       var add = plan.add.map(function (p) {
         var r = []; for (var k = 0; k < t.width; k++) r.push('');
@@ -364,11 +367,11 @@ function LIC_run_(only) {
       t.sh.getRange(t.sh.getLastRow() + 1, 1, add.length, t.width).setValues(add);
       res.added = add.length;
       rows = LIC_rows(t.sh.getDataRange().getValues(), t.col);
-      plan = LIC_plan(people, rows, today, only);
+      plan = LIC_plan(people, rows, today, only, !live);
     }
     plan.states.forEach(function (s) { LIC_cell_(t, s.i, 'state', s.state); });
     var logs = {}, rec = [], nlog = [];
-    var mark = function (row, label, key) { logs[row.i] = LIC_logAdd(logs[row.i] !== undefined ? logs[row.i] : row.log, label, key, today); };
+    var mark = function (row, label, key) { logs[row.i] = LIC_logAdd(logs[row.i] !== undefined ? logs[row.i] : live ? row.log : row.rec, label, key, today); };
     plan.self.forEach(function (s) {
       var msg = LIC_selfMessage(s.kind, s.who.name, s.who.exp, s.days), text = msg.contents.body.contents[0].text, ok = false;
       if (live) {
@@ -376,6 +379,7 @@ function LIC_run_(only) {
         if (ok) { s.marks.forEach(function (m) { mark(s.who.row, m[0], m[1]); }); res.self++; } else res.failed++;
         nlog.push([now, LIC_NOTICE_ID, LIC_NOTICE_NAME, '本人', "'" + s.who.code, '', ok ? '送信済み（' + s.kind + '）' : '送信失敗（' + s.kind + '）', ok ? '' : 'LINEの送信に失敗']);
       }
+      if (!live) s.marks.forEach(function (m) { mark(s.who.row, m[0], m[1]); });   // 記録だけ：「記録済み」に付ける
       rec.push([now, mode, s.kind, '本人', "'" + s.who.code, text, live ? (ok ? '送信済み' : '送信失敗') : '記録のみ（送信なし）']);
     });
     Object.keys(plan.groups).forEach(function (kind) {
@@ -387,9 +391,10 @@ function LIC_run_(only) {
         if (ok) { list.forEach(function (w) { mark(w.row, LIC_GROUP_MARK[kind][0], kind === 'over' ? w.exp : '-'); }); res.groups++; }
         nlog.push([now, LIC_NOTICE_ID, LIC_NOTICE_NAME, admin ? '勤怠管理グループ・管理者' : '勤怠管理グループ', '', '', ok ? '送信済み（' + kind + '・' + list.length + '名）' : '送信失敗（' + kind + '）', ok ? '' : 'LINEの送信に失敗']);
       }
+      if (!live) list.forEach(function (w) { mark(w.row, LIC_GROUP_MARK[kind][0], kind === 'over' ? w.exp : '-'); });
       rec.push([now, mode, kind, admin ? '勤怠管理グループ・管理者' : '勤怠管理グループ', '', text, live ? (ok ? '送信済み' : '送信失敗') : '記録のみ（送信なし）']);
     });
-    Object.keys(logs).forEach(function (i) { LIC_cell_(t, +i, 'log', logs[i]); });   // record では送信記録を付けない（on にしたとき送るため）
+    Object.keys(logs).forEach(function (i) { LIC_cell_(t, +i, live ? 'log' : 'rec', logs[i]); });   // record では「送信記録」を付けない（on にしたとき送るため）。「記録済み」に付ける
     LIC_record_(ss, rec);
     if (nlog.length) AC_noticeLog_(nlog);
   } finally { lock.releaseLock(); }

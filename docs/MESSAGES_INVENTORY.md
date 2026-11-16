@@ -23,10 +23,10 @@
 |---|---|---|
 | gas/AlcoholCheck.gs（本番の「コード.gs」） | `3bbcf199b51ae127` | 本番と異なる（版 2026-11-16b・本番未導入。本番は版 2026-11-16a の `6dc64fc6b7d8199f`。違いは受け口の1行と版の表示だけ） |
 | gas/TotSync.gs | `130191b8595e5292` | 本番と同じ（版 2026-11-16a） |
-| gas/Notices.gs | `e4a2bee7364b3a2b` | 本番と同じ |
+| gas/Notices.gs | `86be8f58ae778eb8` | 本番と異なる（版 2026-11-16b・本番未導入。SAF-01 に「全員必須・この列では止まらない」の説明を付けただけ。本番は `e4a2bee7364b3a2b`） |
 | gas/LeaveRequest.gs | `2467707a830bc20f` | 本番と同じ |
 | gas/Inquiry.gs | `6edf953b5f979d4a` | 本番と同じ（版 2026-11-16a） |
-| gas/License.gs | `d21336a77e50b636` | 本番に無い（版 2026-11-16b・本番未導入。新しいファイル） |
+| gas/License.gs | `6c3f81e2a51c11f7` | 本番に無い（版 2026-11-16b・本番未導入。新しいファイル） |
 
 - 文面の原文は、上のファイルの文字そのままです。長い定型の文（テンプレート・気遣いの一文・FAQ）は、コードの定数をそのまま書き出して載せています。
 - 「LINE文面」シートの「文面」列は今すべて空です。そのため、既定の文面（コードの AC_TEMPLATES・AC_CARE）を今の文面として載せています。
@@ -1474,7 +1474,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-80 運転免許証登録のお願い（本人向け・ボタン付き）
 - 送る条件：毎朝の処理（licenseDaily・9時台）と licenseRegisterSend。「免許の有無」が「あり」で有効期限がない人に1回。ボタン「免許証を登録する」（postback `lic|1|start`）
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -1488,7 +1488,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-81 運転免許証登録の催促（本人向け・ボタン付き）
 - 送る条件：登録のお願い（E-80）から3日後・7日後の朝。まだ登録がない人に1回ずつ（7日後の時点で3日後の分が未送信なら1通だけ）。ボタン「免許証を登録する」
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -1502,7 +1502,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-82 有効期限の30日前（本人向け・ボタン付き）
 - 送る条件：期限の8〜30日前の最初の朝に1回（同じ期限で1回）。{days} は期限までの日数（ふつうは30）。ボタン「更新を報告する」
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -1516,7 +1516,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-83 有効期限の7日前（本人向け・ボタン付き）
 - 送る条件：期限の1〜7日前の最初の朝に1回。新しい期限の報告があれば送らない（期限が変わるため）。ボタン「更新を報告する」
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -1530,7 +1530,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-84 有効期限の当日（本人向け・ボタン付き）
 - 送る条件：期限の当日の朝に1回。ボタン「更新を報告する」
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -1544,7 +1544,7 @@ https://docs.google.com/forms/d/e/1FAIpQLSejk11Faxz3B_eMB8KCBnO9ppWQerQxdKjd7j7_
 
 ### E-85 有効期限を過ぎて報告がない（本人向け・ボタン付き）
 - 送る条件：期限の翌朝以降に1回。同じ朝に勤怠管理グループと管理者へ A-54。ボタン「更新を報告する」
-- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ
+- 送り方：push（送信数に数える）。LICENSE_MODE=on かつ DRY_RUN=false のときだけ。record は「免許証お知らせ記録」に文面ごと記録するだけ（同じ人・同じ期限・同じ段階は1回だけ）
 - 状態：**未使用**（本番未導入・LICENSE_MODE 未設定）
 
 ```text
@@ -2711,7 +2711,7 @@ VPS の cron（src/tot-write.js）と、.env の TOT_WRITE_TOKEN を確認して
 
 ## 運転免許証の有効期限の管理（gas/License.gs・版 2026-11-16b・**本番未導入**）
 
-仕様は docs/LICENSE_MANAGEMENT.md。AI の一文は付けません。一覧（A-51〜A-54）は LICENSE_MODE=on かつ DRY_RUN=false のときだけ送り、record は「免許証お知らせ記録」に文面ごと記録するだけです。本番未導入のため、すべて**未使用**です。
+仕様は docs/LICENSE_MANAGEMENT.md。AI の一文は付けません。一覧（A-51〜A-54）は LICENSE_MODE=on かつ DRY_RUN=false のときだけ送り、record は「免許証お知らせ記録」に文面ごと記録するだけです（同じ人・同じ期限・同じ段階は1回だけ。「免許証管理」タブの「記録済み」で管理）。本番未導入のため、すべて**未使用**です。
 
 ### A-51 免許の有無が未入力の一覧（勤怠管理グループ向け）
 - 送る条件とタイミング：毎朝の処理で、「免許証管理」タブの「免許の有無」が空欄の人がいるとき。同じ人は1回だけ（新しく入った人は次の朝に）。送り先：勤怠管理グループ（届かなければ管理者）

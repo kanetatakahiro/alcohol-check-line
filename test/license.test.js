@@ -94,12 +94,12 @@ test('免許証: off（未設定）なら毎朝の処理は何もせず、「免
   assert.equal(since(g, n).push.length, 1);   // 勤怠管理グループへの問い合わせのお知らせ（今までどおり）
 });
 
-test('免許証: record はタブを作って在籍者を足し、送る予定を記録するだけ（LINE は送らない・送信記録は付けない）', () => {
+test('免許証: record はタブを作って在籍者を足し、送る予定を記録するだけ（LINE は送らない・送信記録は付けず「記録済み」に付ける）', () => {
   const { g, master } = setup({ LICENSE_MODE: 'record' });
   const n = g.fetches.length;
   g.ctx.licenseDaily();
   const t = tab(master).dump();
-  assert.deepEqual([...t[0]], ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '備考']);
+  assert.deepEqual([...t[0]], ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考']);
   assert.deepEqual(t.slice(1).map((r) => String(r[0])), ['90001', '90002', '90003', '90005']);   // 退職・退職日を過ぎた人は足さない
   assert.ok(t.slice(1).every((r) => r[2] === '' && r[4] === '有無の確認待ち'));
   assert.equal(g.fetches.length, n);
@@ -110,7 +110,41 @@ test('免許証: record はタブを作って在籍者を足し、送る予定�
   assert.equal(rec[1][6], '記録のみ（送信なし）');
   g.ctx.licenseDaily();
   assert.equal(tab(master).dump().length, 5);   // 2回目も行は増えない
-  assert.ok(tab(master).dump().slice(1).every((r) => r[7] === ''));
+  assert.ok(tab(master).dump().slice(1).every((r) => r[7] === '' && r[8] === '有無の確認 - 2026-11-16'));
+  assert.equal(master.getSheetByName('免許証お知らせ記録').dump().length, 2);   // 同じ人の記録は1回だけ
+});
+
+test('免許証: record でも、同じ人・同じ期限・同じ段階の記録は1回だけ（「記録済み」で管理）。on にすると送信記録で改めて送る', () => {
+  const { g, master } = setup({ LICENSE_MODE: 'record' });
+  g.ctx.licenseSetup();
+  set(master, '90001', '免許の有無', 'あり');
+  set(master, '90002', '免許の有無', 'あり'); set(master, '90002', '有効期限', '2026-12-16');
+  set(master, '90003', '免許の有無', 'あり');
+  set(master, '90005', '免許の有無', 'なし');
+  const recs = () => (master.getSheetByName('免許証お知らせ記録') ? master.getSheetByName('免許証お知らせ記録').dump() : [[]]).slice(1).map((r) => r[2] + ':' + String(r[4] || ''));
+  const n = g.fetches.length;
+  const run = (iso) => { day(g, iso); const k = recs().length; g.ctx.licenseDaily(); return recs().slice(k); };
+  assert.deepEqual(run('2026-11-16'), ['req:90001', 'd30:90002', 'noline:']);
+  assert.deepEqual(run('2026-11-16'), []);   // 同じ日にもう一度：記録しない
+  assert.deepEqual(run('2026-11-17'), []);   // 次の朝：記録しない
+  assert.deepEqual(run('2026-11-19'), ['rem:90001']);   // 3日後の催促は記録済みの日から数える
+  assert.deepEqual(run('2026-11-23'), ['rem:90001']);
+  assert.deepEqual(run('2026-11-26'), ['noreg:']);
+  assert.deepEqual(run('2026-12-09'), ['d7:90002']);
+  assert.deepEqual(run('2026-12-16'), ['d0:90002']);
+  assert.deepEqual(run('2026-12-17'), ['over:90002', 'over:']);
+  assert.deepEqual(run('2026-12-18'), []);
+  assert.equal(g.fetches.length, n);   // LINE は送っていない
+  assert.equal(String(val(master, '90002', '送信記録')), '');
+  assert.equal(String(val(master, '90002', '記録済み')),
+    '30日前 2026-12-16 2026-11-16\n7日前 2026-12-16 2026-12-09\n当日 2026-12-16 2026-12-16\n期限切れ 2026-12-16 2026-12-17\n期限切れの一覧 2026-12-16 2026-12-17');
+  // on にすると「送信記録」で判定するので、今の段階を改めて送る（記録済みは使わない）
+  g.scriptProps.setProperty('LICENSE_MODE', 'on');
+  day(g, '2026-12-18');
+  const k = g.fetches.length;
+  g.ctx.licenseDaily();
+  const to = g.fetches.slice(k).filter((x) => x.url.endsWith('/push')).map((x) => x.body.to).sort();
+  assert.deepEqual(to, [U(1), U(2), GROUP, GROUP, ADMIN].sort());   // 一郎：登録のお願い／二郎：期限切れ（本人・グループ・管理者）／三郎：LINE 未登録の一覧（グループ）
 });
 
 test('免許証: on でも DRY_RUN が false でなければ送らない', () => {
@@ -407,4 +441,16 @@ test('免許証: 既存のテスト一式（問い合わせ・勤怠変更・ア
   assert.equal(withLic.fail, 0, withLic.failed);
   assert.ok(base.pass > 300);
   assert.equal(withLic.pass, base.pass);
+});
+
+test('免許証: お知らせ設定の SAF-01 列は残し、「お知らせ種類」に全員必須・この列では止まらないと出す（CRIT には入れない）', () => {
+  const { g, master } = setup({}, { files: [...FILES, 'LeaveRequest.gs'] });
+  g.ctx.alcoholCheckSetupNoticeSettings();
+  const head = master.getSheetByName('お知らせ設定').dump()[0];
+  assert.ok(head.includes('SAF-01 運転免許証の更新案内'));
+  const saf = master.getSheetByName('お知らせ種類').dump().find((r) => r[0] === 'SAF-01');
+  assert.deepEqual([...saf].slice(3, 6), ['お知らせ設定の対象外（別の仕組みで送る）', '全員必須', '止められない（この列のチェックでは止まらない）']);
+  assert.match(saf[6], /^全員必須（安全に関わるため）。この列のチェックでは止まらない/);
+  assert.ok(!g.ctx.AC_CRITICAL_NOTICES.some((c) => /免許/.test(c.name)));
+  assert.equal(master.getSheetByName('お知らせ種類').dump().find((r) => r[0] === 'SAF-02')[5], '止められる');   // ほかは今までどおり
 });

@@ -40,7 +40,8 @@ var AC_NOTICES = [
   { id: 'HR-09', name: '健康診断の案内', cat: '申請・労務', status: '未実装', def: false },
   { id: 'HR-10', name: '健康診断の未受診案内', cat: '申請・労務', status: '未実装', def: false },
   { id: 'HR-11', name: '給与明細公開のお知らせ', cat: '申請・労務', status: '未実装', def: false },
-  { id: 'SAF-01', name: '運転免許証の更新案内', cat: '車両・資格・安全', status: '未実装', def: false },
+  { id: 'SAF-01', name: '運転免許証の更新案内', cat: '車両・資格・安全', status: '未実装', def: false, mandatory: true,
+    note: '全員必須（安全に関わるため）。この列のチェックでは止まらない（gas/License.gs・LICENSE_MODE で動かす・版 2026-11-16b）' },
   { id: 'SAF-02', name: '資格・講習の更新案内', cat: '車両・資格・安全', status: '未実装', def: false },
   { id: 'SAF-03', name: '車検・点検期限のお知らせ', cat: '車両・資格・安全', status: '未実装', def: false },
   { id: 'SAF-04', name: '社用車の点検・報告依頼', cat: '車両・資格・安全', status: '未実装', def: false },
@@ -257,6 +258,7 @@ function alcoholCheckSetupNoticeSettings() {
   var types = ss.getSheetByName(AC_NS_TYPE_SHEET) || ss.insertSheet(AC_NS_TYPE_SHEET);
   var th = ['通知ID', '正式名称', '分類', '実装状況', '重要度', '「お知らせ設定」で止められるか', '今の通知との対応・備考'];
   var tr = AC_NOTICES.map(function (n) {
+    if (n.mandatory) return [n.id, n.name, n.cat, 'お知らせ設定の対象外（別の仕組みで送る）', '全員必須', '止められない（この列のチェックでは止まらない）', n.note || ''];   // 版 2026-11-16b：SAF-01（運転免許証）
     return [n.id, n.name, n.cat, n.status + (n.impl ? '' : '（ONでも送らない）'), '通常', '止められる', [n.link || '', n.note || ''].filter(Boolean).join('／')];
   }).concat(AC_CRITICAL_NOTICES.map(function (c) { return [c.id, c.name, '重要な通知', '送信中', '重要', '止められない（両名の承認が必要）', '送信先：' + c.to + '／' + c.when]; }));
   types.clearContents();

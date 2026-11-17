@@ -1,10 +1,12 @@
 /**
- * 運転免許証の有効期限の管理（版 2026-11-16c・仕様と運用は docs/LICENSE_MANAGEMENT.md）
+ * 運転免許証の有効期限の管理（版 2026-11-17a・仕様と運用は docs/LICENSE_MANAGEMENT.md）
  *
  * - 従業員マスタのファイルに「免許証管理」タブを作り、社員番号ごとに免許の有無・有効期限・状態を持つ（従業員マスタ本体の A〜N 列は変更しない）
  * - 毎朝（licenseDaily）：在籍者をタブに足す／免許の有無が空欄の人の一覧／登録のお願い・催促／期限の30日前・7日前・当日・期限切れのお知らせ
  * - LINE（doPost から LIC_onUserEvent_）：「免許更新」「免許登録」の言葉・免許のボタン・受付中（30分）の写真だけを扱う。それ以外は今までどおり
- * - 写真はスクリプトプロパティ LICENSE_FOLDER_ID のフォルダに「社員番号_YYYYMMDD」で保存し、その人の古い写真はゴミ箱へ（最新の1枚だけ残す）
+ * - 写真はスクリプトプロパティ LICENSE_FOLDER_ID のフォルダに「社員番号_YYYYMMDD_1」「_2」…で保存する（版 2026-11-17a）。
+ *   1回の登録・更新（ボタンか言葉で始めた回）の写真はすべて残し、次の回の最初の写真を保存したときに、前の回までの写真をゴミ箱へ。
+ *   写真の受付：期限を選ぶ前は始めてから30分、期限を選んだあとは選んでから10分。「写真ファイルID」にはその回の全ファイルIDをカンマ区切りで入れる
  * - 動作モード LICENSE_MODE：未設定・off＝何もしない／record＝送る予定の文を「免許証お知らせ記録」に書くだけ（LINE は送らない・受け口も今までどおり。
  *   同じ人・同じ期限・同じ段階は1回だけ記録し、「記録済み」の列で管理）／
  *   on＝送る（DRY_RUN が false のときだけ。それ以外は record と同じ）
@@ -14,7 +16,7 @@
  * - お知らせ設定（SAF-01）の「受け取らない」は適用しない（安全に関わるため全員必須）
  * - 写真・有効期限・氏名はログ（Logger）に書かない
  */
-var LIC_VERSION = '2026-11-16c';
+var LIC_VERSION = '2026-11-17a';
 var LIC_SHEET = '免許証管理';
 // 「送信記録」は実際に送ったもの（on）、「記録済み」は送らずに記録したもの（record・DRY_RUN）。同じ人・同じ期限・同じ段階をそれぞれ1回だけにする
 var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考'];
@@ -24,6 +26,7 @@ var LIC_RECORD_HEADER = ['日時', 'モード', '種類', '送信先', '社員�
 var LIC_STATE = { wait: '登録待ち', ok: '登録済み', soon: '更新待ち', over: '期限切れ報告なし', check: '要確認',
   ask: '有無の確認待ち', none: '対象外（免許なし）', retired: '退職' };
 var LIC_WAIT_MIN = 30;               // 写真を受け付ける時間（分）
+var LIC_AFTER_MIN = 10;              // 期限を選んだあとも、同じ回の写真として受け付ける時間（分・版 2026-11-17a）
 var LIC_PENDING_SEC = 21600;         // 写真のあと、期限のボタンを受け付ける時間（秒・6時間）
 var LIC_REMIND_DAYS = [3, 7];        // 登録のお願いから何日後に催促するか
 var LIC_NOREG_GROUP_DAYS = 10;       // 登録のお願いから何日たっても登録がなければ、勤怠管理グループへ一覧
@@ -158,7 +161,7 @@ function LIC_statusFor(row, retired, today) {
 
 // ---------------- 文面 ----------------
 var LIC_TEXT = {
-  req: '{name}さん、お疲れさまです。管理本部です。\n運転免許証の有効期限を管理するため、免許証の登録をお願いいたします。\n下のボタンを押して、免許証の写真をお送りください。\nいつもご協力ありがとうございます。',
+  req: 'お疲れさまです。管理本部です。\n運転免許証の有効期限を管理するため、免許証の登録をお願いいたします。\n下のボタンを押して、免許証の写真をお送りください。\n※ボタンを押してから画像送付までは30分の有効期限があります。\nご対応のほどよろしくお願いいたします。',   // 版 2026-11-17a：宛名なし
   rem: '{name}さん、お疲れさまです。管理本部です。\n先日お願いした運転免許証の登録が、まだ確認できていません。\nお手すきの際に、下のボタンから免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。',
   d30: '{name}さん、お疲れさまです。管理本部です。\n運転免許証の有効期限（{date}）まで、あと{days}日になりました。\n更新がお済みになりましたら、「免許更新」と送るか下のボタンを押して、新しい免許証の写真をお送りください。\nいつもご協力ありがとうございます。',
   d7: '{name}さん、お疲れさまです。管理本部です。\n運転免許証の有効期限（{date}）まで、あと{days}日です。更新のご報告をまだ確認できていないため、ご案内いたしました。\nすでに更新がお済みでしたら、「免許更新」と送るか下のボタンを押して、新しい免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。',
@@ -172,6 +175,7 @@ var LIC_TEXT = {
   again: '受付の時間が過ぎたため、記録できませんでした。お手数ですが、もう一度「免許更新」と送って、写真からお送りいただけますか。',
   already: 'ありがとうございます。有効期限はすでに{date}で記録しています。',
   badDate: '選ばれた日付（{date}）は今日より前のため、記録できませんでした。お手数ですが、もう一度下のボタンから選んでいただけますか。',
+  photoMore: '{n}枚目の写真も保存しました。ありがとうございます。',   // 版 2026-11-17a：同じ回の2枚目以降（期限のボタンは重ねて出さない）
   photoFail: '申し訳ありません。写真をうまく受け取れませんでした。お手数ですが、少し時間をおいて、もう一度写真をお送りいただけますか。',
   notTarget: '申し訳ありません。このボタンは今は使えません。ご不明な点は、このトークで管理本部へお知らせください。',
 };
@@ -511,13 +515,20 @@ function LIC_cacheGet_(key) { try { var v = LIC_cache_().get(key); return v ? JS
 function LIC_cachePut_(key, obj, sec) { LIC_cache_().put(key, JSON.stringify(obj), sec); }
 function LIC_cacheDel_(key) { try { LIC_cache_().remove(key); } catch (e) { /* 消せなくても時間で消える */ } }
 
-/** 写真の受付中か（30分以内）。過ぎていれば消して null */
+/**
+ * 純粋関数：写真の受付中か。w＝その回の記録 { code, sid, at（始めた時刻）, doneAt（期限を選んだ時刻）, files }。
+ * 期限を選ぶ前は始めてから30分、選んだあとは選んでから10分（版 2026-11-17a）
+ */
+function LIC_isWaiting(w, now) {
+  if (!w || !w.at) return false;
+  return w.doneAt ? now - w.doneAt <= LIC_AFTER_MIN * 60000 : now - w.at <= LIC_WAIT_MIN * 60000;
+}
+/** 写真の受付中なら、その回の記録。過ぎていれば null（記録は残す。次の回の最初の写真で、前の回の写真をゴミ箱へ移すときには使わない） */
 function LIC_waiting_(uid) {
   var w = LIC_cacheGet_('lic:wait:' + uid);
-  if (!w) return null;
-  if (Date.now() - w.at > LIC_WAIT_MIN * 60000) { LIC_cacheDel_('lic:wait:' + uid); return null; }
-  return w;
+  return LIC_isWaiting(w, Date.now()) ? w : null;
 }
+function LIC_newId_() { return Utilities.getUuid().replace(/-/g, '').slice(0, 12).toLowerCase(); }
 
 /**
  * 1対1のトークの出来事のうち、免許証のものだけを扱う。扱ったら true（呼び出し元はそこで終わる）、それ以外は false（今までどおりの処理へ）。
@@ -563,40 +574,55 @@ function LIC_onStart_(ev, uid, fromButton) {
     LIC_replyText_(ev.replyToken, LIC_TEXT.notTarget);
     return true;
   }
-  LIC_cachePut_('lic:wait:' + uid, { code: x.person.code, at: Date.now() }, LIC_WAIT_MIN * 60);
+  LIC_cachePut_('lic:wait:' + uid, { code: x.person.code, sid: LIC_newId_(), at: Date.now(), files: [] }, LIC_PENDING_SEC);   // 新しい回
   LIC_cacheDel_('lic:date:' + uid);
   LIC_replyText_(ev.replyToken, LIC_TEXT.start);
   return true;
 }
 
-/** 受付中の写真：ドライブに保存 → 古い写真をゴミ箱へ → 期限を選んでもらう */
+/**
+ * 受付中の写真：ドライブに保存（その回の何枚目か）。1枚目なら前の回の写真をゴミ箱へ移し、期限を選んでもらう。2枚目以降は短いお礼だけ。
+ * 表・裏を続けて送ると、LINE の出来事がほぼ同時に届くため、保存から記録までを1つのロックの中で行う（同じ番号・互いの削除を防ぐ）
+ */
 function LIC_onPhoto_(ev, uid, waiting) {
   var x = LIC_target_(uid);
   if (!x || x.person.code !== waiting.code) { LIC_cacheDel_('lic:wait:' + uid); return false; }
-  var saved;
-  try { saved = LIC_savePhoto_(ev.message.id, x.person.code, x.today); } catch (e) {
-    Logger.log('免許証の写真の保存に失敗：%s', e && e.message ? e.message : '');
-    AC_adminNotice_('license-photo', '【エラー】運転免許証の写真を保存できませんでした（社員番号 ' + x.person.code + '）🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
-    LIC_replyText_(ev.replyToken, LIC_TEXT.photoFail);   // 受付は続ける（30分以内なら送り直せる）
-    return true;
-  }
   var lock = LockService.getScriptLock();
-  lock.waitLock(20000);
+  lock.waitLock(25000);
+  var w, saved, first;
   try {
+    w = LIC_cacheGet_('lic:wait:' + uid);   // ロックの中で読み直す（同時に届いたほかの写真の分を含める）
+    if (!w || w.sid !== waiting.sid) w = waiting;
+    w.files = w.files || [];
+    first = w.files.length === 0;
+    try { saved = LIC_savePhoto_(ev.message.id, x.person.code, x.today, w.files.length + 1, w.files); } catch (e) {
+      Logger.log('免許証の写真の保存に失敗：%s', e && e.message ? e.message : '');
+      AC_adminNotice_('license-photo', '【エラー】運転免許証の写真を保存できませんでした（社員番号 ' + x.person.code + '）🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
+      LIC_replyText_(ev.replyToken, LIC_TEXT.photoFail);   // 受付は続ける（受付の時間内なら送り直せる）
+      return true;
+    }
+    w.files.push(saved.id);
+    LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC);
     var rows = LIC_rows(x.tab.sh.getDataRange().getValues(), x.tab.col), r = rows.filter(function (y) { return y.code === x.person.code; })[0];
-    LIC_cell_(x.tab, r.i, 'file', saved.id);
+    LIC_cell_(x.tab, r.i, 'file', w.files.join(','));
     LIC_cell_(x.tab, r.i, 'reportAt', new Date());
   } finally { lock.releaseLock(); }
-  var base = x.row.exp || '', nonce = Utilities.getUuid().replace(/-/g, '').slice(0, 12).toLowerCase();
-  LIC_cacheDel_('lic:wait:' + uid);
-  LIC_cachePut_('lic:date:' + uid, { code: x.person.code, nonce: nonce, base: base, at: Date.now(),
+  if (!first) { LIC_replyText_(ev.replyToken, LIC_fill(LIC_TEXT.photoMore, { n: w.files.length })); return true; }
+  var base = x.row.exp || '', nonce = LIC_newId_();
+  LIC_cachePut_('lic:date:' + uid, { code: x.person.code, sid: w.sid, nonce: nonce, base: base, at: Date.now(),
     y3: base ? LIC_addYears(base, 3) : '', y5: base ? LIC_addYears(base, 5) : '' }, LIC_PENDING_SEC);
   LIC_reply_(ev.replyToken, [LIC_dateMessage(nonce, base, x.today)]);
   return true;
 }
 
-/** 写真を取り出してドライブに保存し、その人の古い写真をゴミ箱へ。{ id, trashed } */
-function LIC_savePhoto_(messageId, code, today) {
+/** 純粋関数：写真のファイル名（社員番号_YYYYMMDD_n。氏名は入れない） */
+function LIC_photoName(code, today, n) { return code + '_' + String(today).replace(/-/g, '') + '_' + n; }
+
+/**
+ * 写真を取り出してドライブに「社員番号_YYYYMMDD_n」で保存する。n が1（その回の最初の写真）なら、その人のほかの写真（前の回まで）をゴミ箱へ。
+ * keep：同じ回のファイルID（消さない）。{ id, trashed }
+ */
+function LIC_savePhoto_(messageId, code, today, n, keep) {
   var props = LIC_props_(), token = props.getProperty('LINE_CHANNEL_ACCESS_TOKEN'), folderId = props.getProperty('LICENSE_FOLDER_ID');
   if (!folderId) throw AC_error_('LICENSE_FOLDER_ID が未設定です');
   if (!token || !messageId) throw AC_error_('LINEの設定がありません');
@@ -604,11 +630,14 @@ function LIC_savePhoto_(messageId, code, today) {
     headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
   if (res.getResponseCode() !== 200) throw AC_error_('写真を取り出せませんでした HTTP ' + res.getResponseCode());   // 応答本文は記録しない
   var folder = DriveApp.getFolderById(folderId);
-  var file = folder.createFile(res.getBlob().setName(code + '_' + today.replace(/-/g, '')));
-  var id = file.getId(), trashed = 0, it = folder.getFiles();
-  while (it.hasNext()) {
-    var f = it.next();
-    if (f.getId() !== id && !f.isTrashed() && LIC_isPhotoOf(f.getName(), code)) { f.setTrashed(true); trashed++; }
+  var file = folder.createFile(res.getBlob().setName(LIC_photoName(code, today, n || 1)));
+  var id = file.getId(), trashed = 0;
+  if ((n || 1) === 1) {
+    var it = folder.getFiles(), skip = (keep || []).concat([id]);
+    while (it.hasNext()) {
+      var f = it.next();
+      if (skip.indexOf(f.getId()) === -1 && !f.isTrashed() && LIC_isPhotoOf(f.getName(), code)) { f.setTrashed(true); trashed++; }
+    }
   }
   return { id: id, trashed: trashed };
 }
@@ -642,6 +671,8 @@ function LIC_onPostback_(ev, uid) {
   } finally { lock.releaseLock(); }
   pend.done = date;
   LIC_cachePut_('lic:date:' + uid, pend, LIC_PENDING_SEC);
+  var w = LIC_cacheGet_('lic:wait:' + uid);   // 期限を選んでから10分は、同じ回の写真を受け付ける（版 2026-11-17a）
+  if (w && w.sid && w.sid === pend.sid) { w.doneAt = Date.now(); LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC); }
   LIC_replyText_(ev.replyToken, LIC_fill(update ? LIC_TEXT.thanksUpd : LIC_TEXT.thanksReg, { name: x.person.name, date: LIC_jpDate(date) }));
   if (other) {
     try {
@@ -654,5 +685,5 @@ function LIC_onPostback_(ev, uid) {
 
 if (typeof module !== 'undefined') {
   module.exports = { LIC_parseYmd: LIC_parseYmd, LIC_daysBetween: LIC_daysBetween, LIC_addYears: LIC_addYears, LIC_stage: LIC_stage,
-    LIC_statusFor: LIC_statusFor, LIC_plan: LIC_plan, LIC_eventKind: LIC_eventKind, LIC_parsePostback: LIC_parsePostback, LIC_VERSION: LIC_VERSION };
+    LIC_statusFor: LIC_statusFor, LIC_plan: LIC_plan, LIC_eventKind: LIC_eventKind, LIC_parsePostback: LIC_parsePostback, LIC_isWaiting: LIC_isWaiting, LIC_photoName: LIC_photoName, LIC_VERSION: LIC_VERSION };
 }

@@ -189,8 +189,9 @@ test('免許証: 登録のお願い → 3日後・7日後の催促 → 10日後�
   assert.deepEqual(to.sort(), [U(1), U(2), GROUP].sort());   // なしの人（90005）には送らない
   const req = push.find((p) => p.body.to === U(1)).body.messages[0];
   assert.equal(req.type, 'flex');
-  assert.equal(textOf(req), '試験 一郎さん、お疲れさまです。管理本部です。\n運転免許証の有効期限を管理するため、免許証の登録をお願いいたします。\n'
-    + '下のボタンを押して、免許証の写真をお送りください。\nいつもご協力ありがとうございます。\n\n※このメッセージはAIによる自動送信です。');
+  assert.equal(textOf(req), 'お疲れさまです。管理本部です。\n運転免許証の有効期限を管理するため、免許証の登録をお願いいたします。\n'
+    + '下のボタンを押して、免許証の写真をお送りください。\n※ボタンを押してから画像送付までは30分の有効期限があります。\n'
+    + 'ご対応のほどよろしくお願いいたします。\n\n※このメッセージはAIによる自動送信です。');   // 版 2026-11-17a：宛名なし
   assert.deepEqual({ ...req.contents.footer.contents[0].action }, { type: 'postback', label: '免許証を登録する', data: 'lic|1|start', displayText: '免許証を登録します' });
   const grp = push.find((p) => p.body.to === GROUP).body.messages[0].text;
   assert.match(grp, /^【免許証】LINE が未登録のため、免許証の案内を送れない方がいます（1名）\n・90003 試験 三郎\n/);
@@ -271,7 +272,7 @@ test('免許証: 30日前・7日前・当日・期限切れ（翌朝に本人・
   assert.ok(log.length >= 5 && log.every((r) => r[1] === 'SAF-01'));
 });
 
-test('免許証: 更新の報告（ボタン → 写真 → 3年後）。写真は「社員番号_YYYYMMDD」で保存し古い写真だけゴミ箱へ。前の期限の催促は止まる', () => {
+test('免許証: 更新の報告（ボタン → 写真 → 3年後）。写真は「社員番号_YYYYMMDD_1」で保存し古い写真だけゴミ箱へ。前の期限の催促は止まる', () => {
   const { g, master, book } = setup();
   g.ctx.licenseSetup();
   set(master, '90001', '免許の有無', 'あり'); set(master, '90001', '有効期限', '2026-12-16');
@@ -290,9 +291,9 @@ test('免許証: 更新の報告（ボタン → 写真 → 3年後）。写真�
   assert.equal(since(g, n).content.length, 1);
   assert.equal(push.length, 0);   // 問い合わせのお知らせは出ない
   const saved = folder.files.filter((f) => !f.trashed).map((f) => f.name).sort();
-  assert.deepEqual(saved, ['90001_20261116', '90002_20240101']);
+  assert.deepEqual(saved, ['90001_20261116_1', '90002_20240101']);
   assert.equal(folder.files.find((f) => f.id === 'old-1').trashed, true);
-  assert.equal(val(master, '90001', '写真ファイルID'), folder.files.find((f) => f.name === '90001_20261116').id);
+  assert.equal(val(master, '90001', '写真ファイルID'), folder.files.find((f) => f.name === '90001_20261116_1').id);
   const msg = reply[0].body.messages[0], btns = msg.contents.footer.contents.map((b) => b.action);
   assert.deepEqual(btns.map((b) => b.label), ['2029年12月16日（3年後）', '2031年12月16日（5年後）', 'その他（カレンダーで選ぶ）']);
   assert.equal(btns[2].type, 'datetimepicker');
@@ -562,4 +563,108 @@ test('免許証（範囲）: licenseScopePreview は送信せず、シートも�
   // 未設定なら全員
   g.scriptProps.setProperty('LICENSE_SCOPE', '');
   assert.equal(g.ctx.licenseScopePreview().inScope.length, 4);
+});
+
+// ---------------- 複数枚の写真（版 2026-11-17a） ----------------
+function multi() {
+  const s = setup();
+  s.g.ctx.licenseSetup();
+  set(s.master, '90001', '免許の有無', 'あり');
+  ['90002', '90003', '90005'].forEach((c) => set(s.master, c, '免許の有無', 'なし'));
+  s.folder = s.g.drive.folders[FOLDER];
+  s.folder.files.push({ id: 'other', name: '90002_20240101', type: 'image/jpeg', trashed: false });
+  return s;
+}
+const alive = (folder) => folder.files.filter((f) => !f.trashed).map((f) => f.name).sort();
+
+test('免許証（複数枚）: 表 → 裏の2枚がどちらも残り、IDが両方タブに入る。2枚目は短いお礼だけ（期限のボタンは重ねない）', () => {
+  const { g, master, folder } = multi();
+  post(g, pb(U(1), 'lic|1|start'));
+  let n = g.fetches.length;
+  photo(g, U(1));
+  const first = since(g, n).reply[0].body.messages[0];
+  assert.equal(first.type, 'flex');   // 1枚目：期限のボタン
+  n = g.fetches.length;
+  photo(g, U(1));
+  const r = since(g, n);
+  assert.equal(r.content.length, 1);
+  assert.equal(r.reply.length, 1);
+  assert.deepEqual(r.reply[0].body.messages.map((m) => m.type), ['text']);
+  assert.equal(r.reply[0].body.messages[0].text, '2枚目の写真も保存しました。ありがとうございます。\n\n※このメッセージはAIによる自動送信です。');
+  assert.deepEqual(alive(folder), ['90001_20261116_1', '90001_20261116_2', '90002_20240101']);
+  const ids = ['90001_20261116_1', '90001_20261116_2'].map((nm) => folder.files.find((f) => f.name === nm).id);
+  assert.equal(val(master, '90001', '写真ファイルID'), ids.join(','));
+  // 1枚目のボタンで期限を選べる
+  n = g.fetches.length;
+  post(g, pb(U(1), first.contents.footer.contents[0].action.data, { date: '2029-04-30' }));
+  assert.match(since(g, n).reply[0].body.messages[0].text, /ご登録ありがとうございます/);
+  assert.equal(ymd(val(master, '90001', '有効期限')), '2029-04-30');
+  assert.ok(!g.logs.some((l) => /試験|90001_2026/.test(l)));
+});
+
+test('免許証（複数枚）: 期限を選んだあと10分以内の写真は同じ回として残り、10分を過ぎたら受け付けない（問い合わせ）', () => {
+  const { g, master, book, folder } = multi();
+  post(g, pb(U(1), 'lic|1|start'));
+  let n = g.fetches.length;
+  photo(g, U(1));
+  const btn = since(g, n).reply[0].body.messages[0].contents.footer.contents[0].action;
+  g.clock.now += 25 * 60000;   // 始めてから25分で期限を選ぶ → そこから10分（35分まで）受け付ける
+  post(g, pb(U(1), btn.data, { date: '2029-04-30' }));
+  g.clock.now += 9 * 60000;    // 選んでから9分（始めてから34分）
+  n = g.fetches.length;
+  photo(g, U(1));
+  assert.equal(since(g, n).content.length, 1);
+  assert.match(since(g, n).reply[0].body.messages[0].text, /^2枚目の写真も保存しました/);
+  assert.deepEqual(alive(folder), ['90001_20261116_1', '90001_20261116_2', '90002_20240101']);
+  assert.equal(String(val(master, '90001', '写真ファイルID')).split(',').length, 2);
+  g.clock.now += 2 * 60000;    // 選んでから11分
+  n = g.fetches.length;
+  photo(g, U(1));
+  assert.equal(since(g, n).content.length, 0);
+  assert.equal(book.getSheetByName('問い合わせ').dump().slice(1).length, 1);   // 今までどおり問い合わせ
+  assert.equal(alive(folder).length, 3);
+  // 早く選んだとき：選んでから10分を過ぎれば、始めてから30分以内でも受け付けない
+  const b = multi();
+  post(b.g, pb(U(1), 'lic|1|start'));
+  let m = b.g.fetches.length;
+  photo(b.g, U(1));
+  post(b.g, pb(U(1), since(b.g, m).reply[0].body.messages[0].contents.footer.contents[0].action.data, { date: '2029-04-30' }));
+  b.g.clock.now += 11 * 60000;
+  m = b.g.fetches.length;
+  photo(b.g, U(1));
+  assert.equal(since(b.g, m).content.length, 0);
+});
+
+test('免許証（複数枚）: 次の回の写真が来たら、前の回の写真がすべてゴミ箱へ（ほかの人の写真は残す）', () => {
+  const { g, master, folder } = multi();
+  set(master, '90001', '有効期限', '2026-12-16');
+  post(g, ev(U(1), '免許更新'));
+  let n = g.fetches.length;
+  photo(g, U(1)); photo(g, U(1));
+  const btn = since(g, n).reply[0].body.messages[0].contents.footer.contents[0].action;
+  post(g, pb(U(1), btn.data));
+  assert.deepEqual(alive(folder), ['90001_20261116_1', '90001_20261116_2', '90002_20240101']);
+  day(g, '2029-11-20');
+  post(g, ev(U(1), '免許更新'));   // 次の回
+  assert.equal(alive(folder).length, 3);   // 写真が来るまでは消さない
+  n = g.fetches.length;
+  photo(g, U(1));
+  assert.equal(since(g, n).reply[0].body.messages[0].type, 'flex');   // 新しい回の1枚目：期限のボタン
+  assert.deepEqual(alive(folder), ['90001_20291120_1', '90002_20240101']);
+  photo(g, U(1));
+  assert.deepEqual(alive(folder), ['90001_20291120_1', '90001_20291120_2', '90002_20240101']);
+  assert.equal(folder.files.filter((f) => f.trashed).length, 2);
+  assert.equal(String(val(master, '90001', '写真ファイルID')).split(',').length, 2);
+});
+
+test('免許証（複数枚）: 純粋関数（受付の時間・ファイル名）', () => {
+  const X = setup().g.ctx;
+  const t0 = 1e12, min = 60000;
+  assert.equal(X.LIC_isWaiting(null, t0), false);
+  assert.equal(X.LIC_isWaiting({ at: t0 }, t0 + 30 * min), true);
+  assert.equal(X.LIC_isWaiting({ at: t0 }, t0 + 30 * min + 1), false);
+  assert.equal(X.LIC_isWaiting({ at: t0, doneAt: t0 + 28 * min }, t0 + 38 * min), true);
+  assert.equal(X.LIC_isWaiting({ at: t0, doneAt: t0 + 2 * min }, t0 + 13 * min), false);
+  assert.equal(X.LIC_photoName('90001', '2026-11-17', 2), '90001_20261117_2');
+  assert.equal(X.LIC_isPhotoOf('90001_20261117_2', '90001'), true);
 });

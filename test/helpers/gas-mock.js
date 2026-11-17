@@ -112,6 +112,7 @@ export function createGas({ files, now, shared }) {
   const cache = {};
   const fetches = [];
   const line = { members: {}, profiles: {}, pushFail: new Set(), contents: {} };   // contents：メッセージID → { type }（画像の取り出しの応答）
+  const ai = { queue: [], calls: [], fallback: null };   // AI（Claude API）の模擬の応答：queue の先頭から { json } / { status } / { refusal } / { throw } / { text }
   const logs = [];
   const triggers = [];
   const fmtDate = (d, tz, f) => {
@@ -140,12 +141,20 @@ export function createGas({ files, now, shared }) {
     const files = [];
     const wrap = (f) => ({ getId: () => f.id, getName: () => f.name, isTrashed: () => f.trashed, setTrashed: (v) => { f.trashed = !!v; }, getMimeType: () => f.type });
     drive.folders[id] = { id, files, getId: () => id, getFiles: () => iter(files.map(wrap)),
-      createFile: (blob) => { const f = { id: 'photo-' + ++fileSeq, name: blob.getName(), type: blob.getContentType(), trashed: false }; files.push(f); return wrap(f); } };
+      createFile: (blob) => { const f = { id: 'photo-' + ++fileSeq, name: blob.getName(), type: blob.getContentType(), trashed: false, bytes: blob.getBytes ? blob.getBytes() : null }; files.push(f); return wrap(f); } };
     return drive.folders[id];
   };
   const ctx = {
     Date: FakeDate,
-    DriveApp: { getFolderById: (id) => drive.folders[id] || folder, getFoldersByName: () => iter([folder]), createFolder: () => folder },
+    DriveApp: {
+      getFileById: (id) => {   // 写真のフォルダのファイル（AI の再確認で使う）
+        for (const fo of Object.values(drive.folders)) {
+          const f = fo.files.find((x) => x.id === id);
+          if (f) return { getId: () => f.id, getBlob: () => ({ getContentType: () => f.type, getBytes: () => f.bytes || { length: 1000, tag: f.name } }) };
+        }
+        throw new Error('ファイルがありません');
+      },
+      getFolderById: (id) => drive.folders[id] || folder, getFoldersByName: () => iter([folder]), createFolder: () => folder },
     MimeType: { PLAIN_TEXT: 'text/plain' },
     console,
     Logger: { log: (...a) => { logs.push(a.join(' ')); } },
@@ -163,6 +172,7 @@ export function createGas({ files, now, shared }) {
       parseDate: (s, tz, f) => { if (f !== 'yyyy-MM-dd') throw new Error('未対応の形式'); return new FakeDate(jst(s).getTime()); },
       computeHmacSha256Signature: (text, key) => [...createHmac('sha256', key).update(text, 'utf8').digest()].map((b) => (b > 127 ? b - 256 : b)),
       getUuid: () => randomUUID(),
+      base64Encode: (b) => 'QkFTRTY0' + (b && b.tag ? ':' + b.tag : ''),   // 模擬（写真の目印だけ）
       Charset: { UTF_8: 'UTF-8' },
     },
     UrlFetchApp: {
@@ -177,9 +187,22 @@ export function createGas({ files, now, shared }) {
           const c = line.contents[decodeURIComponent(content[1])];
           if (!c) return { getResponseCode: () => 404, getContentText: () => '{}' };
           let bname = null;
-          const blob = { getContentType: () => c.type || 'image/jpeg', getName: () => bname, setName: (n) => { bname = n; return blob; } };
+          const blob = { getContentType: () => c.type || 'image/jpeg', getName: () => bname, setName: (n) => { bname = n; return blob; },
+            getBytes: () => ({ length: c.size || 1000, tag: c.tag || 'photo' }) };   // 中身は持たない（大きさと目印だけ）
           return { getResponseCode: () => 200, getContentText: () => '', getBlob: () => blob };
         }
+        if (url === 'https://api.anthropic.com/v1/messages') {   // AI（Claude API）の模擬：ai.queue の先頭を返す（実際には呼ばない）
+          ai.calls.push(rec);
+          const r = ai.queue.length ? ai.queue.shift() : ai.fallback;
+          if (!r) throw new Error('AI の応答を用意していません');
+          if (r.delayMs) clock.now += r.delayMs;   // AI が時間をかけた（模擬の時計を進める）
+          if (r.throw) throw new Error('通信の失敗（模擬）');
+          if (r.status) return { getResponseCode: () => r.status, getContentText: () => '{"type":"error"}' };
+          const body = r.refusal ? { stop_reason: 'refusal', content: [] }
+            : { stop_reason: 'end_turn', content: [{ type: 'text', text: typeof r.text === 'string' ? r.text : JSON.stringify(r.json) }] };
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+        }
+        if (url === 'https://api.line.me/v2/bot/chat/loading/start') return { getResponseCode: () => 202, getContentText: () => '{}' };
         if (mem) {
           const g = decodeURIComponent(mem[1]), u = decodeURIComponent(mem[2]);
           if (line.members[g] && Object.hasOwn(line.members[g], u)) text = JSON.stringify({ displayName: line.members[g][u], userId: u });
@@ -216,7 +239,7 @@ export function createGas({ files, now, shared }) {
   vm.createContext(ctx);
   if (LIC_REGRESSION) scriptProps.setProperty('LICENSE_MODE', 'on');
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
-  return { ctx, clock, sheets, drive, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
+  return { ctx, clock, sheets, drive, ai, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };
 }
 

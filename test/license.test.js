@@ -99,7 +99,7 @@ test('免許証: record はタブを作って在籍者を足し、送る予定�
   const n = g.fetches.length;
   g.ctx.licenseDaily();
   const t = tab(master).dump();
-  assert.deepEqual([...t[0]], ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考']);
+  assert.deepEqual([...t[0]], ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考', 'AI確認']);
   assert.deepEqual(t.slice(1).map((r) => String(r[0])), ['90001', '90002', '90003', '90005']);   // 退職・退職日を過ぎた人は足さない
   assert.ok(t.slice(1).every((r) => r[2] === '' && r[4] === '有無の確認待ち'));
   assert.equal(g.fetches.length, n);
@@ -671,4 +671,294 @@ test('免許証（複数枚）: 純粋関数（受付の時間・ファイル名
   assert.equal(X.LIC_isWaiting({ at: t0, doneAt: t0 + 2 * min }, t0 + 13 * min), false);
   assert.equal(X.LIC_photoName('90001', '2026-11-17', 2), '90001_20261117_2');
   assert.equal(X.LIC_isPhotoOf('90001_20261117_2', '90001'), true);
+});
+
+// ---------------- AI による写真の確認（版 2026-11-18a・Claude API は模擬。実際には呼ばない） ----------------
+const KEY = 'fake-key-for-test';
+const FRONT = (exp) => ({ json: { is_license: true, side: 'front', readable: true, problems: [], expiry: exp } });
+const BACK = { json: { is_license: true, side: 'back', readable: true, problems: [], expiry: null } };
+const BAD = (p) => ({ json: { is_license: true, side: 'unknown', readable: false, problems: [p], expiry: null } });
+const NOTLIC = { json: { is_license: false, side: 'unknown', readable: true, problems: ['not_license'], expiry: null } };
+const NOTE = '\n\n※このメッセージはAIによる自動送信です。';
+function aiSetup(mode = 'on', extra = {}) {
+  const s = setup({ LICENSE_MODE: 'on', LICENSE_AI_CHECK: mode, ANTHROPIC_API_KEY: KEY, ...extra });
+  s.g.ctx.licenseSetup();
+  set(s.master, '90001', '免許の有無', 'あり');
+  set(s.master, '90002', '免許の有無', 'あり');
+  ['90003', '90005'].forEach((c) => set(s.master, c, '免許の有無', 'なし'));
+  s.folder = s.g.drive.folders[FOLDER];
+  return s;
+}
+/** 写真を送り、そのとき本人へ返した（またはプッシュした）文と、管理者へのプッシュを返す */
+const shot = (g, uid, ...ai) => {
+  g.ai.queue.push(...ai);
+  const n = g.fetches.length;
+  photo(g, uid);
+  const r = since(g, n);
+  const toUser = r.reply.concat(r.push.filter((p) => p.body.to === uid)).map((x) => x.body.messages[0]);
+  return { msgs: toUser, admin: r.push.filter((p) => p.body.to === ADMIN).map((p) => p.body.messages[0].text), content: r.content.length };
+};
+const mine = (folder, code = '90001') => folder.files.filter((f) => !f.trashed && f.name.startsWith(code + '_')).map((f) => f.name).sort();
+
+test('免許証（AI）: on・表面から期限を読み取ってそのまま記録し、お礼と日付・裏面の案内（1回）。AI へは写真だけ（氏名・LINE ID・キーはログに出さない）', () => {
+  const { g, master, folder } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  const r = shot(g, U(1), FRONT('2029-04-30'));
+  assert.equal(r.msgs.length, 1);
+  assert.equal(r.msgs[0].text, 'お疲れさまです。管理本部です。\nご登録ありがとうございます。\n運転免許証の有効期限を2029年4月30日で記録しました。\n'
+    + '日付が違う場合は、このトークでお知らせください。\n期限が近づきましたら、こちらから改めてご案内いたします。\n'
+    + '続けて、免許証の裏面の写真もお送りください（10分以内にお願いいたします）。' + NOTE);
+  assert.deepEqual(r.admin, []);
+  assert.equal(ymd(val(master, '90001', '有効期限')), '2029-04-30');
+  assert.equal(val(master, '90001', '状態'), '登録済み');
+  assert.equal(val(master, '90001', 'AI確認'), 'OK');
+  assert.deepEqual(mine(folder), ['90001_20261116_1']);
+  // AI へ送った中身：写真と指示だけ。モデルは既定の claude-sonnet-5-5
+  const call = g.ai.calls[0];
+  assert.equal(call.opt.headers['x-api-key'], KEY);
+  assert.equal(call.body.model, 'claude-sonnet-5-5');
+  assert.equal(call.body.output_config.format.type, 'json_schema');
+  const sent = JSON.stringify(call.body);
+  assert.ok(!sent.includes('試験') && !sent.includes(U(1)) && !sent.includes('90001'));
+  assert.ok(g.fetches.some((f) => f.url.endsWith('/chat/loading/start')));
+  // 裏面：同じ回として保存し、短いお礼だけ（裏面の案内は重ねない）
+  const b = shot(g, U(1), BACK);
+  assert.match(b.msgs[0].text, /^2枚目の写真も保存しました。/);
+  assert.deepEqual(mine(folder), ['90001_20261116_1', '90001_20261116_2']);
+  assert.ok(!g.logs.some((l) => l.includes(KEY) || /試験|2029/.test(l)));
+});
+
+test('免許証（AI）: on・ぼやけた写真は保存せず理由を添えて再送をお願いし（前の回の写真も消さない）、受付を30分延ばす', () => {
+  const { g, master, folder } = aiSetup();
+  folder.files.push({ id: 'old', name: '90001_20231201_1', type: 'image/jpeg', trashed: false });
+  post(g, pb(U(1), 'lic|1|start'));
+  g.clock.now += 25 * 60000;
+  const r = shot(g, U(1), BAD('blur'));
+  assert.equal(r.msgs[0].text, 'お疲れさまです。管理本部です。\nお送りいただいた写真は、ぼやけているため、文字を読み取れませんでした。\n'
+    + '免許証を机などに置き、ピントが合ってから撮ってください。\nお手数ですが、もう一度お送りいただけますでしょうか。' + NOTE);
+  assert.deepEqual(mine(folder), ['90001_20231201_1']);   // 保存しない・前の回の写真も残る
+  assert.match(String(val(master, '90001', 'AI確認')), /^再送依頼（ぼやけている）/);
+  g.clock.now += 25 * 60000;   // 始めてから50分（再送のお願いから25分）でも受け付ける
+  const ok = shot(g, U(1), FRONT('2029-04-30'));
+  assert.match(ok.msgs[0].text, /有効期限を2029年4月30日で記録しました/);
+  assert.deepEqual(mine(folder), ['90001_20261116_1']);   // 新しい回の1枚目で、前の回の写真はゴミ箱へ
+});
+
+test('免許証（AI）: on・暗い → 免許証以外と2回続けて読み取れなければ、期限のボタン・要確認・安藤さんへ社員番号だけ', () => {
+  const { g, master, folder } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  const a = shot(g, U(1), BAD('dark'));
+  assert.match(a.msgs[0].text, /写真は、暗いため、文字を読み取れませんでした。\n明るい場所で撮ってください。/);
+  const b = shot(g, U(1), NOTLIC);
+  assert.equal(b.msgs[0].type, 'flex');
+  assert.equal(textOf(b.msgs[0]), '写真から有効期限を読み取れませんでした。\nお手数ですが、免許証に書かれている有効期限を、下のボタンから選んでください。' + NOTE);
+  assert.equal(b.msgs[0].contents.footer.contents[0].action.type, 'datetimepicker');
+  assert.deepEqual(mine(folder), []);   // 免許証以外の写真は保存しない
+  assert.equal(val(master, '90001', '状態'), '要確認');
+  assert.equal(val(master, '90001', 'AI確認'), '要確認（読み取れず）');
+  assert.equal(b.admin.length, 1);
+  assert.match(b.admin[0], /^【免許証・要確認】社員番号 90001：写真から有効期限を2回続けて読み取れなかったため/);
+  assert.ok(!b.admin[0].includes('試験'));
+  // ボタンで選んでも要確認のまま
+  const n = g.fetches.length;
+  post(g, pb(U(1), b.msgs[0].contents.footer.contents[0].action.data, { date: '2029-04-30' }));
+  assert.match(since(g, n).reply[0].body.messages[0].text, /ご登録ありがとうございます/);
+  assert.equal(ymd(val(master, '90001', '有効期限')), '2029-04-30');
+  assert.equal(val(master, '90001', '状態'), '要確認');
+});
+
+test('免許証（AI）: on・はみ出し・反射の文面。裏面が先なら表面をお願いし（1回）、表面で記録したお礼には裏面の案内を付けない', () => {
+  const { g, master, folder } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  assert.match(shot(g, U(1), BAD('cutoff')).msgs[0].text, /写真は、免許証の一部が写っていないため、.*\n免許証の四隅がすべて入るように撮ってください。/);
+  assert.equal(shot(g, U(1), BACK).msgs[0].text, '裏面の写真を保存しました。ありがとうございます。\n続けて、免許証の表面の写真をお送りください。' + NOTE);
+  assert.equal(val(master, '90001', 'AI確認'), 'OK（裏面）');
+  assert.match(shot(g, U(1), BAD('glare')).msgs[0].text, /写真は、光が反射しているため、/);   // 失敗が続いたのではない（裏面で数え直し）
+  const f = shot(g, U(1), FRONT('2029-04-30'));
+  assert.ok(!f.msgs[0].text.includes('裏面'));
+  assert.deepEqual(mine(folder), ['90001_20261116_1', '90001_20261116_2']);
+  assert.equal(val(master, '90001', '写真ファイルID').split(',').length, 2);
+});
+
+test('免許証（AI）: on・読み取った日付の確かめ（1年以上前・10年以上先・更新で前の期限以前）は記録して要確認・安藤さんへ社員番号と日付', () => {
+  const cases = [['2036-11-16', '', '日付の範囲外'], ['2025-11-16', '', '日付の範囲外'], ['2036-11-15', '', ''], ['2025-11-17', '', ''],
+    ['2026-12-16', '2026-12-16', '前の期限以前'], ['2029-12-16', '2026-12-16', '']];
+  for (const [exp, base, label] of cases) {
+    const { g, master } = aiSetup();
+    if (base) set(master, '90001', '有効期限', base);
+    post(g, ev(U(1), '免許更新'));
+    const r = shot(g, U(1), FRONT(exp));
+    assert.match(r.msgs[0].text, base ? /更新のご報告ありがとうございます/ : /ご登録ありがとうございます/, exp);
+    assert.equal(ymd(val(master, '90001', '有効期限')), exp);
+    if (label) {
+      assert.equal(val(master, '90001', '状態'), '要確認', exp);
+      assert.equal(val(master, '90001', 'AI確認'), '要確認（' + label + '）');
+      assert.equal(r.admin.length, 1);
+      assert.match(r.admin[0], new RegExp('^【免許証・要確認】社員番号 90001：写真から読み取った有効期限 ' + exp));
+      assert.ok(!r.admin[0].includes('試験'));
+    } else {
+      assert.notEqual(val(master, '90001', '状態'), '要確認', exp);
+      assert.deepEqual(r.admin, []);
+    }
+  }
+});
+
+test('免許証（AI）: on・AI のエラー・キー未設定・上限超え・断られた・応答が読めないときは、保存して期限のボタン・要確認（安藤さんへは理由ごとに1日1回＋社員番号）', () => {
+  const { g, master, folder } = aiSetup('on', { LICENSE_AI_DAILY_MAX: '3' });
+  post(g, pb(U(1), 'lic|1|start'));
+  const r = shot(g, U(1), { status: 529 });
+  assert.equal(r.msgs[0].type, 'flex');
+  assert.match(textOf(r.msgs[0]), /^写真を受け取りました。ありがとうございます。\n続けて、免許証に書かれている有効期限を/);
+  assert.deepEqual(mine(folder), ['90001_20261116_1']);
+  assert.equal(val(master, '90001', '状態'), '要確認');
+  assert.equal(val(master, '90001', 'AI確認'), '未確認（AIのエラー）');
+  assert.equal(r.admin.length, 2);
+  assert.match(r.admin[0], /^【免許証】AI による写真の確認ができませんでした（AIのエラー・HTTP 529）/);
+  assert.match(r.admin[1], /^【免許証・要確認】社員番号 90001：写真を AI で確認できなかったため（AIのエラー）/);
+  // 同じ日の2人目：エラーの知らせは重ねない
+  post(g, pb(U(2), 'lic|1|start'));
+  const r2 = shot(g, U(2), { status: 500 });
+  assert.equal(r2.admin.length, 1);
+  assert.match(r2.admin[0], /社員番号 90002/);
+  // 断られた・応答が読めない → ボタン（エラーの知らせは出さない）
+  for (const resp of [{ refusal: true }, { text: 'not json' }, { throw: true }]) {
+    const s = aiSetup();
+    post(s.g, pb(U(1), 'lic|1|start'));
+    const x = shot(s.g, U(1), resp);
+    assert.equal(x.msgs[0].type, 'flex');
+    assert.equal(val(s.master, '90001', '状態'), '要確認');
+  }
+  // 上限（この日 3枚）：AI へ送らずにボタン
+  const before = g.ai.calls.length;
+  post(g, ev(U(1), '免許更新'));
+  shot(g, U(1), FRONT('2029-04-30'));   // 3枚目は AI へ
+  assert.equal(g.ai.calls.length, before + 1);
+  post(g, ev(U(1), '免許更新'));
+  const lim = shot(g, U(1));
+  assert.equal(g.ai.calls.length, before + 1);
+  assert.equal(lim.msgs[0].type, 'flex');
+  assert.equal(val(master, '90001', 'AI確認'), '未確認（1日の上限）');
+  assert.match(lim.admin[0], /^【免許証】AI による写真の確認ができませんでした（1日の上限）/);
+  // キー未設定
+  const k = aiSetup('on', { ANTHROPIC_API_KEY: '' });
+  post(k.g, pb(U(1), 'lic|1|start'));
+  const kr = shot(k.g, U(1));
+  assert.equal(k.g.ai.calls.length, 0);
+  assert.equal(kr.msgs[0].type, 'flex');
+  assert.equal(val(k.master, '90001', 'AI確認'), '未確認（キー未設定）');
+});
+
+test('免許証（AI）: on・ボタンで選んだ期限が、同じ回の写真から読み取った期限と違えば要確認・安藤さんへ（社員番号と2つの日付）', () => {
+  const { g, master } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  const r = shot(g, U(1), { status: 529 });   // AI が使えずボタン
+  shot(g, U(1), FRONT('2029-04-30'));        // 2枚目は読めた
+  const n = g.fetches.length;
+  post(g, pb(U(1), r.msgs[0].contents.footer.contents[0].action.data, { date: '2029-05-30' }));
+  const adm = since(g, n).push.filter((p) => p.body.to === ADMIN).map((p) => p.body.messages[0].text);
+  assert.equal(adm.length, 1);
+  assert.match(adm[0], /^【免許証・要確認】社員番号 90001：ボタンで選んだ有効期限 2029-05-30 と、写真から読み取った 2029-04-30 が違うため/);
+  assert.equal(val(master, '90001', '状態'), '要確認');
+  assert.equal(val(master, '90001', 'AI確認'), '要確認（日付違い・写真 2029-04-30）');
+});
+
+test('免許証（AI）: record・AI の判定を「AI確認」に書くだけ（本人へはボタン・再送のお願いなし・要確認にしない・安藤さんへ送らない）', () => {
+  const { g, master, folder } = aiSetup('record');
+  post(g, pb(U(1), 'lic|1|start'));
+  const r = shot(g, U(1), FRONT('2029-04-30'));
+  assert.equal(g.ai.calls.length, 1);
+  assert.equal(r.msgs[0].type, 'flex');   // 今までどおり期限のボタン
+  assert.equal(val(master, '90001', 'AI確認'), '記録：OK（表面・期限 2029-04-30）');
+  assert.equal(String(val(master, '90001', '有効期限')), '');
+  const d = shot(g, U(1), BAD('dark'));
+  assert.match(d.msgs[0].text, /^2枚目の写真も保存しました/);   // 再送のお願いはしない・保存する
+  assert.deepEqual(mine(folder), ['90001_20261116_1', '90001_20261116_2']);
+  assert.equal(val(master, '90001', 'AI確認'), '記録：再送依頼相当（暗い）');
+  const n = g.fetches.length;
+  post(g, pb(U(1), r.msgs[0].contents.footer.contents[0].action.data, { date: '2029-05-30' }));
+  assert.equal(since(g, n).push.length, 0);
+  assert.equal(val(master, '90001', '状態'), '登録済み');
+  assert.equal(val(master, '90001', 'AI確認'), '記録：要確認（日付違い・写真 2029-04-30）');
+});
+
+test('免許証（AI）: off（未設定）なら AI を呼ばず、「…」も出さず、今までどおり', () => {
+  const { g, master } = aiSetup('');
+  post(g, pb(U(1), 'lic|1|start'));
+  const r = shot(g, U(1));
+  assert.equal(g.ai.calls.length, 0);
+  assert.ok(!g.fetches.some((f) => f.url.endsWith('/chat/loading/start')));
+  assert.equal(r.msgs[0].type, 'flex');
+  assert.equal(String(val(master, '90001', 'AI確認')), '');
+  assert.notEqual(val(master, '90001', '状態'), '要確認');
+});
+
+test('免許証（AI）: licenseAiRecheck は保存済みの写真から読み取った期限とタブの期限を比べて「AI確認」に書く（本人へ送らない・状態は変えない・ログは社員番号だけ）', () => {
+  const { g, master, folder } = aiSetup('');
+  folder.files.push({ id: 'p1', name: '90001_20261101_1', type: 'image/jpeg', trashed: false, bytes: { length: 1000, tag: 'p1' } },
+    { id: 'p2b', name: '90002_20261101_1', type: 'image/jpeg', trashed: false }, { id: 'p2f', name: '90002_20261101_2', type: 'image/jpeg', trashed: false });
+  set(master, '90001', '有効期限', '2029-04-30'); set(master, '90001', '写真ファイルID', 'p1');
+  set(master, '90002', '有効期限', '2028-01-10'); set(master, '90002', '写真ファイルID', 'p2b,p2f');
+  const st = [val(master, '90001', '状態'), val(master, '90002', '状態')];
+  g.ai.queue.push(FRONT('2029-04-30'), BACK, FRONT('2028-02-10'));
+  const n = g.fetches.length;
+  const res = g.ctx.licenseAiRecheck();
+  assert.deepEqual({ checked: res.checked, ok: res.ok, diff: res.diff }, { checked: 2, ok: 1, diff: 1 });
+  assert.equal(since(g, n).push.length + since(g, n).reply.length, 0);
+  assert.equal(val(master, '90001', 'AI確認'), 'OK（再確認 2026-11-16）');
+  assert.equal(val(master, '90002', 'AI確認'), '要確認（日付違い・写真 2028-02-10・再確認 2026-11-16）');
+  assert.deepEqual([val(master, '90001', '状態'), val(master, '90002', '状態')], st);
+  assert.ok(g.logs.some((l) => /90002 日付違い/.test(l)));
+  assert.ok(!g.logs.some((l) => /試験|2028|2029/.test(l)));
+});
+
+test('免許証（AI）: 純粋関数（応答の読み取り・判定・日付の確かめ・写真の扱い）', () => {
+  const X = setup().g.ctx;
+  const body = (o) => JSON.stringify({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(o) }] });
+  assert.equal(X.LIC_aiParse(JSON.stringify({ stop_reason: 'refusal', content: [] })).error, 'refusal');
+  assert.equal(X.LIC_aiParse('<html>').error, 'parse');
+  assert.equal(X.LIC_aiParse(body({ is_license: true })).error, 'parse');
+  const ok = X.LIC_aiParse(body({ is_license: true, side: 'front', readable: true, problems: ['blur', 'xxx'], expiry: '2029-02-30' })).res;
+  assert.deepEqual([...ok.problems], ['blur']);
+  assert.equal(ok.expiry, '');   // 日付として読めない → 期限なし（再送のお願い）
+  const j = (res, base = '') => X.LIC_aiJudge({ isLicense: true, side: 'front', readable: true, problems: [], expiry: '', ...res }, '2026-11-16', base);
+  assert.deepEqual({ ...j({ readable: false, problems: ['blur', 'glare'] }) }, { kind: 'retry', reason: 'glare', side: 'front' });
+  assert.equal(j({ isLicense: false }).reason, 'not_license');
+  assert.equal(j({}).reason, 'noexp');
+  assert.equal(j({ side: 'back' }).kind, 'back');
+  assert.equal(j({ expiry: '2029-01-01' }).kind, 'front');
+  assert.equal(X.LIC_aiDateCheck('2025-11-17', '2026-11-16', ''), '');
+  assert.equal(X.LIC_aiDateCheck('2025-11-16', '2026-11-16', ''), 'range');
+  assert.equal(X.LIC_aiDateCheck('2036-11-15', '2026-11-16', ''), '');
+  assert.equal(X.LIC_aiDateCheck('2036-11-16', '2026-11-16', ''), 'range');
+  assert.equal(X.LIC_aiDateCheck('2029-12-16', '2026-12-16', '2026-12-16'), '');
+  assert.equal(X.LIC_aiDateCheck('2026-12-16', '2026-11-16', '2026-12-16'), 'before');
+  const req = X.LIC_aiRequest('', 'image/jpeg', 'AAAA');
+  assert.equal(req.model, 'claude-sonnet-5-5');
+  assert.equal(req.messages[0].content[0].source.data, 'AAAA');
+  assert.equal(X.LIC_aiRequest('claude-haiku-5-5', 'image/jpeg', 'A').model, 'claude-haiku-5-5');
+});
+
+test('免許証（AI）: AI の確認に時間がかかったら返信ではなくプッシュで送る。大きすぎる写真は AI へ送らずボタン・要確認', () => {
+  const { g, master } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  const n = g.fetches.length;
+  g.ai.queue.push({ ...FRONT('2029-04-30'), delayMs: 50000 });
+  photo(g, U(1));
+  const r = since(g, n);
+  assert.equal(r.reply.length, 0);
+  assert.equal(r.push.length, 1);
+  assert.equal(r.push[0].body.to, U(1));
+  assert.match(r.push[0].body.messages[0].text, /有効期限を2029年4月30日で記録しました/);
+  // 大きすぎる写真
+  const b = aiSetup();
+  post(b.g, pb(U(2), 'lic|1|start'));
+  const e = ev(U(2), { type: 'image' });
+  b.g.line.contents[e.message.id] = { type: 'image/jpeg', size: 8 * 1024 * 1024 };
+  const m = b.g.fetches.length;
+  post(b.g, e);
+  assert.equal(b.g.ai.calls.length, 0);
+  assert.equal(since(b.g, m).reply[0].body.messages[0].type, 'flex');
+  assert.equal(val(b.master, '90002', 'AI確認'), '未確認（写真が大きすぎる）');
+  assert.equal(val(b.master, '90002', '状態'), '要確認');
+  assert.equal(val(master, '90001', 'AI確認'), 'OK');
 });

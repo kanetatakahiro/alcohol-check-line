@@ -306,7 +306,7 @@ test('免許証: 更新の報告（ボタン → 写真 → 3年後）。写真�
   post(g, pb(U(1), btns[0].data));
   ({ reply, push } = since(g, n));
   assert.equal(push.length, 0);   // 3年後・5年後は管理者へ知らせない
-  assert.equal(reply[0].body.messages[0].text, '試験 一郎さん、更新のご報告ありがとうございます。\n新しい有効期限を2029年12月16日で記録しました。\n'
+  assert.equal(reply[0].body.messages[0].text, 'お疲れさまです。管理本部です。\n更新のご報告ありがとうございます。\n新しい有効期限を2029年12月16日で記録しました。\n'
     + '次の期限が近づきましたら、こちらから改めてご案内いたします。\n\n※このメッセージはAIによる自動送信です。');
   assert.equal(ymd(val(master, '90001', '有効期限')), '2029-12-16');
   assert.equal(val(master, '90001', '状態'), '登録済み');
@@ -357,7 +357,8 @@ test('免許証: 新規の登録は写真のあとカレンダーだけ。今日
   assert.equal(val(master, '90002', '有効期限'), '');
   n = g.fetches.length;
   post(g, pb(U(2), btns[0].data, { date: '2029-04-30' }));
-  assert.match(since(g, n).reply[0].body.messages[0].text, /^試験 二郎さん、ご登録ありがとうございます。\n運転免許証の有効期限を2029年4月30日で記録しました。/);
+  assert.equal(since(g, n).reply[0].body.messages[0].text, 'お疲れさまです。管理本部です。\nご登録ありがとうございます。\n運転免許証の有効期限を2029年4月30日で記録しました。\n'
+    + '期限が近づきましたら、こちらから改めてご案内いたします。\n\n※このメッセージはAIによる自動送信です。');   // 版 2026-11-17c：宛名なし
   assert.equal(ymd(val(master, '90002', '有効期限')), '2029-04-30');
   assert.equal(val(master, '90002', '状態'), '登録済み');
 });

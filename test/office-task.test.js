@@ -132,12 +132,12 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   assert.match(replies(g, n)[0].body.messages[0].text, /押した方を確認できなかった/);
   n = g.fetches.length;
   post(g, pb(OTHER, btnData(second, '対応します'), 'e2'));                               // ほかの従業員が担当に
-  assert.match(replies(g, n)[0].body.messages[0].text, /「領収書」は見本さんの担当にしました/);
+  assert.match(replies(g, n)[0].body.messages[0].text, /「社労士へ送る」は見本さんの担当にしました/);
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));
   const rp = replies(g, n)[0].body.messages;
   assert.match(rp[0].text, /試験さん、ありがとうございます！「朝の確認」を完了にしました/);
-  assert.ok(!/次は「領収書」/.test(rp[0].text));                                       // 見本さんが担当の仕事は次に勧めない
+  assert.ok(!/次は「社労士へ送る」/.test(rp[0].text));                                       // 見本さんが担当の仕事は次に勧めない
   const undo = rp[1].contents.body.contents[0].action.data;
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));                                      // 同じイベントは1回だけ
   n = g.fetches.length;
@@ -182,7 +182,7 @@ test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当
   const r = replies(g, n)[0].body.messages;
   assert.match(r[0].text, /【まだ終わっていないお仕事】/);
   assert.ok(!/朝の確認/.test(r[0].text));
-  assert.match(r[0].text, /領収書（期限を過ぎています）　担当：見本さん/);
+  assert.match(r[0].text, /社労士へ送る（期限を過ぎています）　担当：見本さん/);
   assert.match(r[0].text, /担当：未定/);
   assert.equal(r[1].type, 'flex');
   n = g.fetches.length;
@@ -209,4 +209,21 @@ test('事務の業務一覧: 「部門登録 事務業務」でグループを�
   post(g, msg(ADMIN, '部門登録 事務業務', 'r1', NEW));
   assert.match(replies(g, n)[0].body.messages[0].text, /「事務業務」のグループとして登録しました[\s\S]*今日のお仕事/);
   assert.ok(master.getSheetByName('LINEグループ').dump().some((r) => r[0] === NEW && r[1] === '事務業務'));
+});
+
+test('事務の業務一覧: AI化の順番の「稼働の確認」を毎朝スクリプトの設定で確かめる（設定が違えば未確認＝人への指示を続ける）', () => {
+  const { g, book } = setup({ OFFICE_TASK_MODE: 'record', WEEKLY_PUNCH_NOTIFY: 'on', X_MODE: 'record' });
+  const X = g.ctx;
+  assert.equal(X.OT_checkSetting('', {}), null);
+  assert.equal(X.OT_checkSetting('WEEKLY_PUNCH_NOTIFY=on', { WEEKLY_PUNCH_NOTIFY: 'on' }), true);
+  assert.equal(X.OT_checkSetting('A=on&B=record', { A: 'on', B: 'on' }), false);
+  assert.equal(X.OT_checkSetting('こわれた設定', {}), false);
+  const o = book.insertSheet('AI化の順番（まゆさん用）');
+  [['順番（入れ替えOK）', 'ID', '業務名', '状況', '稼働の確認（設定・Claudeが入れる）', '稼働の確認（結果・毎朝自動）'],
+    [2, 'M05', '勤怠締め', '一部AI', 'WEEKLY_PUNCH_NOTIFY=on', ''], [1, 'M04', '交通費の確認', 'AI化済み', 'X_MODE=on', ''], [3, 'M01', '朝の確認', 'やらない（人の手）', '', '']].forEach((r) => o.appendRow(r));
+  g.ctx.OT_morning();
+  const v = o.dump();
+  assert.match(String(v[1][5]), /^確認済み/);
+  assert.match(String(v[2][5]), /^未確認.*設定が違います/);
+  assert.equal(v[3][5], '（設定なし）');
 });

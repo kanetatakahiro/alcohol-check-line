@@ -19,9 +19,10 @@
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
  * 毎朝・30分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-17b';
+var OT_VERSION = '2026-11-17c';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
-var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）
+var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
+var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
 var OT_MANUAL_SHEET = '業務マニュアル';
 var OT_REQUEST_SHEET = '臨時の依頼';
 var OT_LOG_SHEET = '今日の仕事の記録';
@@ -30,10 +31,10 @@ var OT_REQUEST_HEADER = ['依頼日', '業務ID（業務マニュアル）', '�
 var OT_LOG_HEADER = ['日時', '日付', '期間', '業務ID', '業務名', '操作', '押した人', 'メモ', 'LINEユーザーID'];
 var OT_PLAN_HEADER = ['日時', '日付', '勤務時間', '件数', '合計（分）', '内容'];
 var OT_RULE_HEADER = 'AI用の予定ルール';
-var OT_DEFAULT_RULES = { M01: 'daily', M02: 'daily', M03: 'weekly:5', M04: 'monthly:1~3', M05: 'monthly:-2~3', M06: 'monthly:10~15',
+var OT_DEFAULT_RULES = { M01: 'daily', M02: 'daily', M03: 'weekly:5', M04: 'monthly:1~3', M05: 'monthly:-2~3', M06: 'monthly:5~10',
   M07: 'monthly:13~20', M08: 'monthly:-2~5', M09: 'monthly:23~25', M10: 'daily', M11: 'monthly:1~5', M12: 'request', M13: 'request',
   M14: 'request', M15: 'request', M16: 'request', M17: 'request', M18: 'yearly:11/1~12/20', M19: 'request', M20: 'request',
-  M21: 'reserve', M22: 'spare' };
+  M21: 'reserve', M22: 'spare', M23: 'yearly:6/1~6/20', M24: 'yearly:11/1~11/20' };
 var OT_FILL_RATE = 0.8;            // 勤務時間のうち、仕事を入れる割合（残りは電話・来客などの予備）
 var OT_DEFAULT_MINUTES = 360;      // 勤務時間が読めなかったときの目安
 var OT_EARLY_DAYS = 7;             // 期間の始まる何日前から前倒しの候補にするか
@@ -233,6 +234,16 @@ function OT_doneFromLog(rows) {
   return { done: done, doneBy: doneBy, owner: owner, byDay: byDay };
 }
 
+/** 純粋関数：稼働の確認の設定（例「WEEKLY_PUNCH_NOTIFY=on」「A=on&B=record」）を、スクリプトプロパティ props（{名前: 値}）で確かめる。設定なし＝null */
+function OT_checkSetting(setting, props) {
+  var t = String(setting || '').trim();
+  if (!t) return null;
+  return t.split(/[&＆]/).every(function (part) {
+    var m = /^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/.exec(part);
+    return !!m && String(props[m[1]] == null ? '' : props[m[1]]).trim() === m[2];
+  });
+}
+
 /** 純粋関数：シートの値を文字に（先頭の「'」を外す。日付になっていたら日本時間の YYYY-MM-DD） */
 function OT_cell(v) {
   if (v instanceof Date || (v && typeof v.getTime === 'function' && typeof v.toISOString === 'function')) return new Date(v.getTime() + 9 * 3600000).toISOString().slice(0, 10);
@@ -295,7 +306,8 @@ function OT_tasks_(ss) {
   var v = sh.getDataRange().getValues(), h = v[0].map(function (x) { return String(x).trim(); });
   var c = function (name) { return h.indexOf(name); };
   var col = { id: c('ID'), name: c('業務名'), minutes: c('目安（分）'), early: c('前倒しできる'), steps: c('やり方（手順）'), items: c('必要な物・リンク'),
-    tips: c('コツ・注意'), help: c('困ったとき・判断が必要なとき'), report: c('完了の報告'), ok: c('任せる（○／×）'), rule: c(OT_RULE_HEADER), ai: c(OT_AI_HEADER) };
+    tips: c('コツ・注意'), help: c('困ったとき・判断が必要なとき'), report: c('完了の報告'), ok: c('任せる（○／×）'), rule: c(OT_RULE_HEADER),
+    ai: h.findIndex(function (x) { return x.indexOf(OT_AI_HEADER) === 0; }) };
   var out = [];
   for (var i = 1; i < v.length; i++) {
     var r = v[i], id = String(r[col.id] || '').trim();
@@ -395,12 +407,29 @@ function OT_remaining_(ss, date, info) {
   return out;
 }
 
+/** AI化の順番のタブの「稼働の確認（結果）」を、スクリプトプロパティで確かめて書き直す（毎朝）。業務マニュアルの「AI化の状況」は式でこれを見る */
+function OT_syncAiStatus_(ss, today) {
+  var sh = ss.getSheetByName(OT_ORDER_SHEET);
+  if (!sh) return 0;
+  var v = sh.getDataRange().getValues(), h = v[0].map(String);
+  var cs = h.findIndex(function (x) { return x.indexOf('稼働の確認（設定') === 0; }), cr = h.findIndex(function (x) { return x.indexOf('稼働の確認（結果') === 0; });
+  if (cs < 0 || cr < 0) return 0;
+  var props = OT_props_().getProperties(), n = 0;
+  for (var i = 1; i < v.length; i++) {
+    var ok = OT_checkSetting(v[i][cs], props);
+    var text = ok === null ? '（設定なし）' : ok ? '確認済み（' + OT_md(today) + '）' : '未確認（' + OT_md(today) + '：設定が違います）';
+    if (String(v[i][cr]) !== text) { sh.getRange(i + 1, cr + 1).setValue(text); n++; }
+  }
+  return n;
+}
+
 /** 毎朝8時（トリガー） */
 function OT_morning() {
   var mode = OT_mode_();
   if (mode === 'off') return;
   try {
     var today = AC_today_(), ss = OT_book_(), staff = OT_staff_(), st = OT_todayShift_(staff, today);
+    try { if (OT_syncAiStatus_(ss, today)) SpreadsheetApp.flush(); } catch (e0) { Logger.log('AI化の状況の確認に失敗（人への指示はそのまま続けます）'); }
     var log = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues(), info = OT_doneFromLog(log);
     var offDay = st.found && !st.shift;
     var plan = OT_plan(OT_tasks_(ss), today, st.shift ? st.shift.minutes : OT_DEFAULT_MINUTES, info.done, OT_requests_(ss));
@@ -556,7 +585,7 @@ function OT_onGroupPostback_(ev) {
 function OT_setup() {
   var ss = OT_book_(), sh = ss.getSheetByName(OT_MANUAL_SHEET);
   [[OT_RULE_HEADER, function (id) { return OT_DEFAULT_RULES[id] || ''; }], [OT_AI_HEADER, function () { return '人の手'; }]].forEach(function (pair) {
-    var v = sh.getDataRange().getValues(), h = v[0].map(String), c = h.indexOf(pair[0]);
+    var v = sh.getDataRange().getValues(), h = v[0].map(String), c = h.findIndex(function (x) { return x.indexOf(pair[0]) === 0; });
     if (c < 0) { c = h.length; sh.getRange(1, c + 1).setValue(pair[0]).setFontWeight('bold'); }
     for (var i = 1; i < v.length; i++) {
       var id = String(v[i][0] || '').trim(), dflt = pair[1](id);

@@ -1,5 +1,5 @@
 /**
- * 運転免許証の有効期限の管理（版 2026-11-16b・仕様と運用は docs/LICENSE_MANAGEMENT.md）
+ * 運転免許証の有効期限の管理（版 2026-11-16c・仕様と運用は docs/LICENSE_MANAGEMENT.md）
  *
  * - 従業員マスタのファイルに「免許証管理」タブを作り、社員番号ごとに免許の有無・有効期限・状態を持つ（従業員マスタ本体の A〜N 列は変更しない）
  * - 毎朝（licenseDaily）：在籍者をタブに足す／免許の有無が空欄の人の一覧／登録のお願い・催促／期限の30日前・7日前・当日・期限切れのお知らせ
@@ -8,10 +8,13 @@
  * - 動作モード LICENSE_MODE：未設定・off＝何もしない／record＝送る予定の文を「免許証お知らせ記録」に書くだけ（LINE は送らない・受け口も今までどおり。
  *   同じ人・同じ期限・同じ段階は1回だけ記録し、「記録済み」の列で管理）／
  *   on＝送る（DRY_RUN が false のときだけ。それ以外は record と同じ）
+ * - 送る範囲 LICENSE_SCOPE（版 2026-11-16c）：未設定＝全員。所属名（例「管理本部」）なら、本人あての案内と、グループ・管理者への一覧は
+ *   従業員マスタの所属がその名前の人だけ。範囲外の人は「記録のみ」（送らない・送信記録にも記録済みにも付けない＝範囲を外すと改めて送る）。
+ *   LINE の受け口（「免許更新」・写真・ボタン）は範囲で制限しない。人数の確認は licenseScopePreview（送信なし・社員番号と人数だけをログへ）
  * - お知らせ設定（SAF-01）の「受け取らない」は適用しない（安全に関わるため全員必須）
  * - 写真・有効期限・氏名はログ（Logger）に書かない
  */
-var LIC_VERSION = '2026-11-16b';
+var LIC_VERSION = '2026-11-16c';
 var LIC_SHEET = '免許証管理';
 // 「送信記録」は実際に送ったもの（on）、「記録済み」は送らずに記録したもの（record・DRY_RUN）。同じ人・同じ期限・同じ段階をそれぞれ1回だけにする
 var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考'];
@@ -115,7 +118,7 @@ function LIC_rows(values, col) {
 }
 
 /**
- * 純粋関数：従業員マスタから、社員番号 → { code, name, userId }（在籍者だけ。退職・退職日を過ぎた人は入れない）。
+ * 純粋関数：従業員マスタから、社員番号 → { code, name, dept, userId }（在籍者だけ。退職・退職日を過ぎた人は入れない）。
  * userId は「LINE確認済み」で、同じ LINE ID の行がほかに無いときだけ（それ以外は ''＝LINE未登録として扱う）
  */
 function LIC_people(masterValues, today) {
@@ -129,7 +132,7 @@ function LIC_people(masterValues, today) {
     if (!code || out[code]) continue;
     if (String(r[AC_COL.status] || '').trim() === '退職' || AC_isRetired(r[AC_COL.retiredOn], today)) continue;
     var uid = String(r[AC_COL.userId] || '').trim();
-    out[code] = { code: code, name: String(r[AC_COL.name] || '').trim(),
+    out[code] = { code: code, name: String(r[AC_COL.name] || '').trim(), dept: String(r[AC_COL.dept] || '').trim(),
       userId: AC_isUserId(uid) && r[AC_COL.lineOk] === true && uidCount[uid] === 1 ? uid : '' };
   }
   return out;
@@ -233,9 +236,10 @@ function LIC_groupText(kind, list) {
 /**
  * 純粋関数：毎朝の処理の計画。people：LIC_people、rows：LIC_rows、only：'reg' なら登録まわりだけ（licenseRegisterSend）、
  * recordOnly：送らずに記録するとき（record・DRY_RUN）は「記録済み」の列で、送るときは「送信記録」の列で、済んだものを判定する
- * 戻り値 { add: [person], states: [{i, state}], self: [{row, kind, mark:{label,key}, marks}], groups: {ask, noline, noreg, over: [{row, ...}]} }
+ * scope：送る範囲の所属名（'' なら全員）。範囲外の人は本人あてを out: true（記録のみ・marks なし）にし、グループへの一覧には入れない
+ * 戻り値 { add: [person], states: [{i, state}], self: [{row, kind, mark:{label,key}, marks, out}], groups: {ask, noline, noreg, over: [{row, ...}]} }
  */
-function LIC_plan(people, rows, today, only, recordOnly) {
+function LIC_plan(people, rows, today, only, recordOnly, scope) {
   var plan = { add: [], states: [], self: [], groups: { ask: [], noline: [], noreg: [], over: [] } };
   var inTab = {};
   rows.forEach(function (r) { inTab[r.code] = true; });
@@ -245,6 +249,15 @@ function LIC_plan(people, rows, today, only, recordOnly) {
     if (st !== r.state) plan.states.push({ i: r.i, state: st });
     if (retired || r.has === 'なし') return;
     var who = { row: r, code: r.code, name: (p && p.name) || r.name, exp: r.exp, userId: p.userId };
+    var inScope = LIC_inScope(p, scope);
+    if (!inScope) {   // 範囲外：本人あては「記録のみ」（out）。グループ・管理者への一覧には入れない。送信記録と記録済みの列は見ない・付けない
+      if (r.has === '' || r.exp === null || !p.userId) return;
+      if (r.exp === '') { plan.self.push({ who: who, kind: 'req', out: true, marks: [] }); return; }
+      if (only === 'reg') return;
+      var so = LIC_stage(r.exp, today);
+      if (so.stage) plan.self.push({ who: who, kind: so.stage, days: so.days, out: true, marks: [] });
+      return;
+    }
     if (r.has === '') { if (!LIC_logHas(log, '有無の確認')) plan.groups.ask.push(who); return; }
     if (r.exp === null) return;   // 有効期限が日付として読めない：状態「要確認」だけ（管理本部が直す）
     var noLine = function () { if (!LIC_logHas(log, 'LINE未登録')) plan.groups.noline.push(who); };
@@ -272,6 +285,11 @@ function LIC_plan(people, rows, today, only, recordOnly) {
   });
   return plan;
 }
+/** 純粋関数：送る範囲の値（前後の空白を除く。空なら ''＝全員） */
+function LIC_scopeValue(v) { return String(v == null ? '' : v).replace(/^[\s　]+|[\s　]+$/g, ''); }
+/** 純粋関数：その人が送る範囲に入るか（範囲が '' なら全員。所属は従業員マスタの値の前後の空白を除いて、完全に一致するときだけ） */
+function LIC_inScope(person, scope) { return !scope || (!!person && LIC_scopeValue(person.dept) === scope); }
+
 var LIC_GROUP_MARK = { ask: ['有無の確認', false], noline: ['LINE未登録', false], noreg: ['登録なしの一覧', false], over: ['期限切れの一覧', true] };
 
 // ---------------- 設定・シート ----------------
@@ -280,6 +298,7 @@ function LIC_mode_() {
   var m = String(LIC_props_().getProperty('LICENSE_MODE') || '').trim();
   return m === 'on' || m === 'record' ? m : 'off';
 }
+function LIC_scope_() { return LIC_scopeValue(LIC_props_().getProperty('LICENSE_SCOPE')); }
 
 /** 「免許証管理」タブ（無ければ作る）。見出しが足りなければ右端に足す（並べ替え・ほかの列はそのまま） */
 function LIC_tab_(ss) {
@@ -348,16 +367,16 @@ function licenseRegisterSend() { return LIC_run_('reg'); }
 function LIC_run_(only) {
   var mode = LIC_mode_();
   if (mode === 'off') { Logger.log('免許証：LICENSE_MODE が未設定・off のため何もしません'); return { mode: mode }; }
-  var props = LIC_props_(), live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
+  var props = LIC_props_(), live = mode === 'on' && props.getProperty('DRY_RUN') === 'false', scope = LIC_scope_();
   var today = AC_today_(), now = new Date();
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  var res = { mode: mode, live: live, added: 0, self: 0, failed: 0, groups: 0 };
+  var res = { mode: mode, live: live, scope: scope, added: 0, self: 0, failed: 0, groups: 0, outScope: 0 };
   try {
     var master = AC_masterSheet_(), ss = master.getParent(), mv = master.getDataRange().getValues();
     var people = LIC_people(mv, today), t = LIC_tab_(ss);
     var rows = LIC_rows(t.sh.getDataRange().getValues(), t.col);
-    var plan = LIC_plan(people, rows, today, only, !live);
+    var plan = LIC_plan(people, rows, today, only, !live, scope);
     if (plan.add.length) {   // 在籍者でタブにいない人を足す（免許の有無は空欄）
       var add = plan.add.map(function (p) {
         var r = []; for (var k = 0; k < t.width; k++) r.push('');
@@ -367,13 +386,18 @@ function LIC_run_(only) {
       t.sh.getRange(t.sh.getLastRow() + 1, 1, add.length, t.width).setValues(add);
       res.added = add.length;
       rows = LIC_rows(t.sh.getDataRange().getValues(), t.col);
-      plan = LIC_plan(people, rows, today, only, !live);
+      plan = LIC_plan(people, rows, today, only, !live, scope);
     }
     plan.states.forEach(function (s) { LIC_cell_(t, s.i, 'state', s.state); });
     var logs = {}, rec = [], nlog = [];
     var mark = function (row, label, key) { logs[row.i] = LIC_logAdd(logs[row.i] !== undefined ? logs[row.i] : live ? row.log : row.rec, label, key, today); };
     plan.self.forEach(function (s) {
       var msg = LIC_selfMessage(s.kind, s.who.name, s.who.exp, s.days), text = msg.contents.body.contents[0].text, ok = false;
+      if (s.out) {   // 範囲外：送らない・印も付けない（範囲を外したときに改めて送るため）
+        res.outScope++;
+        rec.push([now, mode, s.kind, '本人', "'" + s.who.code, text, '記録のみ（範囲外・送信なし）']);
+        return;
+      }
       if (live) {
         try { ok = LIC_push_(s.who.userId, [msg]); } catch (e) { ok = false; }
         if (ok) { s.marks.forEach(function (m) { mark(s.who.row, m[0], m[1]); }); res.self++; } else res.failed++;
@@ -398,7 +422,36 @@ function LIC_run_(only) {
     LIC_record_(ss, rec);
     if (nlog.length) AC_noticeLog_(nlog);
   } finally { lock.releaseLock(); }
-  Logger.log('免許証（%s）：追加 %s人／本人へ %s件（失敗 %s件）／一覧 %s件', mode + (live ? '' : '・送信なし'), res.added, res.self, res.failed, res.groups);
+  Logger.log('免許証（%s）：追加 %s人／本人へ %s件（失敗 %s件）／一覧 %s件／範囲外で記録のみ %s件', mode + (live ? '' : '・送信なし') + (scope ? '・範囲 ' + scope : ''),
+    res.added, res.self, res.failed, res.groups, res.outScope);
+  return res;
+}
+
+/**
+ * 手動実行：送る範囲（LICENSE_SCOPE）の確認。送信なし・シートも変えない。ログには範囲・人数・社員番号だけを出す（氏名・LINE ID は出さない）
+ * 戻り値 { scope, known, inScope: [社員番号], noLine: [社員番号], req: [社員番号], outScope: 人数 }
+ */
+function licenseScopePreview() {
+  var scope = LIC_scope_(), today = AC_today_();
+  var master = AC_masterSheet_(), ss = master.getParent(), mv = master.getDataRange().getValues();
+  var people = LIC_people(mv, today), codes = Object.keys(people);
+  var inScope = codes.filter(function (c) { return LIC_inScope(people[c], scope); });
+  var res = { scope: scope, known: !scope || AC_deptNames(mv).indexOf(scope) !== -1, inScope: inScope,
+    noLine: inScope.filter(function (c) { return !people[c].userId; }), req: [], outScope: codes.length - inScope.length };
+  var sh = ss.getSheetByName(LIC_SHEET);
+  if (sh) {   // 今 on にして licenseRegisterSend を実行したら「登録のお願い」が届く人（送信記録で判定）
+    var c = LIC_cols(sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0]);
+    if (!c.missing.length) {
+      LIC_plan(people, LIC_rows(sh.getDataRange().getValues(), c.col), today, 'reg', false, scope).self.forEach(function (s) {
+        if (!s.out && s.kind === 'req') res.req.push(s.who.code);
+      });
+    }
+  }
+  Logger.log('免許証の送る範囲（版 %s）：%s', LIC_VERSION, scope ? '所属「' + scope + '」' + (res.known ? '' : '（従業員マスタの在籍者にこの所属がありません。綴りを確認してください）') : '未設定（全員）');
+  Logger.log('範囲内の在籍者 %s人：%s', inScope.length, inScope.join(', ') || 'なし');
+  Logger.log('うち LINE 未登録 %s人：%s', res.noLine.length, res.noLine.join(', ') || 'なし');
+  Logger.log('今 licenseRegisterSend を実行すると「登録のお願い」が届く人（LICENSE_MODE=on・DRY_RUN=false のとき） %s人：%s', res.req.length, res.req.join(', ') || 'なし');
+  Logger.log('範囲外の在籍者 %s人（送らずに記録のみ）', res.outScope);
   return res;
 }
 

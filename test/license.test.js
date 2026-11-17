@@ -4,13 +4,13 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { createGas } from './helpers/gas-mock.js';
 
-// 運転免許証の有効期限の管理（gas/License.gs・版 2026-11-16b）。すべて架空の社員番号・LINE ID・模擬環境（LINE には送らない・写真の中身は持たない）
+// 運転免許証の有効期限の管理（gas/License.gs・版 2026-11-16c）。すべて架空の社員番号・LINE ID・模擬環境（LINE には送らない・写真の中身は持たない）
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
 const ADMIN = U(7), GROUP = 'C' + 'a'.repeat(32), FOLDER = 'folder-license';
 const HEAD = ['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み',
   'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日'];
-const row = (code, name, userId, { status = '在籍', lineOk = true, retiredOn = '' } = {}) =>
-  ["'" + code, name, '', status, '部署A', userId, '', '', lineOk, true, '', '', '', retiredOn];
+const row = (code, name, userId, { status = '在籍', lineOk = true, retiredOn = '', dept = '部署A' } = {}) =>
+  ["'" + code, name, '', status, dept, userId, '', '', lineOk, true, '', '', '', retiredOn];
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs'];
 
 function setup(props = { LICENSE_MODE: 'on' }, { now = '2026-11-16T09:10:00+09:00', files = FILES } = {}) {
@@ -453,4 +453,113 @@ test('免許証: お知らせ設定の SAF-01 列は残し、「お知らせ種�
   assert.match(saf[6], /^全員必須（安全に関わるため）。この列のチェックでは止まらない/);
   assert.ok(!g.ctx.AC_CRITICAL_NOTICES.some((c) => /免許/.test(c.name)));
   assert.equal(master.getSheetByName('お知らせ種類').dump().find((r) => r[0] === 'SAF-02')[5], '止められる');   // ほかは今までどおり
+});
+
+// ---------------- 送る範囲 LICENSE_SCOPE（版 2026-11-16c） ----------------
+/** 90001・90003 を管理本部に（90003 は LINE 未登録）。90002・90005 は部署A のまま */
+function scoped(props) {
+  const s = setup({ LICENSE_MODE: 'on', ...props });
+  const m = s.master.getSheetByName('従業員マスタ');
+  const h = m.dump()[0], i = m.dump().findIndex((r) => r[0] === "'90001" || String(r[0]) === '90001');
+  ['90001', '90003'].forEach((c) => { const k = m.dump().findIndex((r) => String(r[0]).replace(/^'/, '') === c); m.getRange(k + 1, h.indexOf('所属・拠点') + 1).setValue(c === '90001' ? '管理本部' : ' 管理本部 '); });
+  assert.ok(i > 0);
+  s.g.ctx.licenseSetup();
+  ['90001', '90002', '90003', '90005'].forEach((c) => set(s.master, c, '免許の有無', 'あり'));
+  set(s.master, '90005', '有効期限', '2026-12-16');   // 30日前
+  return s;
+}
+const recRows = (master) => master.getSheetByName('免許証お知らせ記録').dump().slice(1).map((r) => [r[2], String(r[4] || ''), r[6]].join(':'));
+
+test('免許証（範囲）: LICENSE_SCOPE=管理本部 なら、範囲内だけ送り、範囲外は記録のみ（送信記録にも記録済みにも付けない）。一覧も範囲内の人だけ', () => {
+  const { g, master } = scoped({ LICENSE_SCOPE: '管理本部' });
+  let n = g.fetches.length;
+  const r = g.ctx.licenseDaily();
+  assert.equal(r.scope, '管理本部');
+  assert.equal(r.outScope, 2);
+  let { push } = since(g, n);
+  assert.deepEqual(push.map((p) => p.body.to).sort(), [U(1), GROUP].sort());   // 一郎：登録のお願い／三郎（管理本部・LINE 未登録）：グループへ一覧
+  const grp = push.find((p) => p.body.to === GROUP).body.messages[0].text;
+  assert.match(grp, /（1名）\n・90003 試験 三郎\n/);
+  assert.deepEqual(recRows(master), ['req:90001:送信済み', 'req:90002:記録のみ（範囲外・送信なし）', 'd30:90005:記録のみ（範囲外・送信なし）', 'noline::送信済み']);
+  assert.equal(String(val(master, '90001', '送信記録')), '登録のお願い - 2026-11-16');
+  for (const c of ['90002', '90005']) { assert.equal(String(val(master, c, '送信記録')), ''); assert.equal(String(val(master, c, '記録済み')), ''); }
+  assert.ok(!g.logs.some((l) => /試験/.test(l)));   // 氏名はログに出さない
+  // 次の朝：範囲内は1回だけ。範囲外は印が無いので毎朝「記録のみ」の行が増える（送らない）
+  day(g, '2026-11-17');
+  n = g.fetches.length;
+  const k = recRows(master).length;
+  g.ctx.licenseDaily();
+  assert.equal(since(g, n).push.length, 0);
+  assert.deepEqual(recRows(master).slice(k), ['req:90002:記録のみ（範囲外・送信なし）', 'd30:90005:記録のみ（範囲外・送信なし）']);
+  // 3日後の催促も範囲内だけ。10日後のグループへの一覧も範囲内の人だけ
+  day(g, '2026-11-19'); n = g.fetches.length; g.ctx.licenseDaily();
+  assert.deepEqual(since(g, n).push.map((p) => p.body.to), [U(1)]);
+  day(g, '2026-11-23'); n = g.fetches.length; g.ctx.licenseDaily();
+  assert.deepEqual(since(g, n).push.map((p) => p.body.to), [U(1)]);
+  day(g, '2026-11-26'); n = g.fetches.length; g.ctx.licenseDaily();
+  push = since(g, n).push;
+  assert.equal(push.length, 1);
+  assert.equal(push[0].body.to, GROUP);
+  assert.match(push[0].body.messages[0].text, /（1名）\n・90001 試験 一郎\n/);
+});
+
+test('免許証（範囲）: 範囲を外す（空にする）と、範囲外だった人にお願い・期限の案内が送られる。範囲内の人には二重に送らない', () => {
+  const { g, master } = scoped({ LICENSE_SCOPE: '管理本部' });
+  g.ctx.licenseDaily();
+  day(g, '2026-11-17');
+  g.ctx.licenseDaily();
+  g.scriptProps.setProperty('LICENSE_SCOPE', '');
+  day(g, '2026-11-18');
+  const n = g.fetches.length;
+  const r = g.ctx.licenseDaily();
+  assert.equal(r.scope, '');
+  assert.equal(r.outScope, 0);
+  const push = since(g, n).push;
+  assert.deepEqual(push.map((p) => p.body.to).sort(), [U(2), U(5)].sort());
+  assert.match(textOf(push.find((p) => p.body.to === U(2)).body.messages[0]), /免許証の登録をお願いいたします/);
+  assert.match(textOf(push.find((p) => p.body.to === U(5)).body.messages[0]), /あと28日になりました/);
+  assert.equal(String(val(master, '90002', '送信記録')), '登録のお願い - 2026-11-18');
+  assert.equal(String(val(master, '90001', '送信記録')), '登録のお願い - 2026-11-16');
+});
+
+test('免許証（範囲）: licenseRegisterSend も範囲内だけ。record のときも範囲外は記録済みにしない', () => {
+  const { g, master } = scoped({ LICENSE_SCOPE: '管理本部' });
+  const n = g.fetches.length;
+  g.ctx.licenseRegisterSend();
+  assert.deepEqual(since(g, n).push.map((p) => p.body.to).sort(), [U(1), GROUP].sort());
+  assert.ok(!recRows(master).some((x) => /^d30/.test(x)));   // 期限のお知らせは扱わない
+  const b = scoped({ LICENSE_SCOPE: '管理本部', LICENSE_MODE: 'record' });
+  const m = b.g.fetches.length;
+  b.g.ctx.licenseDaily();
+  assert.equal(b.g.fetches.length, m);
+  assert.equal(String(val(b.master, '90001', '記録済み')), '登録のお願い - 2026-11-16');
+  assert.equal(String(val(b.master, '90002', '記録済み')), '');
+  assert.equal(String(val(b.master, '90005', '記録済み')), '');
+});
+
+test('免許証（範囲）: licenseScopePreview は送信せず、シートも変えず、範囲・人数・社員番号だけをログに出す（氏名・LINE ID は出さない）', () => {
+  const { g, master } = scoped({ LICENSE_SCOPE: ' 管理本部　' });
+  const before = JSON.stringify(master.getSheets().map((s) => s.dump()));
+  const n = g.fetches.length, l = g.logs.length;
+  const r = g.ctx.licenseScopePreview();
+  assert.equal(g.fetches.length, n);
+  assert.equal(JSON.stringify(master.getSheets().map((s) => s.dump())), before);
+  assert.equal(r.scope, '管理本部');
+  assert.equal(r.known, true);
+  assert.deepEqual([...r.inScope], ['90001', '90003']);
+  assert.deepEqual([...r.noLine], ['90003']);
+  assert.deepEqual([...r.req], ['90001']);
+  assert.equal(r.outScope, 2);
+  const out = g.logs.slice(l).join('\n');
+  assert.match(out, /範囲内の在籍者 %s人：%s 2 90001, 90003/);   // 模擬の Logger は %s を置き換えずに後ろへ並べる
+  assert.ok(!/試験|U1{10}/.test(out));
+  // 綴りが違うときは 0人で、注意を出す
+  g.scriptProps.setProperty('LICENSE_SCOPE', '管理部');
+  const w = g.ctx.licenseScopePreview();
+  assert.equal(w.known, false);
+  assert.equal(w.inScope.length, 0);
+  assert.match(g.logs.slice(-5).join('\n'), /この所属がありません/);
+  // 未設定なら全員
+  g.scriptProps.setProperty('LICENSE_SCOPE', '');
+  assert.equal(g.ctx.licenseScopePreview().inScope.length, 4);
 });

@@ -1,5 +1,13 @@
 # 変更履歴
 
+## 2026-11-17 版 2026-11-16c：免許証の送る範囲 LICENSE_SCOPE（ブランチ feature/notification-settings・**本番未導入**）
+- gas/License.gs のみ（指紋 `6c3f81e2a51c11f7` → `b33bd499ba218f75`、LIC_VERSION 2026-11-16c）。コード.gs・Notices.gs ほかは 16b のまま。受け口は変えていないので Webアプリの再公開は不要
+- スクリプトプロパティ LICENSE_SCOPE（未設定＝全員・今までどおり）。所属名（例「管理本部」）なら、本人あての案内とグループ・管理者への一覧は、従業員マスタの所属（E列・前後の空白を除いて完全一致）がその名前の人だけ。範囲外の人は「記録のみ（範囲外・送信なし）」で、送信記録・記録済みに印を付けない（範囲を外すと改めて送る。そのかわり記録の行は毎朝増える）。LINE の受け口は範囲で制限しない
+- 手動実行 licenseScopePreview（送信なし・シート変更なし）：範囲・範囲内の人数と社員番号・LINE 未登録・登録のお願いが届く人・範囲外の人数をログへ。氏名・LINE ID は出さない
+- 本番での手順（docs/LICENSE_MANAGEMENT.md 6-2）：License.gs を差し替え → LICENSE_SCOPE=管理本部 → licenseScopePreview で人数確認 → LICENSE_MODE=on → licenseRegisterSend。LICENSE_SCOPE を消すと全員に送られるので、止めるときは LICENSE_MODE を record か off にする
+- テスト：test/license.test.js に4件（全21件）。全336件成功
+- 本番（Apps Script・スクリプトプロパティ・トリガー・デプロイ）は変更していない。LINE は送っていない
+
 ## 2026-11-16 版 2026-11-16b：運転免許証の有効期限の管理（ブランチ feature/notification-settings・**本番未導入**）
 - 新しいファイル gas/License.gs（指紋 `6c3f81e2a51c11f7`）。仕様・調査の結果・反映と戻し方は docs/LICENSE_MANAGEMENT.md
 - 11/16 安藤さんの回答を反映：確認事項1〜4は提案どおり／5：record でも同じ人・同じ期限・同じ段階の記録は1回だけ（タブに「記録済み」の列を足し、送信記録とは別に管理）／6：SAF-01 の列は残し、gas/Notices.gs（指紋 `86be8f58ae778eb8`）の AC_NOTICES に「全員必須・この列では止まらない」の説明（mandatory）を付けた。「お知らせ種類」シートにも出る。CRIT には入れない／版 16a の、未対応の案件への追記は自動で閉じない判断はそのまま（了承済み）

@@ -20,7 +20,7 @@
  * - お知らせ設定（SAF-01）の「受け取らない」は適用しない（安全に関わるため全員必須）
  * - 写真・有効期限・氏名はログ（Logger）に書かない
  */
-var LIC_VERSION = '2026-11-18a';
+var LIC_VERSION = '2026-11-18b';
 var LIC_SHEET = '免許証管理';
 // 「送信記録」は実際に送ったもの（on）、「記録済み」は送らずに記録したもの（record・DRY_RUN）。同じ人・同じ期限・同じ段階をそれぞれ1回だけにする
 var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考', 'AI確認'];
@@ -49,9 +49,10 @@ var LIC_AI_REPLY_SEC = 45;                     // 受け取ってからこれよ
 var LIC_AI_RETRY_MAX = 2;                      // 同じ回で続けて読み取れなかったら、期限のボタンに切り替える回数
 var LIC_AI_PAST_DAYS = 365;                    // 読み取った期限が今日よりこれ以上前なら要確認
 var LIC_AI_FUTURE_YEARS = 10;                  // 読み取った期限が今日からこれ以上先なら要確認
+var LIC_BACK_DAYS = 14;                        // 表面だけ届いた日からこの日数のうちの「免許更新」は、裏面だけの受付にする（版 2026-11-18b）
 var LIC_AI_PROBLEMS = ['not_license', 'cutoff', 'glare', 'dark', 'blur'];   // 理由を1つ選ぶときの優先の順
 var LIC_AI_REASON = {
-  not_license: { reason: '運転免許証ではないように見える', tip: '運転免許証の表面を撮ってお送りください。' },
+  not_license: { reason: '運転免許証ではないように見える', tip: '運転免許証の{side}を撮ってお送りください。' },
   cutoff: { reason: '免許証の一部が写っていない', tip: '免許証の四隅がすべて入るように撮ってください。' },
   glare: { reason: '光が反射している', tip: '照明が映り込まないよう、少し角度を変えて撮ってください。' },
   dark: { reason: '暗い', tip: '明るい場所で撮ってください。' },
@@ -213,7 +214,9 @@ var LIC_TEXT = {
   d7: 'お疲れさまです。管理本部です。\n運転免許証の有効期限（{date}）まで、あと{days}日です。更新のご報告をまだ確認できていないため、ご案内いたしました。\nすでに更新がお済みでしたら、「免許更新」と送るか下のボタンを押して、新しい免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。',
   d0: 'お疲れさまです。管理本部です。\n運転免許証の有効期限は、本日（{date}）までです。\nすでに更新がお済みでしたら、「免許更新」と送るか下のボタンを押して、新しい免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。',
   over: 'お疲れさまです。管理本部です。\n運転免許証の有効期限（{date}）を過ぎましたが、更新のご報告をまだ確認できていません。\nすでに更新がお済みでしたら、「免許更新」と送って新しい免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。',
-  start: 'ありがとうございます。\n免許証の表面と裏面の写真を、このトークにお送りください（30分以内にお願いいたします）。\n有効期限の文字がはっきり写るように撮っていただけますと助かります。',
+  start: 'お疲れさまです。管理本部です。\n免許証をお手元にご用意ください。\n準備ができましたら、まず表面の写真をお送りください。\n有効期限の文字がはっきり写るように撮っていただけますと助かります（30分以内にお願いいたします）。',   // 版 2026-11-18b
+  startBack: 'お疲れさまです。管理本部です。\n免許証の裏面の写真を、このトークにお送りください（30分以内にお願いいたします）。',   // 版 2026-11-18b：表面だけ届いている人の「免許更新」
+  backRemind: '裏面の写真がまだ届いていません。お手すきの際に『免許更新』と送り、裏面の写真をお送りください。',   // 版 2026-11-18b：翌朝に1回
   photoReg: '写真を受け取りました。ありがとうございます。\n続けて、免許証に書かれている有効期限を、下のボタンから選んでください。',
   photoUpd: '写真を受け取りました。ありがとうございます。\n新しい免許証の有効期限を、下のボタンから選んでください。',
   thanksReg: 'お疲れさまです。管理本部です。\nご登録ありがとうございます。\n運転免許証の有効期限を{date}で記録しました。\n期限が近づきましたら、こちらから改めてご案内いたします。',
@@ -223,11 +226,12 @@ var LIC_TEXT = {
   badDate: '選ばれた日付（{date}）は今日より前のため、記録できませんでした。お手数ですが、もう一度下のボタンから選んでいただけますか。',
   photoMore: '{n}枚目の写真も保存しました。ありがとうございます。',
   // 版 2026-11-18a：AI の確認（LICENSE_AI_CHECK=on）
-  aiRetry: 'お疲れさまです。管理本部です。\nお送りいただいた写真は、{reason}ため、文字を読み取れませんでした。\n{tip}\nお手数ですが、もう一度お送りいただけますでしょうか。',
+  aiRetry: 'お疲れさまです。管理本部です。\nお送りいただいた写真は、{reason}ため、文字を読み取れませんでした。\n{tip}\nお手数ですが、もう一度{side}の写真をお送りいただけますでしょうか。',   // 版 2026-11-18b：その面の再送
   aiThanksReg: 'お疲れさまです。管理本部です。\nご登録ありがとうございます。\n運転免許証の有効期限を{date}で記録しました。\n日付が違う場合は、このトークでお知らせください。\n期限が近づきましたら、こちらから改めてご案内いたします。',
   aiThanksUpd: 'お疲れさまです。管理本部です。\n更新のご報告ありがとうございます。\n新しい有効期限を{date}で記録しました。\n日付が違う場合は、このトークでお知らせください。\n次の期限が近づきましたら、こちらから改めてご案内いたします。',
-  aiNeedBack: '続けて、免許証の裏面の写真もお送りください（10分以内にお願いいたします）。',
-  aiNeedFront: '裏面の写真を保存しました。ありがとうございます。\n続けて、免許証の表面の写真をお送りください。',
+  aiFrontOk: '表面の写真を確認しました。\n続けて、裏面の写真をお送りください。',   // 版 2026-11-18b：期限は記録し、お礼は裏面のあと
+  aiNeedFront: '裏面の写真を受け取りました。\n続けて、表面の写真をお送りください。',
+  aiBackThanks: 'お疲れさまです。管理本部です。\n裏面の写真を受け取りました。ありがとうございます。\n有効期限は{date}で記録しています。',   // 版 2026-11-18b：裏面だけの受付のお礼
   aiPickReg: '写真から有効期限を読み取れませんでした。\nお手数ですが、免許証に書かれている有効期限を、下のボタンから選んでください。',
   aiPickUpd: '写真から有効期限を読み取れませんでした。\nお手数ですが、新しい免許証の有効期限を、下のボタンから選んでください。',   // 版 2026-11-17a：同じ回の2枚目以降（期限のボタンは重ねて出さない）
   photoFail: '申し訳ありません。写真をうまく受け取れませんでした。お手数ですが、少し時間をおいて、もう一度写真をお送りいただけますか。',
@@ -253,7 +257,8 @@ function LIC_startAction(update) {
 
 /** 純粋関数：毎朝の本人あてのメッセージ（kind：req・rem・d30・d7・d0・over） */
 function LIC_selfMessage(kind, name, exp, days) {
-  var text = LIC_fill(LIC_TEXT[kind], { name: name, date: exp ? LIC_jpDate(exp) : '', days: days });
+  var text = LIC_fill(LIC_TEXT[kind === 'back' ? 'backRemind' : kind], { name: name, date: exp ? LIC_jpDate(exp) : '', days: days });
+  if (kind === 'back') return LIC_flex(text, []);   // 裏面のお願い（版 2026-11-18b）：ボタンなし（「免許更新」と送ってもらう）
   return LIC_flex(text, [LIC_startAction(kind !== 'req' && kind !== 'rem')]);
 }
 
@@ -334,6 +339,10 @@ function LIC_plan(people, rows, today, only, recordOnly, scope) {
       return;
     }
     if (only === 'reg') return;
+    // 版 2026-11-18b：表面だけ届いて裏面が届かない → 翌朝に1回だけ本人へ（期限は記録済みのまま）
+    if (LIC_backPending(r.log, r.exp, today) && !LIC_logHas(log, '裏面の催促', r.exp) && p.userId) {
+      plan.self.push({ who: who, kind: 'back', marks: [['裏面の催促', r.exp]] });
+    }
     var s = LIC_stage(r.exp, today);
     if (!s.stage) return;
     if (s.stage === 'over' && !LIC_logHas(log, '期限切れの一覧', r.exp)) plan.groups.over.push(who);
@@ -342,6 +351,16 @@ function LIC_plan(people, rows, today, only, recordOnly, scope) {
     plan.self.push({ who: who, kind: s.stage, days: s.days, marks: [[LIC_STAGE_LABEL[s.stage], r.exp]] });
   });
   return plan;
+}
+/**
+ * 純粋関数：表面だけ届いて裏面がまだか（版 2026-11-18b）。送信記録の列の「裏面待ち 期限 日付」があり、同じ期限の「裏面受領」がなく、その日付が今日より前。
+ * withinDays を渡すと、その日数のうちか（「免許更新」を裏面だけの受付にするとき。今日も含む）
+ */
+function LIC_backPending(logText, exp, today, withinDays) {
+  if (!exp) return false;
+  var log = LIC_parseLog(logText), w = log.filter(function (e) { return e.label === '裏面待ち' && e.key === exp; }).pop();
+  if (!w || LIC_logHas(log, '裏面受領', exp)) return false;
+  return withinDays ? LIC_daysBetween(w.at, today) <= withinDays : w.at < today;
 }
 /** 純粋関数：送る範囲の値（前後の空白を除く。空なら ''＝全員） */
 function LIC_scopeValue(v) { return String(v == null ? '' : v).replace(/^[\s　]+|[\s　]+$/g, ''); }
@@ -630,9 +649,17 @@ function LIC_onStart_(ev, uid, fromButton) {
     LIC_replyText_(ev.replyToken, LIC_TEXT.notTarget);
     return true;
   }
-  LIC_cachePut_('lic:wait:' + uid, { code: x.person.code, sid: LIC_newId_(), at: Date.now(), files: [] }, LIC_PENDING_SEC);   // 新しい回
+  var w = { code: x.person.code, sid: LIC_newId_(), at: Date.now(), files: [], base: x.row.exp || '' };   // 新しい回（base＝始めたときの期限。版 2026-11-18b）
+  // 版 2026-11-18b：表面だけ届いている人（AI 確認 on）は、裏面だけを受け付ける。前の回の写真は消さない（続きの番号で保存）
+  var backOnly = LIC_aiMode_() === 'on' && LIC_backPending(x.row.log, x.row.exp, x.today, LIC_BACK_DAYS);
+  if (backOnly) {
+    var vals = x.tab.sh.getRange(x.row.i + 1, x.tab.col.file + 1).getValue();
+    w.files = String(vals || '').split(',').map(function (v) { return v.trim(); }).filter(Boolean);
+    w.backOnly = true; w.done = x.row.exp; w.front = true;
+  }
+  LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC);
   LIC_cacheDel_('lic:date:' + uid);
-  LIC_replyText_(ev.replyToken, LIC_TEXT.start);
+  LIC_replyText_(ev.replyToken, backOnly ? LIC_TEXT.startBack : LIC_TEXT.start);
   return true;
 }
 
@@ -653,7 +680,7 @@ function LIC_onPhoto_(ev, uid, waiting) {
   if (aiMode !== 'off') {
     LIC_loading_(uid);
     ai = LIC_aiCheck_(blob);
-    if (ai.res) judge = LIC_aiJudge(ai.res, x.today, x.row.exp || '');
+    if (ai.res) judge = LIC_aiJudge(ai.res, x.today, waiting.base !== undefined && !waiting.backOnly ? waiting.base : x.row.exp || '');
   }
   var out = { messages: [], notify: '' }, w;
   var lock = LockService.getScriptLock();
@@ -664,12 +691,16 @@ function LIC_onPhoto_(ev, uid, waiting) {
     w.files = w.files || [];
     var rows = LIC_rows(x.tab.sh.getDataRange().getValues(), x.tab.col), r = rows.filter(function (y) { return y.code === x.person.code; })[0];
     var plan = LIC_photoPlan(w, aiMode, ai, judge);
+    // 版 2026-11-18b：表・裏を一緒に送ったとき（LINE の imageSet）は、最後の1枚のときだけ案内を返す（文が重ならないように）
+    var set = ev.message.imageSet, lastOfSet = true;
+    if (set && set.id && set.total > 1) { w.sets = w.sets || {}; w.sets[set.id] = (w.sets[set.id] || 0) + 1; lastOfSet = w.sets[set.id] >= set.total; }
     if (plan.action === 'retry') {   // 保存しない。受付を延ばす
       w.fails = (w.fails || 0) + 1;
       if (w.doneAt) w.doneAt = Date.now(); else w.at = Date.now();
       LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC);
       LIC_setAi_(x.tab, r.i, '再送依頼（' + LIC_AI_REASON[judge.reason].reason + '）');
-      out.messages = [{ type: 'text', text: AC_withAiNote(LIC_fill(LIC_TEXT.aiRetry, LIC_AI_REASON[judge.reason])) }];
+      var side = w.done ? '裏面' : w.back ? '表面' : judge.side === 'back' ? '裏面' : '表面', rs = LIC_AI_REASON[judge.reason];
+      out.messages = [{ type: 'text', text: AC_withAiNote(LIC_fill(LIC_TEXT.aiRetry, { reason: rs.reason, tip: LIC_fill(rs.tip, { side: side }), side: side })) }];
     } else {
       if (plan.save) {
         var saved;
@@ -678,11 +709,10 @@ function LIC_onPhoto_(ev, uid, waiting) {
         LIC_cell_(x.tab, r.i, 'file', w.files.join(','));
         LIC_cell_(x.tab, r.i, 'reportAt', new Date());
       }
-      if (judge && judge.side === 'front') w.front = true;
-      if (judge && judge.side === 'back') w.back = true;
       if (judge && judge.exp && !w.aiExp) w.aiExp = judge.exp;
       if (judge && judge.kind !== 'retry') w.fails = 0;
       out = LIC_photoReply_(plan, w, x, r, ai, judge);
+      if (out.guide && !lastOfSet) out.messages = [];   // 同じ組のほかの写真の処理で返す
       LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC);
     }
   } finally { lock.releaseLock(); }
@@ -692,37 +722,76 @@ function LIC_onPhoto_(ev, uid, waiting) {
 }
 
 /**
- * 純粋関数：写真をどう扱うか。w＝その回の記録、ai＝{ res } か { error }、judge＝LIC_aiJudge の結果。
- * action：'retry'（保存せず再送のお願い）／'auto'（表面の期限を記録）／'buttons'（期限のボタン）／'backFirst'（裏面だけ先に届いた）／'more'（同じ回の追加の写真）
- * save：保存するか。check：ボタンにするとき要確認にするか（AI が使えない・読み取れない）
+ * 純粋関数：写真をどう扱うか（版 2026-11-18b）。w＝その回の記録、ai＝{ res } か { error }、judge＝LIC_aiJudge の結果。
+ * on の action：'retry'（保存せず、その面の再送のお願い）／'front'（表面の期限を記録し、裏面をお願い）／'frontLast'（裏面が先に届いていて、表面で記録してお礼）／
+ *   'backFirst'（裏面が先に届いた）／'finish'（表面のあとの裏面：お礼）／'buttons'（期限のボタン）／'more'（済んだあとの写真：保存だけ・返信なし）
+ * off・record：'buttons'（1枚目）／'more'（2枚目から：短いお礼）。今までどおり
+ * save：保存するか。check：ボタンにするとき要確認にするか（'retry'＝2回続けて読めない・'ai'＝AI が使えない）
  */
 function LIC_photoPlan(w, aiMode, ai, judge) {
-  var on = aiMode === 'on', settled = !!(w.done || w.btn);   // この回で期限を記録した・ボタンを出した
-  if (on && judge && judge.kind === 'retry') {
+  if (aiMode !== 'on') return (w.done || w.btn) ? { action: 'more', save: true } : { action: 'buttons', save: true };
+  var notLic = !!(judge && judge.kind === 'retry' && judge.reason === 'not_license');
+  if (w.complete || w.btn) return { action: 'more', save: !notLic };
+  if (judge && judge.kind === 'retry') {
     if ((w.fails || 0) + 1 < LIC_AI_RETRY_MAX) return { action: 'retry' };
-    if (settled) return { action: 'more', save: judge.reason !== 'not_license' };
-    return { action: 'buttons', save: judge.reason !== 'not_license', check: 'retry' };   // 2回続けて読めない：ボタン・要確認
+    if (w.done) return { action: 'finish', save: !notLic, unread: true };   // 表面は記録済み・裏面が2回続けて読めない：お礼で終える
+    return { action: 'buttons', save: !notLic, check: 'retry' };           // 2回続けて読めない：ボタン・要確認
   }
-  if (settled) return { action: 'more', save: true };
-  if (!on) return { action: 'buttons', save: true };                       // off・record：今までどおり
-  if (!judge) return { action: 'buttons', save: true, check: 'ai' };      // AI が使えない（キー未設定・上限・エラー）
-  if (judge.kind === 'front') return { action: 'auto', save: true };
-  return { action: w.askedFront ? 'more' : 'backFirst', save: true };     // 裏面だけ
+  if (!judge) {   // AI が使えない（キー未設定・上限・エラー）
+    if (w.done) return { action: 'finish', save: true };                   // 表面は記録済み：裏面として受け取る
+    return { action: 'buttons', save: true, check: 'ai' };
+  }
+  if (judge.kind === 'front') return { action: w.done ? 'front' : w.back ? 'frontLast' : 'front', save: true };
+  return { action: w.done ? 'finish' : 'backFirst', save: true };
 }
 
-/** 写真の扱いに合わせて、タブ（期限・状態・AI確認）を書き、返す文面と管理者への知らせを決める（ロックの中で呼ぶ） */
+/**
+ * 写真の扱いに合わせて、タブ（期限・状態・AI確認・送信記録）を書き、返す文面と管理者への知らせを決める（ロックの中で呼ぶ）。
+ * out.guide＝途中の案内（表・裏を一緒に送ったときは、最後の1枚だけが返す）
+ */
 function LIC_photoReply_(plan, w, x, r, ai, judge) {
-  var on = LIC_aiMode_() === 'on', base = x.row.exp || '', out = { messages: [], notify: '' };
+  var on = LIC_aiMode_() === 'on', base = w.base !== undefined && !w.backOnly ? w.base : x.row.exp || '', out = { messages: [], notify: '', guide: false };
   var aiLabel = LIC_aiLabel(ai, judge), prefix = on ? '' : '記録：';
-  if (plan.action === 'auto') {
+  var text = function (t) { return [{ type: 'text', text: AC_withAiNote(t) }]; };
+  var thanks = function () {
+    w.complete = true; w.doneAt = Date.now();
+    if (w.backOnly) return text(LIC_fill(LIC_TEXT.aiBackThanks, { date: LIC_jpDate(w.done) }));
+    return text(LIC_fill(w.upd ? LIC_TEXT.aiThanksUpd : LIC_TEXT.aiThanksReg, { date: LIC_jpDate(w.done) }));
+  };
+  var markLog = function (label, key) {   // 送信記録の列（裏面待ち・裏面受領）
+    var cur = x.tab.sh.getRange(r.i + 1, x.tab.col.log + 1).getValue();
+    LIC_cell_(x.tab, r.i, 'log', LIC_logAdd(cur, label, key, x.today));
+  };
+  if (plan.action === 'front' || plan.action === 'frontLast') {
+    if (w.done) {   // 同じ回の2枚目の表面：記録はそのまま。違う期限なら要確認
+      if (judge.exp !== w.done) {
+        LIC_cell_(x.tab, r.i, 'state', LIC_STATE.check);
+        LIC_setAi_(x.tab, r.i, '要確認（日付違い）');
+        out.notify = '同じ回の写真から、記録した有効期限 ' + w.done + ' と違う日付 ' + judge.exp + ' を読み取りました。要確認にしました。';
+      }
+      out.messages = text(LIC_TEXT.aiFrontOk); out.guide = true;
+      return out;
+    }
     var check = judge.check;
     LIC_writeExp_(x, r, judge.exp, !!check, check ? '写真の期限の確認（' + LIC_AI_CHECK_LABEL[check] + '）' : '');
-    w.done = judge.exp; w.doneAt = Date.now();
+    w.done = judge.exp; w.front = true; w.upd = !!base;
     LIC_setAi_(x.tab, r.i, check ? '要確認（' + LIC_AI_CHECK_LABEL[check] + '）' : 'OK');
-    var text = LIC_fill(base ? LIC_TEXT.aiThanksUpd : LIC_TEXT.aiThanksReg, { date: LIC_jpDate(judge.exp) });
-    if (!w.back && !w.askedBack) { text += '\n' + LIC_TEXT.aiNeedBack; w.askedBack = true; }
-    out.messages = [{ type: 'text', text: AC_withAiNote(text) }];
     if (check) out.notify = '写真から読み取った有効期限 ' + judge.exp + (base ? '（前の期限 ' + base + '）' : '') + 'が' + LIC_AI_CHECK_LABEL[check] + 'のため、要確認にしました。';
+    if (plan.action === 'frontLast') { out.messages = thanks(); return out; }
+    w.at = Date.now();   // 裏面を30分待つ
+    markLog('裏面待ち', judge.exp);   // 届かなければ翌朝に1回お願いする
+    out.messages = text(LIC_TEXT.aiFrontOk); out.guide = true;
+    return out;
+  }
+  if (plan.action === 'backFirst') {
+    w.back = true; w.at = Date.now();
+    LIC_setAi_(x.tab, r.i, 'OK（裏面）');
+    out.messages = text(LIC_TEXT.aiNeedFront); out.guide = true;
+    return out;
+  }
+  if (plan.action === 'finish') {
+    if (plan.save) { w.back = true; markLog('裏面受領', w.done); }   // 免許証以外の写真しか来なければ、翌朝に裏面をお願いする
+    out.messages = thanks();
     return out;
   }
   if (plan.action === 'buttons') {
@@ -746,23 +815,20 @@ function LIC_photoReply_(plan, w, x, r, ai, judge) {
     out.messages = [msg];
     return out;
   }
-  if (plan.action === 'backFirst') {
-    w.askedFront = true;
-    LIC_setAi_(x.tab, r.i, 'OK（裏面）');
-    out.messages = [{ type: 'text', text: AC_withAiNote(LIC_TEXT.aiNeedFront) }];
+  // more：済んだあとの写真（on は保存だけ・返信なし。off・record は今までどおり短いお礼）
+  if (!on) {
+    if (ai) LIC_setAi_(x.tab, r.i, prefix + aiLabel);
+    out.messages = text(LIC_fill(LIC_TEXT.photoMore, { n: w.files.length }));
     return out;
   }
-  // more：同じ回の追加の写真
-  if (ai) LIC_setAi_(x.tab, r.i, prefix + aiLabel);
-  if (on && judge && judge.exp && w.done && judge.exp !== w.done) {   // 記録した期限と、別の写真から読み取った期限が違う
+  if (judge && judge.exp && w.done && judge.exp !== w.done) {   // 記録した期限と、別の写真から読み取った期限が違う
     LIC_cell_(x.tab, r.i, 'state', LIC_STATE.check);
     LIC_setAi_(x.tab, r.i, '要確認（日付違い）');
     out.notify = '同じ回の写真から、記録した有効期限 ' + w.done + ' と違う日付 ' + judge.exp + ' を読み取りました。要確認にしました。';
   }
-  out.messages = [{ type: 'text', text: AC_withAiNote(LIC_fill(LIC_TEXT.photoMore, { n: w.files.length })) }];
   return out;
 }
-var LIC_AI_CHECK_LABEL = { range: '日付の範囲外', before: '前の期限以前' };
+var LIC_AI_CHECK_LABEL = { range: '日付の範囲外', before: '前の期限より前' };
 var LIC_AI_ERROR_LABEL = { key: 'キー未設定', limit: '1日の上限', size: '写真が大きすぎる', http: 'AIのエラー', refusal: 'AIが判定しなかった', parse: 'AIの応答が読めない', fail: 'AIに接続できない', undefined: 'AIなし' };
 
 /** 純粋関数：「AI確認」の列に書く短い文（record のときの記録・追加の写真） */
@@ -865,10 +931,10 @@ function LIC_aiParse(text) {
     expiry: typeof r.expiry === 'string' ? LIC_parseYmd(r.expiry) || '' : '' } };
 }
 
-/** 純粋関数：読み取った期限の確かめ。'' ＝問題なし／'range'＝今日より1年以上前か10年以上先／'before'＝更新で前の期限以前 */
+/** 純粋関数：読み取った期限の確かめ。'' ＝問題なし／'range'＝今日より1年以上前か10年以上先／'before'＝更新で前の期限より前 */
 function LIC_aiDateCheck(exp, today, base) {
   if (LIC_daysBetween(exp, today) >= LIC_AI_PAST_DAYS || exp >= LIC_addYears(today, LIC_AI_FUTURE_YEARS)) return 'range';
-  if (base && exp <= base) return 'before';
+  if (base && exp < base) return 'before';   // 版 2026-11-18b：前と同じ日付は正しい再登録（要確認にしない）
   return '';
 }
 
@@ -1023,5 +1089,5 @@ function LIC_onPostback_(ev, uid) {
 if (typeof module !== 'undefined') {
   module.exports = { LIC_parseYmd: LIC_parseYmd, LIC_daysBetween: LIC_daysBetween, LIC_addYears: LIC_addYears, LIC_stage: LIC_stage,
     LIC_statusFor: LIC_statusFor, LIC_plan: LIC_plan, LIC_eventKind: LIC_eventKind, LIC_parsePostback: LIC_parsePostback, LIC_isWaiting: LIC_isWaiting, LIC_photoName: LIC_photoName,
-    LIC_aiParse: LIC_aiParse, LIC_aiJudge: LIC_aiJudge, LIC_aiDateCheck: LIC_aiDateCheck, LIC_photoPlan: LIC_photoPlan, LIC_aiRequest: LIC_aiRequest, LIC_VERSION: LIC_VERSION };
+    LIC_aiParse: LIC_aiParse, LIC_aiJudge: LIC_aiJudge, LIC_aiDateCheck: LIC_aiDateCheck, LIC_backPending: LIC_backPending, LIC_photoPlan: LIC_photoPlan, LIC_aiRequest: LIC_aiRequest, LIC_VERSION: LIC_VERSION };
 }

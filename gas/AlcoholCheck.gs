@@ -19,6 +19,7 @@
  * スクリプトプロパティ（プロジェクトの設定 → スクリプト プロパティ）：
  *  LINE_CHANNEL_ACCESS_TOKEN  Messaging APIのチャネルアクセストークン（長期）
  *  LINE_ADMIN_USER_ID         通知先の管理者のユーザーID（U から始まる）
+ *  ADMIN_NOTIFY               digest＝管理者へのお知らせを平日の朝に勤怠管理グループへまとめる（版 2026-11-17e）
  *  DRY_RUN                    "false" のときだけ実際に送信する（未設定なら送信しない）
  *  NOTIFY_EMPLOYEES           "true" のときだけ本人へ通知する（未設定なら管理者一覧のみ）
  *  NOTIFY_ADMIN               "false" にすると管理者一覧を送らない
@@ -40,7 +41,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-16b';
+var AC_CODE_VERSION = '2026-11-17e';
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -126,7 +127,7 @@ function alcoholCheckRegistryStatus() {
 
 /** LINE送信の確認用：管理者へテストメッセージを1通送る（DRY_RUNに関係なく送る） */
 function alcoholCheckSendTestMessage() {
-  AC_pushLine_('【テスト】アルコールチェック通知の接続確認です。');
+  AC_pushAdminNow_('【テスト】アルコールチェック通知の接続確認です。');
 }
 
 /** 手動確認用：今日の各通知の対象人数と、全員がLINE登録済みだった場合の見込み通数をログに出す（送信しない） */
@@ -458,7 +459,7 @@ function AC_processTotRaw_(body) {
     if (test && testLines.length) {
       var head = '【勤怠テスト】本番で本人へ送る予定の通知（' + testLines.length + '件）\n\n';
       var body2 = testLines.join('\n\n');
-      AC_pushLine_((head + body2).slice(0, 4900));
+      AC_pushAdminNow_((head + body2).slice(0, 4900));
       sent = 1;
     }
     Logger.log('勤怠：エラー勤務 %s件／残業30h超 %s人／45h超 %s人／送信 %s通／LINE未登録 %s件（通知%s）',
@@ -916,7 +917,7 @@ function alcoholCheckOnAttendanceForm(e) {
         });
       } catch (e2) { Logger.log('勤怠管理グループの読み込みに失敗'); }
     }
-    if (!adminSent) AC_pushLine_(adminText);
+    if (!adminSent) AC_pushAdminNow_(adminText);   // 勤怠管理グループへ送れなかったときの予備（まとめず管理者へすぐ）
     // 版 2026-11-13c：欠勤・有給休暇・休みの変更は、TOT への反映の承認のカードを勤怠管理グループへ（TOT_WRITE が未設定なら何もしない）
     if (typeof SCH_onForm_ === 'function') {
       try { SCH_onForm_(ans, plan, isTest); } catch (es) {
@@ -1000,6 +1001,7 @@ function AC_handleGroupEvent_(ev) {
   }
   if (ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return;
   if (typeof OT_onGroupMessage_ === 'function' && OT_onGroupMessage_(ev)) return;   // 事務業務のグループの「残りの業務」（gas/OfficeTask.gs）
+  if (typeof INQ_onGroupMessage_ === 'function' && INQ_onGroupMessage_(ev)) return;   // 勤怠管理グループの「1.3対応済み」（gas/Inquiry.gs・版 2026-11-17e）
   var depts = AC_parseDeptRegistration(ev.message.text);
   if (!depts) return;   // グループの普段の会話には反応しない
   var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues()).concat([AC_ADMIN_GROUP]).concat(typeof OT_groupDept_ === 'function' ? [OT_groupDept_()] : []);
@@ -1843,6 +1845,7 @@ var AC_SETTINGS_SHOWN = {
   DRY_RUN: '未設定＝送信しない（"false" のときだけ送信）',
   NOTIFY_EMPLOYEES: '未設定＝本人へ送らない',
   NOTIFY_ADMIN: '未設定＝管理者へ送る',
+  ADMIN_NOTIFY: '未設定＝管理者へのお知らせは個別LINEへすぐ／digest＝平日の朝9時に勤怠管理グループへまとめて（飲酒検知は今までどおり両方へすぐ）',
   REQUIRE_DEVICE: '未設定＝機器所持で絞り込まない',
   ALERT_THRESHOLD: '未設定＝0.14',
   NORMAL_RESULTS: '未設定＝なし',
@@ -2393,7 +2396,7 @@ function AC_dispatch_(kind) {
     var careKey = 'att:' + today + ':care:' + (test ? test.code : reg ? reg.code : key);
     if (typeof text === 'function') text = text(!!state.getProperty(careKey)).text;
     try {
-      if (test) AC_pushLine_('【テスト／' + test.name + 'さん宛て】\n' + text);
+      if (test) AC_pushAdminNow_('【テスト／' + test.name + 'さん宛て】\n' + text);
       else if (reg) AC_pushSelf_(reg.userId, text);
       else { unregistered.push(name); return; }
       state.setProperty(dedupe, new Date().toISOString());
@@ -2419,7 +2422,7 @@ function AC_dispatch_(kind) {
     if (people.some(function (n) { return AC_normalizeName(n) === k; })) return;
     var key = 'sent:' + today + ':' + kind + ':testinfo:' + t.code;
     if (state.getProperty(key)) return;
-    AC_pushLine_('【テスト／' + t.name + 'さん】' + AC_kindLabel(kind) + '：' + AC_notTargetReason(kind, d, t.name));
+    AC_pushAdminNow_('【テスト／' + t.name + 'さん】' + AC_kindLabel(kind) + '：' + AC_notTargetReason(kind, d, t.name));
     state.setProperty(key, new Date().toISOString());
   });
   if (notifyAdmin && (kind === 'followBefore' || kind === 'followAfter')) {
@@ -3670,8 +3673,60 @@ function AC_adminNotice_(kind, text) {
   } catch (e) { Logger.log('管理者へのお知らせに失敗'); return false; }
 }
 
+/**
+ * 管理者へのお知らせ。版 2026-11-17e：ADMIN_NOTIFY=digest のときは管理者の個別LINEへは送らず、「朝のまとめ」にためて
+ * 平日の朝（問い合わせのまとめ 9:00 の回）に勤怠管理グループへ1回で送る（AC_digestAdd_・INQ_remind）。
+ * ただし「勤怠管理グループへ送れなかった」ときの予備の連絡は、まとめず管理者へすぐ送る（グループに送れないため）。
+ * 未設定は今までどおり管理者へすぐ送る。飲酒検知（Notices.gs の AC_alertSend_）はここを通らず、グループと管理者の両方へすぐ送る
+ */
 function AC_pushLine_(text) {
+  if (AC_adminDigestOn_() && String(text).indexOf('勤怠管理グループへ送れなかった') === -1) { AC_digestAdd_(text); return; }
+  AC_pushAdminNow_(text);
+}
+/** 管理者の個別LINEへすぐ送る（テスト・予備の連絡） */
+function AC_pushAdminNow_(text) {
   AC_pushTo_(PropertiesService.getScriptProperties().getProperty('LINE_ADMIN_USER_ID'), text);
+}
+function AC_adminDigestOn_() { return String(PropertiesService.getScriptProperties().getProperty('ADMIN_NOTIFY') || '').trim() === 'digest'; }
+var AC_DIGEST_PREFIX = 'adig:', AC_DIGEST_SEQ = 0;
+/** 朝のまとめにためる（ユーザーのプロパティ。1件 4,000 文字まで） */
+function AC_digestAdd_(text) {
+  var at = new Date();
+  AC_DIGEST_SEQ++;   // 同じ実行の中で同じミリ秒に2件入っても、入れた順に並ぶように
+  PropertiesService.getUserProperties().setProperty(AC_DIGEST_PREFIX + at.getTime() + ':' + ('000' + AC_DIGEST_SEQ).slice(-4) + ':' + Utilities.getUuid().slice(0, 6),
+    JSON.stringify({ at: at.toISOString(), text: String(text).slice(0, 4000) }));
+}
+/** ためているお知らせ [{ key, at（Date）, text }]（古い順） */
+function AC_digestItems_() {
+  var all = PropertiesService.getUserProperties().getProperties(), out = [];
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf(AC_DIGEST_PREFIX) !== 0) return;
+    try { var o = JSON.parse(all[k]); out.push({ key: k, at: new Date(o.at), text: String(o.text || '') }); } catch (e) { out.push({ key: k, at: new Date(0), text: '' }); }
+  });
+  return out.sort(function (a, b) { return a.at - b.at || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0); });
+}
+function AC_digestRemove_(keys) { var up = PropertiesService.getUserProperties(); (keys || []).forEach(function (k) { up.deleteProperty(k); }); }
+/**
+ * 純粋関数：朝のまとめの文（1通 maxLen 文字まで・maxMsgs 通まで）。items：[{ key, at, text, label（M/D HH:mm） }]
+ * 戻り値 { texts: [文], used: [key]（入れたもの）, rest: 入れきれなかった件数 }。入れきれない分は次の朝へ
+ */
+function AC_digestText(items, nowLabel, maxMsgs, maxLen) {
+  maxLen = maxLen || 4900;
+  var list = (items || []).filter(function (x) { return x.text; });
+  if (!list.length || !maxMsgs) return { texts: [], used: (items || []).filter(function (x) { return !x.text; }).map(function (x) { return x.key; }), rest: 0 };
+  var head = '【管理本部へのお知らせ】' + nowLabel + '（' + list.length + '件）', texts = [], cur = head, used = (items || []).filter(function (x) { return !x.text; }).map(function (x) { return x.key; });
+  for (var i = 0; i < list.length; i++) {
+    var block = '■ ' + list[i].label + '\n' + list[i].text.slice(0, maxLen - 200);
+    if (cur.length + 2 + block.length > maxLen - 60) {
+      if (texts.length + 1 >= maxMsgs) break;
+      texts.push(cur); cur = '（つづき）';
+    }
+    cur += '\n\n' + block; used.push(list[i].key);
+  }
+  var rest = list.length - (used.length - (items || []).filter(function (x) { return !x.text; }).length);
+  if (rest > 0) cur += '\n\n…ほか' + rest + '件は次の朝にお知らせします';
+  texts.push(cur);
+  return { texts: texts, used: used, rest: rest };
 }
 
 /**
@@ -4197,5 +4252,5 @@ if (typeof module !== 'undefined') {
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_punchKindClass: AC_punchKindClass, AC_punchLine: AC_punchLine, AC_isFullHoliday: AC_isFullHoliday, AC_formEntriesFromValues: AC_formEntriesFromValues, AC_formSplit: AC_formSplit, AC_formChangeLines: AC_formChangeLines, AC_isPausedForPunch: AC_isPausedForPunch, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
-    AC_CODE_VERSION: AC_CODE_VERSION, AC_withAiNote: AC_withAiNote, AC_AI_NOTE: AC_AI_NOTE, AC_weeklyPunchGuides: AC_weeklyPunchGuides, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle };
+    AC_CODE_VERSION: AC_CODE_VERSION, AC_withAiNote: AC_withAiNote, AC_AI_NOTE: AC_AI_NOTE, AC_weeklyPunchGuides: AC_weeklyPunchGuides, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle, AC_digestText: AC_digestText };
 }

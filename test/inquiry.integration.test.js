@@ -257,7 +257,7 @@ test('INQ結合: リマインド（未完了だけ・前日から継続・0件�
   const p = since(g, n).push;
   assert.equal(p.length, 1);
   assert.equal(p[0].body.to, GROUP);
-  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（1日前から・11/6受付）\n要約：その他／金曜の相談\n内容：「金曜の相談」');
+  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（1日前から・11/6受付）\n要約：その他／金曜の相談\n内容：「金曜の相談」\n\n※対応済みのときは、公式LINEをメンションして「1.3対応済み」のように番号を送ってください。');
   g.scriptProps.setProperty('INQ_REMIND_DAYS', 'weekdays');
   const m = g.fetches.length;
   g.ctx.INQ_remind();
@@ -391,4 +391,105 @@ test('INQ結合: 要注意の分類でも、INQ_MODE=record の間は今まで�
   assert.equal(since(g, n).push.length, 0);
   assert.equal(since(g, n).reply.length, 0);
   assert.equal(cases(book).length, 1);
+});
+
+// ---- 版 2026-11-17e：まとめの番号で「1.3対応済み」・土日祝はまとめなし・管理者へのお知らせを朝のまとめに ----
+const grpMsg = (text, { userId = STAFF, groupId = GROUP, id = 'ev' + ++seq, mention = null } = {}) => ({ type: 'message', webhookEventId: id, replyToken: 'rt-' + id,
+  source: { type: 'group', groupId, userId }, message: { id: 'm' + id, type: 'text', text, ...(mention ? { mention } : {}) } });
+
+test('INQ 17e: 「1.3対応済み」の読み取り（①②④・1.2.4・区切り・範囲・当てはまらない文）', () => {
+  const { g } = setup();
+  const P = (t) => { const r = g.ctx.INQ_parseDoneNumbers(t); return r && [...r]; };
+  assert.deepEqual(P('①②④対応済み'), [1, 2, 4]);
+  assert.deepEqual(P('1.2.4対応済み'), [1, 2, 4]);
+  assert.deepEqual(P('1.3対応済み'), [1, 3]);
+  assert.deepEqual(P('1、3 対応済みです'), [1, 3]);
+  assert.deepEqual(P('１・３対応済み'), [1, 3]);
+  assert.deepEqual(P('3,1対応済みにしました'), [1, 3]);
+  assert.deepEqual(P('①〜③対応済み'), [1, 2, 3]);
+  assert.deepEqual(P('1と3は対応済みです。'), [1, 3]);
+  assert.deepEqual(P('①対応済み'), [1]);
+  assert.deepEqual(P('124対応済み'), [124]);                                   // 区切りなしは1つの番号（件数を超えれば案内）
+  [null, 'お疲れさまです', '対応済み', '3件対応済み', '明日対応済みにします', '1.3対応お願いします'].forEach((t) => assert.equal(P(t), null, String(t)));
+  assert.equal(g.ctx.INQ_stripMentions('@REBIRTH 管理本部 1.3対応済み', { mentionees: [{ index: 0, length: 14, type: 'user', isSelf: true }] }).trim(), '1.3対応済み');
+});
+
+test('INQ 17e: まとめの番号で対応済みにできる（メンションあり・なし・済み・番号なし・区切りなしの大きい番号・ほかのグループは無反応）', () => {
+  const { g, book } = setup({ INQ_MODE: 'on' }, { now: '2026-11-06T08:00:00+09:00' });
+  post(g, userMsg(U(1), '一つ目の相談'));
+  g.line.profiles[U(4)] = 'よんちゃん';
+  post(g, userMsg(U(4), '二つ目の相談'));
+  post(g, userMsg(U(2), '三つ目の相談'));
+  let n = g.fetches.length;
+  post(g, grpMsg('1対応済み'));
+  assert.match(since(g, n).reply[0].body.messages[0].text, /まだないため/);   // まとめの前
+  g.clock.now = new Date('2026-11-06T09:00:00+09:00').getTime();
+  g.ctx.INQ_remind();
+  n = g.fetches.length;
+  post(g, grpMsg('@REBIRTH 管理本部 ①③対応済み', { mention: { mentionees: [{ index: 0, length: 14, type: 'user', isSelf: true }] } }));
+  const r = since(g, n).reply[0].body.messages[0].text;
+  assert.match(r, /対応済みにしました（担当Aさん）\n① 試験 一郎（部署A）\n③ /);
+  assert.match(r, /11\/6 9:00のお知らせの番号/);
+  const c = cases(book);
+  assert.deepEqual(c.map((x) => x[1]), ['対応済み', '未対応', '対応済み']);
+  n = g.fetches.length;
+  post(g, grpMsg('1.2対応済み'));
+  const r2 = since(g, n).reply[0].body.messages[0].text;
+  assert.match(r2, /対応済みにしました[\s\S]*② [\s\S]*すでに対応済みでした\n① /);
+  n = g.fetches.length;
+  post(g, grpMsg('124対応済み'));
+  assert.match(since(g, n).reply[0].body.messages[0].text, /「124」番はありません[\s\S]*1\.2\.4対応済み/);
+  n = g.fetches.length;
+  post(g, grpMsg('7対応済み'));
+  assert.match(since(g, n).reply[0].body.messages[0].text, /⑦は見つかりませんでした（11\/6 9:00のお知らせは3件）/);
+  n = g.fetches.length;
+  post(g, grpMsg('1対応済み', { groupId: OTHER_GROUP }), grpMsg('1対応済み', { userId: OUTSIDER }));
+  const s2 = since(g, n);
+  assert.equal(s2.reply.length, 1);                                            // ほかのグループは無反応・メンバー外は断る
+  assert.match(s2.reply[0].body.messages[0].text, /メンバーであることを確認できなかった/);
+  n = g.fetches.length;
+  post(g, grpMsg('部門登録 勤怠管理'));                                         // 今までの文はそのまま
+  assert.match(since(g, n).reply[0].body.messages[0].text, /登録しました/);
+});
+
+test('INQ 17e: 土日祝はまとめを送らない（受付の速報は送る）・管理者へのお知らせは平日の朝のまとめで勤怠管理グループへ1回', () => {
+  const files = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'TotSync.gs', 'OfficeTask.gs'];
+  const { g } = setup({ INQ_MODE: 'on', INQ_REMIND_DAYS: 'weekdays', ADMIN_NOTIFY: 'digest' }, { files, now: '2026-11-21T08:00:00+09:00' });   // 土曜
+  let n = g.fetches.length;
+  post(g, userMsg(U(1), '土曜の相談'));
+  assert.deepEqual(since(g, n).push.map((p) => p.body.to), [GROUP]);          // 速報は送る
+  g.ctx.AC_adminNotice_('requests', '【承認待ちの申請】テスト1件');
+  g.ctx.AC_pushLine_('【有給の年5日】テスト');
+  g.ctx.AC_pushLine_('【問い合わせ】送れず\n（勤怠管理グループへ送れなかったため、こちらへお知らせしました）');   // 予備はすぐ管理者へ
+  const pre = since(g, n).push;
+  assert.deepEqual(pre.slice(1).map((p) => p.body.to), [ADMIN]);
+  n = g.fetches.length;
+  g.clock.now = new Date('2026-11-21T09:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 土曜
+  g.clock.now = new Date('2026-11-23T09:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 月曜・勤労感謝の日
+  assert.equal(since(g, n).push.length, 0);
+  g.clock.now = new Date('2026-11-24T09:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 火曜
+  const p = since(g, n).push;
+  assert.equal(p.length, 1); assert.equal(p[0].body.to, GROUP);
+  const texts = p[0].body.messages.map((m) => m.text);
+  assert.equal(texts.length, 2);
+  assert.match(texts[0], /^【問い合わせ 未完了1件】11\/24 9:00[\s\S]*1\.3対応済み/);
+  assert.match(texts[1], /^【管理本部へのお知らせ】11\/24 9:00（2件）\n\n■ 11\/21 [0-9:]+\n【承認待ちの申請】テスト1件\n\n■ 11\/21 [0-9:]+\n【有給の年5日】テスト$/);
+  n = g.fetches.length;
+  g.clock.now = new Date('2026-11-24T15:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 15時の回：お知らせは出さない（もう送った）
+  assert.ok(!since(g, n).push.some((x) => x.body.messages.some((m) => /管理本部へのお知らせ/.test(m.text))));
+  g.ctx.AC_pushLine_('【36協定の見守り】テスト');                                       // 15時より後に来たもの → 翌朝
+  n = g.fetches.length;
+  g.clock.now = new Date('2026-11-25T09:00:00+09:00').getTime(); g.ctx.INQ_remind();
+  assert.match(since(g, n).push[0].body.messages.at(-1).text, /36協定の見守り/);
+});
+
+test('INQ 17e: ADMIN_NOTIFY が未設定なら今までどおり管理者へすぐ・飲酒検知の宛先は変わらない', () => {
+  const { g } = setup({ INQ_MODE: 'on' });
+  const n = g.fetches.length;
+  g.ctx.AC_pushLine_('【有給の年5日】テスト');
+  assert.deepEqual(since(g, n).push.map((p) => p.body.to), [ADMIN]);
+  const d = g.ctx.AC_digestText([{ key: 'a', label: '11/1 9:00', text: 'あ'.repeat(3000) }, { key: 'b', label: '11/1 9:01', text: 'い'.repeat(3000) }, { key: 'c', label: '11/1 9:02', text: 'う'.repeat(3000) }], '11/2 9:00', 2);
+  assert.equal(d.texts.length, 2); assert.equal(d.rest, 1); assert.deepEqual([...d.used], ['a', 'b']);
+  assert.match(d.texts[1], /ほか1件は次の朝/);
+  d.texts.forEach((t) => assert.ok(t.length <= 4900));
 });

@@ -1,25 +1,25 @@
 /**
- * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-17b）
+ * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-17d）
  *
- * 毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、事務員さんの「今日のお仕事」をボタン付きで送る。
+ * 平日（土日祝・休みの日を除く）の毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、
+ * 管理本部みんなの「今日のお仕事」をボタン付きで送る。特定の人に固定しない（だれが担当してもよい）。
  * - 仕事の中身は「【事務業務】業務一覧・マニュアル」の「業務マニュアル」タブ（任せる＝○、AI化の状況が「AI化済み」でない行）と「臨時の依頼」タブ
- * - その日の勤務時間は朝7:05の TOT データ（tot-latest.json の schedules）から読む
- * - 勤務時間の8割を目安に、期限の近い順に並べる。入りきらない仕事は［手が空きました］で1件ずつ渡す
- * - 事務員さんがお休みの日は、期限が今日まで（過ぎている）のお仕事だけを送る（無ければ送らない）
+ * - 期限が近い順に、期間に入っているお仕事をすべて並べる。前倒しできるお仕事は［手が空きました］で1件ずつ渡す
  * - ボタン：［完了］［対応します］［わからない］［今日はできない］［手が空きました］。グループのメンバーなら誰でも押せて、押した人（従業員マスタの姓）を担当・完了者として記録する
  *   ［完了］のあとに［取り消す］（完了にした人と管理者だけ）
- * - グループで「残りの業務」「未完了の業務を教えて」などと送ると、まだ終わっていないお仕事（担当つき）を返信する
- * - 終業30分前に、残っている仕事と報告のお願いを送る。月曜の朝は先週のまとめも送る
+ * - グループで「残りの業務」「今日の業務を教えて」などと送ると、まだ終わっていないお仕事（担当つき）を返信する。
+ *   土日祝など朝のお知らせが無い日は、その時に今日のお仕事の一覧を作って返信する（返信なので通数にかからない）
+ * - 12時（OT_REMIND_MIN）に、残っているお仕事をお知らせする（朝に送った日だけ）。週の最初の平日の朝は先週のまとめも送る
  *
  * スクリプトプロパティ：
- *   OFFICE_TASK_MODE      未設定・off＝何もしない／record＝送らずに「送る予定の内容」タブへ記録／on＝送信
- *   OFFICE_TASK_BOOK_ID   業務一覧・マニュアルのスプレッドシートID
- *   OFFICE_TASK_STAFF     事務員さんの社員番号（従業員マスタの TOT従業員コードで勤務時間を読む）
- *   OFFICE_TASK_GROUP     送り先のグループの部門名（未設定＝「事務業務」）
+ *   OFFICE_TASK_MODE       未設定・off＝何もしない／record＝送らずに「送る予定の内容」タブへ記録／on＝送信
+ *   OFFICE_TASK_BOOK_ID    業務一覧・マニュアルのスプレッドシートID
+ *   OFFICE_TASK_GROUP      送り先のグループの部門名（未設定＝「事務業務」）
+ *   OFFICE_TASK_OFF_DATES  土日祝のほかに送らない日（任意。例「12/29,12/30,12/31,1/2,1/3」や「2026-12-28」）
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
- * 毎朝・30分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
+ * 毎朝・10分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-17c';
+var OT_VERSION = '2026-11-17d';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
 var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
 var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
@@ -29,7 +29,7 @@ var OT_LOG_SHEET = '今日の仕事の記録';
 var OT_PLAN_SHEET = '送る予定の内容';
 var OT_REQUEST_HEADER = ['依頼日', '業務ID（業務マニュアル）', '業務名（自由に書いてよい）', '期限', 'メモ（AIが本人に伝えること）', '状態'];
 var OT_LOG_HEADER = ['日時', '日付', '期間', '業務ID', '業務名', '操作', '押した人', 'メモ', 'LINEユーザーID'];
-var OT_PLAN_HEADER = ['日時', '日付', '勤務時間', '件数', '合計（分）', '内容'];
+var OT_PLAN_HEADER = ['日時', '日付', '種類', '件数', '合計（分）', '内容'];
 var OT_RULE_HEADER = 'AI用の予定ルール';
 var OT_DEFAULT_RULES = { M01: 'daily', M02: 'daily', M03: 'weekly:5', M04: 'monthly:1~3', M05: 'monthly:-2~3', M06: 'monthly:5~10',
   M07: 'monthly:13~20', M08: 'monthly:-2~5', M09: 'monthly:23~25', M10: 'daily', M11: 'monthly:1~5', M12: 'request', M13: 'request',
@@ -39,6 +39,7 @@ var OT_FILL_RATE = 0.8;            // 勤務時間のうち、仕事を入れる
 var OT_DEFAULT_MINUTES = 360;      // 勤務時間が読めなかったときの目安
 var OT_EARLY_DAYS = 7;             // 期間の始まる何日前から前倒しの候補にするか
 var OT_OVERDUE_DAYS = 7;           // 期限を過ぎて何日まで残りとして出すか
+var OT_REMIND_MIN = 12 * 60;        // 残りのお仕事のお知らせ（12:00）
 var OT_MAX_BUBBLES = 11;           // カルーセルは12枚まで（1枚目はまとめ）
 var OT_ACTIONS = { done: '完了', claim: '対応します', ask: 'わからない', skip: '今日はできない', free: '手が空きました', undo: '取り消し' };
 
@@ -52,6 +53,41 @@ function OT_addDays(s, n) { var d = OT_date(s); d.setUTCDate(d.getUTCDate() + n)
 function OT_diff(a, b) { return Math.round((OT_date(b) - OT_date(a)) / 86400000); }   // b − a（日）
 function OT_lastDay(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }       // m は 1〜12
 function OT_md(s) { var w = '日月火水木金土'.charAt(OT_date(s).getUTCDay()); return Number(s.slice(5, 7)) + '/' + Number(s.slice(8, 10)) + '（' + w + '）'; }
+
+/** 純粋関数：その年の日本の祝日（振替休日・国民の休日を含む）→ { 'YYYY-MM-DD': true }（2020年以降の決まり） */
+function OT_holidays(y) {
+  var f = function (m, d) { return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2); };
+  var mon = function (m, n) { var dow = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(); return f(m, 1 + (8 - dow) % 7 + 7 * (n - 1)); };   // m月の第n月曜
+  var k = y - 1980, shun = Math.floor(20.8431 + 0.242194 * k - Math.floor(k / 4)), shu = Math.floor(23.2488 + 0.242194 * k - Math.floor(k / 4));
+  var list = [f(1, 1), mon(1, 2), f(2, 11), f(2, 23), f(3, shun), f(4, 29), f(5, 3), f(5, 4), f(5, 5), mon(7, 3), f(8, 11), mon(9, 3), f(9, shu), mon(10, 2), f(11, 3), f(11, 23)];
+  var set = {};
+  list.forEach(function (d) { set[d] = true; });
+  list.forEach(function (d) {   // 国民の休日（祝日にはさまれた平日）
+    var mid = OT_addDays(d, 1);
+    if (set[OT_addDays(d, 2)] && !set[mid] && OT_date(mid).getUTCDay() !== 0) set[mid] = true;
+  });
+  list.filter(function (d) { return OT_date(d).getUTCDay() === 0; }).forEach(function (d) {   // 振替休日（日曜の祝日のあとの最初の平日）
+    var n = OT_addDays(d, 1);
+    while (set[n]) n = OT_addDays(n, 1);
+    set[n] = true;
+  });
+  return set;
+}
+
+/** 純粋関数：お知らせを送る日か（土日・祝日・offDates（「12/29」や「2026-12-28」）でない） */
+function OT_isBusinessDay(ymd, offDates) {
+  var dow = OT_date(ymd).getUTCDay();
+  if (dow === 0 || dow === 6 || OT_holidays(Number(ymd.slice(0, 4)))[ymd]) return false;
+  var md = Number(ymd.slice(5, 7)) + '/' + Number(ymd.slice(8, 10));
+  return !(offDates || []).some(function (x) { x = String(x).trim(); return x === ymd || x === md; });
+}
+
+/** 純粋関数：その週（月〜日）の最初のお知らせの日か（先週のまとめを送る日） */
+function OT_isFirstBusinessDayOfWeek(ymd, offDates) {
+  var monday = OT_addDays(ymd, -((OT_date(ymd).getUTCDay() + 6) % 7));
+  for (var d = monday; d < ymd; d = OT_addDays(d, 1)) if (OT_isBusinessDay(d, offDates)) return false;
+  return OT_isBusinessDay(ymd, offDates);
+}
 
 /** 純粋関数：予定ルールの解釈。daily／weekly:曜日(0=日〜6=土)／monthly:開始~終了（負は前月末からの日数、例 -2＝月末の2日前）／yearly:月/日~月/日／request／reserve／spare */
 function OT_parseRule(rule) {
@@ -183,21 +219,17 @@ function OT_bubble(it, no, date, token, owner) {
       btn('わからない', 'ask', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
 }
 
-/** 純粋関数：朝のメッセージ（まとめ＋1件ずつの吹き出し）。opts.offDay＝担当の方がお休みの日（期限が近いものだけ） */
+/** 純粋関数：朝のメッセージ（まとめ＋1件ずつの吹き出し）。だれか1人あてにしない。opts.requested＝土日祝などに「今日の業務」と頼まれて作った一覧 */
 function OT_morningMessages(plan, opts) {
-  var date = opts.date, name = opts.name || '担当の方', token = opts.token, owners = opts.owners || {};
+  var date = opts.date, token = opts.token, owners = opts.owners || {};
   var freeBtn = { type: 'button', style: 'primary', color: '#e69138', height: 'sm',
     action: { type: 'postback', label: '手が空きました', data: ['ot', '1', 'free', date, '-', '-', token].join('|'), displayText: '手が空きました' } };
-  var head = opts.offDay
-    ? ['今日は' + name + 'さんがお休みです。', '期限が今日まで（または過ぎている）のお仕事だけお送りします。対応できる方は［対応します］を押してから進めてください。']
-    : ['おはようございます☀️ ' + name + 'さんの今日のお仕事です。',
-      '勤務：' + (opts.shiftLabel || '（勤務時間を確認できなかったため' + Math.round(OT_DEFAULT_MINUTES / 60) + '時間で組みました）'),
-      '件数：' + plan.today.length + '件（目安 合計' + plan.total + '分）',
-      plan.reserve ? '電話・来客などのために' + plan.reserve + '分あけています。' : '',
-      '上から順に進めて、終わったら［完了］を押してください。ほかの方が代わりに進めるときは、先に［対応します］を押してください（担当が分かるようになります）。',
-      '分からないときは［わからない］、今日できないときは［今日はできない］。',
-      plan.extra.length ? '早く終わったら［手が空きました］を押すと、次のお仕事をお送りします（あと' + plan.extra.length + '件あります）。' : '早く終わったら［手が空きました］を押してください。',
-      '「残りの業務」と送ると、まだ終わっていないお仕事をお知らせします。'];
+  var head = [opts.requested ? 'お休みの日ですが、ご依頼があったので今日のお仕事をお送りします。' : 'おはようございます☀️ 管理本部のみなさん、今日のお仕事です。',
+    '件数：' + plan.today.length + '件（目安 合計' + plan.total + '分）',
+    'お仕事を始めるときは［対応します］を押してください（担当が分かり、同じお仕事が重なるのを防げます）。終わったら［完了］を押してください。',
+    '分からないときは［わからない］、今日できないときは［今日はできない］。',
+    plan.extra.length ? '手が空いた方は［手が空きました］を押すと、前倒しできるお仕事をお送りします（あと' + plan.extra.length + '件あります）。' : '手が空いた方は［手が空きました］を押してください。',
+    '「残りの業務」と送ると、まだ終わっていないお仕事をお知らせします' + (opts.requested ? '。' : '（12時にもお知らせします）。')];
   var list = plan.today.map(function (it, i) { return (i + 1) + '. ' + it.name + (it.overdue ? '（期限を過ぎています）' : it.deadline === date && !it.req ? '（今日まで）' : ''); });
   if (plan.today.length > OT_MAX_BUBBLES) list.push('（' + (OT_MAX_BUBBLES + 1) + '件目からは「残りの業務」と送ると表示されます）');
   var summary = { type: 'bubble', size: 'mega',
@@ -206,7 +238,7 @@ function OT_morningMessages(plan, opts) {
       .concat([{ type: 'separator' }]).concat(list.map(function (l) { return { type: 'text', text: l, size: 'sm', wrap: true }; })) },
     footer: { type: 'box', layout: 'vertical', contents: [freeBtn] } };
   var bubbles = [summary].concat(plan.today.slice(0, OT_MAX_BUBBLES).map(function (it, i) { return OT_bubble(it, i + 1, date, token, owners[it.id + '|' + it.period]); }));
-  var alt = ('【今日のお仕事】' + (opts.offDay ? '（' + name + 'さんお休み）' : name + 'さん ') + plan.today.length + '件：' + plan.today.map(function (it) { return it.name; }).join('、')).slice(0, 400);
+  var alt = ('【今日のお仕事】' + plan.today.length + '件：' + plan.today.map(function (it) { return it.name; }).join('、')).slice(0, 400);
   return [{ type: 'flex', altText: alt, contents: { type: 'carousel', contents: bubbles } }];
 }
 
@@ -343,25 +375,7 @@ function OT_master_() {
   }
   return { byCode: byCode, byUid: byUid };
 }
-function OT_staff_(master) {
-  var code = String(OT_props_().getProperty('OFFICE_TASK_STAFF') || '').trim();
-  if (!code) throw new Error('OFFICE_TASK_STAFF がありません');
-  var s = (master || OT_master_()).byCode[code];
-  if (!s) throw new Error('従業員マスタに社員番号 ' + code + ' がありません');
-  return s;
-}
-
-/** 今日の予定（TOT）。{ found（今日のデータがある）, shift（null＝休み・予定なし） } */
-function OT_todayShift_(staff, today) {
-  var data = AC_readTotLatest_();
-  if (!data || data.today !== today || !data.results) return { found: false, shift: null };
-  var R = data.results, key = '';
-  (R.employees || []).forEach(function (e) { if (staff.tot && AC_totKey(e.code) === staff.tot) key = String(e.key || ''); });
-  if (!key || !Array.isArray(R.schedules) || R.schedules.some(function (d) { return d && d._error; })) return { found: false, shift: null };
-  var s = null;
-  AC_totFlat_(R.schedules).forEach(function (x) { if (x && x.employeeKey === key && x.date === today) s = x; });
-  return { found: true, shift: OT_shift(s) };
-}
+function OT_offDates_() { return String(OT_props_().getProperty('OFFICE_TASK_OFF_DATES') || '').split(/[,、\s]+/).filter(String); }
 
 function OT_groups_() {
   try { return AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[OT_groupDept_()] || []; } catch (e) { return []; }
@@ -424,31 +438,33 @@ function OT_syncAiStatus_(ss, today) {
 }
 
 /** 毎朝8時（トリガー） */
+/** 今日の一覧を作って保存する（朝・土日祝の「今日の業務」）。{ plan, msgs, log, info } */
+function OT_buildToday_(ss, today, requested) {
+  var log = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues(), info = OT_doneFromLog(log);
+  var plan = OT_plan(OT_tasks_(ss), today, Infinity, info.done, OT_requests_(ss));   // 1人の勤務時間で区切らない（期間に入っているものはすべて）
+  var token = OT_dayToken_(today, true);
+  var msgs = OT_morningMessages(plan, { date: today, token: token, owners: info.owner, requested: !!requested });
+  OT_savePlan_(today, { ids: plan.today.map(function (it) { return it.id + '|' + it.period; }), extra: plan.extra.map(function (it) { return it.id + '|' + it.period; }),
+    reminded: !!requested, requested: !!requested });
+  return { plan: plan, msgs: msgs, log: log, info: info };
+}
+
 function OT_morning() {
   var mode = OT_mode_();
   if (mode === 'off') return;
   try {
-    var today = AC_today_(), ss = OT_book_(), staff = OT_staff_(), st = OT_todayShift_(staff, today);
+    var today = AC_today_(), off = OT_offDates_();
+    if (!OT_isBusinessDay(today, off)) { Logger.log('事務の業務一覧：土日祝・休みの日のため送らない（%s）', today); return; }
+    var ss = OT_book_();
     try { if (OT_syncAiStatus_(ss, today)) SpreadsheetApp.flush(); } catch (e0) { Logger.log('AI化の状況の確認に失敗（人への指示はそのまま続けます）'); }
-    var log = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues(), info = OT_doneFromLog(log);
-    var offDay = st.found && !st.shift;
-    var plan = OT_plan(OT_tasks_(ss), today, st.shift ? st.shift.minutes : OT_DEFAULT_MINUTES, info.done, OT_requests_(ss));
-    if (offDay) {   // お休みの日：期限が今日まで・過ぎている・臨時の依頼（期限が今日まで）だけ。無ければ送らない
-      plan.today = plan.today.filter(function (it) { return it.overdue || it.deadline <= today; }).filter(function (it) { return it.id !== 'M01' && it.id !== 'M10' && it.id !== 'M02'; });
-      plan.extra = []; plan.total = plan.today.reduce(function (a, it) { return a + (Number(it.minutes) || 0); }, 0);
-      if (!plan.today.length) { Logger.log('事務の業務一覧：担当の方がお休みで、期限が今日までのお仕事なし（送らない）'); return; }
-    }
-    var token = OT_dayToken_(today, true);
-    var msgs = OT_morningMessages(plan, { date: today, name: staff.name, token: token, shiftLabel: st.shift ? st.shift.label : '', offDay: offDay, owners: info.owner });
-    var weekly = OT_date(today).getUTCDay() === 1 ? OT_weeklyText(log, today, staff.name) : '';
-    OT_savePlan_(today, { ids: plan.today.map(function (it) { return it.id + '|' + it.period; }), extra: plan.extra.map(function (it) { return it.id + '|' + it.period; }),
-      end: st.shift ? st.shift.end : null, reminded: false, offDay: offDay });
+    var b = OT_buildToday_(ss, today, false), plan = b.plan;
+    var weekly = OT_isFirstBusinessDayOfWeek(today, off) ? OT_weeklyText(b.log, OT_addDays(today, -((OT_date(today).getUTCDay() + 6) % 7))) : '';
     var summary = plan.today.map(function (it, i) { return (i + 1) + '. ' + it.name + '（' + it.minutes + '分）'; }).join('\n')
       + (plan.extra.length ? '\n［手が空いたとき］' + plan.extra.map(function (it) { return it.name; }).join('、') : '') + (weekly ? '\n\n' + weekly : '');
-    OT_sheet_(ss, OT_PLAN_SHEET, OT_PLAN_HEADER).appendRow([new Date(), today, offDay ? 'お休み' : st.shift ? st.shift.label : '（不明・6時間で計算）', plan.today.length, plan.total,
+    OT_sheet_(ss, OT_PLAN_SHEET, OT_PLAN_HEADER).appendRow([new Date(), today, '毎朝（全員あて）', plan.today.length, plan.total,
       (mode === 'on' ? '' : '【記録のみ】') + summary]);
     if (mode !== 'on') return;
-    var sent = OT_pushGroup_(msgs);
+    var sent = OT_pushGroup_(b.msgs);
     if (weekly && sent) OT_pushGroup_([OT_text_(weekly)]);
     if (!sent) AC_adminNotice_('officetask', '【エラー】事務の業務一覧をグループ（' + OT_groupDept_() + '）に送れませんでした🙇‍♀️ 「LINEグループ」シートの登録を確認してください。');
   } catch (e) {
@@ -457,21 +473,21 @@ function OT_morning() {
   }
 }
 
-/** 30分ごと（トリガー）：終業30分前に、残っている仕事と報告のお願い */
+/** 10分ごと（トリガー）：12時に、残っているお仕事をお知らせ（朝に送った日だけ・1日1回） */
 function OT_tick() {
   if (OT_mode_() !== 'on') return;
   try {
     var today = AC_today_(), plan = OT_planOf_(today);
-    if (!plan || plan.reminded || plan.end == null) return;
+    if (!plan || plan.reminded || plan.requested) return;
     var hhmm = Utilities.formatDate(new Date(), AC_TZ, 'HH:mm').split(':'), hm = Number(hhmm[0]) * 60 + Number(hhmm[1]);
-    if (hm < plan.end - 30) return;
+    if (hm < OT_REMIND_MIN) return;
     var ss = OT_book_(), info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues());
     var left = OT_remaining_(ss, today, info) || [];
     plan.reminded = true; OT_savePlan_(today, plan);
     OT_pushGroup_([OT_text_(left.length
-      ? OT_remainingText(left, info.owner, today) + '\n\nあと30分ほどで終業です。終わったものは［完了］、今日できないものは［今日はできない］を押してください。残ったものは明日に回します。本日もお疲れさまでした😊'
-      : '【今日のお仕事】すべて完了しています。ありがとうございました！本日もお疲れさまでした😊')]);
-  } catch (e) { Logger.log('事務の業務一覧（終業前）の処理エラー：%s', e && e.message); }
+      ? OT_remainingText(left, info.owner, today) + '\n\n12時のお知らせです。担当が「未定」のお仕事は、手の空いている方が［対応します］を押して進めてください。終わったものは［完了］、今日できないものは［今日はできない］を押してください。'
+      : '【今日のお仕事】12時の時点ですべて完了しています。ありがとうございます😊')]);
+  } catch (e) { Logger.log('事務の業務一覧（12時）の処理エラー：%s', e && e.message); }
 }
 
 /** グループの押した人：従業員マスタの姓（無ければ LINE の表示名）。グループのメンバーでなければ null */
@@ -491,7 +507,11 @@ function OT_onGroupMessage_(ev) {
     if (!gid || OT_groups_().indexOf(gid) === -1 || !OT_isRemainingQuery(ev.message.text)) return false;
     var today = AC_today_(), ss = OT_book_(), info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues());
     var left = OT_remaining_(ss, today, info);
-    if (left === null) { OT_reply_(ev.replyToken, [OT_text_('今日のお仕事の一覧はまだありません（お休みの日、または朝のお知らせの前です）。')]); return true; }
+    if (left === null) {   // 土日祝・朝のお知らせの前：今日の一覧をその場で作って返信する
+      var b = OT_buildToday_(ss, today, true);
+      OT_reply_(ev.replyToken, b.plan.today.length ? b.msgs : [OT_text_('今日のお仕事はありません😊')]);
+      return true;
+    }
     var msgs = [OT_text_(OT_remainingText(left, info.owner, today))];
     if (left.length) {
       var token = OT_dayToken_(today, false);
@@ -596,23 +616,26 @@ function OT_setup() {
   Logger.log('事務の業務一覧：準備しました（版 %s）', OT_VERSION);
 }
 
-/** トリガー：毎朝8時台（OT_morning）・30分ごと（OT_tick）。同じ関数のトリガーがあれば作らない */
+/** トリガー：毎朝8時台（OT_morning）・10分ごと（OT_tick：12時のお知らせ）。同じ関数のトリガーがあれば作らない */
 function OT_setupTriggers() {
   var have = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
   if (have.indexOf('OT_morning') === -1) ScriptApp.newTrigger('OT_morning').timeBased().everyDays(1).atHour(8).nearMinute(0).inTimezone(AC_TZ).create();
-  if (have.indexOf('OT_tick') === -1) ScriptApp.newTrigger('OT_tick').timeBased().everyMinutes(30).create();
+  if (have.indexOf('OT_tick') === -1) ScriptApp.newTrigger('OT_tick').timeBased().everyMinutes(10).create();
 }
 function OT_removeTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) { var f = t.getHandlerFunction(); if (f === 'OT_morning' || f === 'OT_tick') ScriptApp.deleteTrigger(t); });
 }
 
-/** 確認用（送らない・記録しない）：今日の予定をログに出す */
+/** 確認用（送らない・記録しない）：今日と次のお知らせの日の予定をログに出す */
 function OT_preview() {
-  var today = AC_today_(), ss = OT_book_(), staff = OT_staff_(), st = OT_todayShift_(staff, today);
-  var info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues());
-  var plan = OT_plan(OT_tasks_(ss), today, st.shift ? st.shift.minutes : OT_DEFAULT_MINUTES, info.done, OT_requests_(ss));
+  var ss = OT_book_(), off = OT_offDates_(), today = AC_today_(), next = OT_addDays(today, 1);
+  while (!OT_isBusinessDay(next, off)) next = OT_addDays(next, 1);
+  var info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues()), tasks = OT_tasks_(ss), reqs = OT_requests_(ss);
   Logger.log('送り先：%s（%s件）', OT_groupDept_(), OT_groups_().length);
-  Logger.log('勤務：%s／件数 %s／合計 %s分（予算 %s分・予備 %s分）', st.found ? (st.shift ? st.shift.label : '休み') : '不明', plan.today.length, plan.total, plan.budget, plan.reserve);
-  plan.today.forEach(function (it, i) { Logger.log('%s. %s（%s分・期限 %s%s）', i + 1, it.name, it.minutes, it.deadline, it.overdue ? '・過ぎている' : ''); });
-  Logger.log('手が空いたとき：%s', plan.extra.map(function (it) { return it.name; }).join('、') || 'なし');
+  [today, next].forEach(function (d) {
+    var plan = OT_plan(tasks, d, Infinity, info.done, reqs);
+    Logger.log('【%s】%s／件数 %s／合計 %s分', OT_md(d), OT_isBusinessDay(d, off) ? '朝に送る日' : '送らない日（「今日の業務」で返信）', plan.today.length, plan.total);
+    plan.today.forEach(function (it, i) { Logger.log('%s. %s（%s分・期限 %s%s）', i + 1, it.name, it.minutes, it.deadline, it.overdue ? '・過ぎている' : ''); });
+    Logger.log('手が空いたとき：%s', plan.extra.map(function (it) { return it.name; }).join('、') || 'なし');
+  });
 }

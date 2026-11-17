@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 事務の業務一覧LINE（gas/OfficeTask.gs・版 2026-11-17b）。すべて架空の社員番号・LINE ID・模擬環境（LINE には送らない）
+// 事務の業務一覧LINE（gas/OfficeTask.gs・版 2026-11-17d：全員あて・平日のみ・12時のお知らせ）。すべて架空の社員番号・LINE ID・模擬環境（LINE には送らない）
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
 const ADMIN = U(7), STAFF = U(1), OTHER = U(2), STRANGER = U(3), KINTAI = 'C' + 'a'.repeat(32), OFFICE = 'C' + 'b'.repeat(32);
 const HEAD = ['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み',
@@ -28,7 +28,7 @@ function setup(props = { OFFICE_TASK_MODE: 'on' }, now = '2026-11-17T08:00:00+09
     task('M05', '勤怠締め', 60, false), task('M06', '社労士へ送る', 30, false), task('M11', '在庫確認', 30, true), task('M12', '印鑑証明書', 120, false),
     task('M21', '電話・来客', 20, false), task('M22', '前倒し', 30, true), task('M09', '支払予定', 40, false, '×')].forEach((r) => s.appendRow(r));
   g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: master.getId(), INQ_MODE: 'off', LINE_CHANNEL_ACCESS_TOKEN: 'fake', LINE_ADMIN_USER_ID: ADMIN, DRY_RUN: 'false',
-    OFFICE_TASK_BOOK_ID: book.getId(), OFFICE_TASK_STAFF: '90001', ...props });
+    OFFICE_TASK_BOOK_ID: book.getId(), ...props });
   const today = now.slice(0, 10);
   const sched = shift ? [{ date: today, dailySchedules: [{ employeeKey: 'k1', date: today, clockInSchedule: today + 'T' + shift[0] + ':00+09:00', clockOutSchedule: today + 'T' + shift[1] + ':00+09:00' }] }]
     : [{ date: today, dailySchedules: [{ employeeKey: 'k1', date: today }] }];
@@ -95,7 +95,7 @@ test('事務の業務一覧: 毎朝の送信（事務業務のグループ・ボ
   const p = pushes(g, n);
   assert.deepEqual(p.map((x) => x.body.to), [OFFICE]);
   const car = p[0].body.messages[0].contents;
-  assert.match(car.contents[0].body.contents.map((c) => c.text || '').join('\n'), /試験さんの今日のお仕事[\s\S]*勤務：8:00〜14:00[\s\S]*対応します[\s\S]*残りの業務/);
+  assert.match(car.contents[0].body.contents.map((c) => c.text || '').join('\n'), /管理本部のみなさん、今日のお仕事です[\s\S]*対応します[\s\S]*残りの業務[\s\S]*12時/);
   assert.equal(car.contents[1].body.contents[0].text, '1. 朝の確認');
   assert.deepEqual(car.contents[1].footer.contents.map((b) => b.action.label), ['完了', '対応します', 'わからない', '今日はできない']);
   assert.match(book.getSheetByName('送る予定の内容').dump()[1][5], /朝の確認/);
@@ -108,18 +108,32 @@ test('事務の業務一覧: 毎朝の送信（事務業務のグループ・ボ
   assert.equal(pushes(o.g, n).length, 0);
 });
 
-test('事務の業務一覧: お休みの日は期限が今日までのものだけ（無ければ送らない）', () => {
-  const h = setup({ OFFICE_TASK_MODE: 'on' }, '2026-11-17T08:00:00+09:00', null);
-  const hm = h.book.getSheetByName('業務マニュアル'); ['M03', 'M06'].forEach((id) => hm.getRange(hm.dump().findIndex((r) => r[0] === id) + 1, 13).setValue('×'));   // 期限を過ぎた扱いになるもの（先週金曜の領収書・15日までの社労士）を外す
-  let n = h.g.fetches.length; h.g.ctx.OT_morning();
+test('事務の業務一覧: 土日祝は朝に送らない・「今日の業務を教えて」で一覧を返信（だれか1人あてにしない）・祝日の計算', () => {
+  const X = setup().g.ctx;
+  ['2026-01-01', '2026-01-12', '2026-02-11', '2026-02-23', '2026-03-20', '2026-04-29', '2026-05-06', '2026-07-20', '2026-08-11', '2026-09-21', '2026-09-22', '2026-09-23',
+    '2026-10-12', '2026-11-03', '2026-11-23', '2027-03-21', '2027-03-22'].forEach((d) => assert.ok(!X.OT_isBusinessDay(d, []), d));   // 5/6・3/22 は振替休日、9/22 は国民の休日
+  ['2026-11-17', '2026-11-24', '2026-05-07', '2026-12-28'].forEach((d) => assert.ok(X.OT_isBusinessDay(d, []), d));
+  assert.ok(!X.OT_isBusinessDay('2026-12-28', ['12/28'])); assert.ok(!X.OT_isBusinessDay('2026-12-29', ['2026-12-29']));
+  assert.ok(X.OT_isFirstBusinessDayOfWeek('2026-11-24', []));                         // 11/23（月）が祝日 → 火曜にまとめ
+  assert.ok(!X.OT_isFirstBusinessDayOfWeek('2026-11-25', []));
+  const w = setup({ OFFICE_TASK_MODE: 'on' }, '2026-11-21T08:00:00+09:00');            // 土曜
+  let n = w.g.fetches.length; w.g.ctx.OT_morning();
+  assert.equal(pushes(w.g, n).length, 0);
+  n = w.g.fetches.length;
+  post(w.g, msg(OTHER, '今日の業務を教えて', 's1'));
+  const r = replies(w.g, n)[0].body.messages[0];
+  assert.equal(r.type, 'flex');
+  assert.match(r.contents.contents[0].body.contents.map((c) => c.text || '').join('\n'), /お休みの日ですが/);
+  assert.ok(!/試験さん|見本さん/.test(JSON.stringify(r.contents.contents[0])));
+  n = w.g.fetches.length;
+  post(w.g, pb(OTHER, btnData(r.contents.contents[1], '完了'), 's2'));                    // そのボタンも使える
+  assert.match(replies(w.g, n)[0].body.messages[0].text, /完了にしました/);
+  n = w.g.fetches.length;
+  w.g.clock.now = new Date('2026-11-21T12:05:00+09:00').getTime(); w.g.ctx.OT_tick();   // 頼まれて作った日は12時に送らない
+  assert.equal(pushes(w.g, n).length, 0);
+  const h = setup({ OFFICE_TASK_MODE: 'on' }, '2026-11-23T08:00:00+09:00');            // 祝日（勤労感謝の日）
+  n = h.g.fetches.length; h.g.ctx.OT_morning();
   assert.equal(pushes(h.g, n).length, 0);
-  const d = setup({ OFFICE_TASK_MODE: 'on' }, '2026-12-03T08:00:00+09:00', null);       // 12/3：交通費・勤怠締めの期限
-  n = d.g.fetches.length; d.g.ctx.OT_morning();
-  const car = pushes(d.g, n)[0].body.messages[0].contents.contents;
-  assert.match(car[0].body.contents.map((c) => c.text || '').join('\n'), /今日は試験さんがお休みです/);
-  const names = car.slice(1).map((b) => b.body.contents[0].text);
-  assert.ok(names.some((x) => /交通費の確認/.test(x)) && names.some((x) => /勤怠締め/.test(x)));
-  assert.ok(!names.some((x) => /朝の確認|スキャン/.test(x)));
 });
 
 test('事務の業務一覧: ボタン（誰でも押せる・押した人を記録・対応します・完了の取り消し）', () => {
@@ -168,11 +182,9 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   assert.deepEqual(logOps(book).slice(0, 4), [['対応します', '見本'], ['完了', '試験'], ['取り消し', 'まゆ'], ['わからない', '試験']]);   // マスタにいない人は LINE の表示名
 });
 
-test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当つき）・事務業務のグループだけ・終業30分前・月曜のまとめ', () => {
+test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当つき）・事務業務のグループだけ・12時のお知らせ・まとめ', () => {
   const { g } = setup();
   let n = g.fetches.length;
-  post(g, msg(STAFF, '残りの業務', 'q0'));
-  assert.match(replies(g, n)[0].body.messages[0].text, /一覧はまだありません/);
   g.ctx.OT_morning();
   const car = pushes(g, 0)[0].body.messages[0].contents.contents;
   post(g, pb(OTHER, btnData(car[2], '対応します'), 'q1'));
@@ -189,16 +201,16 @@ test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当
   post(g, msg(OTHER, '残りの業務', 'q4', KINTAI));                                       // 勤怠管理グループでは反応しない
   assert.equal(replies(g, n).length, 0);
   n = g.fetches.length;
-  g.clock.now = new Date('2026-11-17T13:00:00+09:00').getTime(); g.ctx.OT_tick();
+  g.clock.now = new Date('2026-11-17T11:55:00+09:00').getTime(); g.ctx.OT_tick();
   assert.equal(pushes(g, n).length, 0);
-  g.clock.now = new Date('2026-11-17T13:31:00+09:00').getTime(); g.ctx.OT_tick();
+  g.clock.now = new Date('2026-11-17T12:01:00+09:00').getTime(); g.ctx.OT_tick();
   const p = pushes(g, n);
   assert.equal(p.length, 1); assert.equal(p[0].body.to, OFFICE);
-  assert.match(p[0].body.messages[0].text, /【まだ終わっていないお仕事】[\s\S]*本日もお疲れさまでした/);
+  assert.match(p[0].body.messages[0].text, /【まだ終わっていないお仕事】[\s\S]*12時のお知らせです/);
   n = g.fetches.length; g.ctx.OT_tick();
   assert.equal(pushes(g, n).length, 0);
   const text = g.ctx.OT_weeklyText([['h'], [new Date(), '2026-11-17', '2026-11-17', 'M01', '朝の確認', '完了', '試験', ''],
-    [new Date(), '2026-11-18', 'x', 'M04', '交通費の確認', 'わからない', '試験', '']], '2026-11-23', '試験');
+    [new Date(), '2026-11-18', 'x', 'M04', '交通費の確認', 'わからない', '試験', '']], '2026-11-23');
   assert.match(text, /完了：1件／わからない：1件／できなかった：0件[\s\S]*完了した人：試験さん 1件[\s\S]*交通費の確認/);
 });
 

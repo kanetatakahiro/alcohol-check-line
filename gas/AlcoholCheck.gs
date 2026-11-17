@@ -994,6 +994,7 @@ function AC_handleGroupEvent_(ev) {
   }
   if (ev.type === 'postback') {
     if (/^sch\|/.test(String(ev.postback && ev.postback.data || ''))) { if (typeof SCH_onGroupPostback_ === 'function') SCH_onGroupPostback_(ev); return; }   // TOT反映のボタン（gas/TotSync.gs・版 2026-11-13c）
+    if (/^ot\|/.test(String(ev.postback && ev.postback.data || ''))) { if (typeof OT_onGroupPostback_ === 'function') OT_onGroupPostback_(ev); return; }   // 事務の業務一覧のボタン（gas/OfficeTask.gs・版 2026-11-17a）
     if (typeof INQ_onGroupPostback_ === 'function') INQ_onGroupPostback_(ev);   // 問い合わせのボタン（gas/Inquiry.gs）
     return;
   }

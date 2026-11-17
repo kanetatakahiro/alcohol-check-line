@@ -1,5 +1,14 @@
 # 変更履歴
 
+## 2026-11-17 版 2026-11-17a：事務の業務一覧LINE（AI上司）（ブランチ feature/office-task・**本番未導入**）
+- 新しいファイル gas/OfficeTask.gs（指紋 `29ac6a534269805f`）。仕様・反映・戻し方は docs/OFFICE_TASK.md
+- 毎朝8時台に勤怠管理グループへ事務員さんの今日のお仕事（業務マニュアルの任せる＝○・臨時の依頼）をボタン付きで送る。勤務時間は TOT の予定から読み、8割を目安に期限順。休みの日は送らない
+- ボタン：完了・わからない・今日はできない・手が空きました（前倒しの仕事を1件ずつ）。押せるのは事務員さんと管理者だけ。終業30分前に残りのお知らせ、月曜は先週のまとめ
+- コード.gs（gas/AlcoholCheck.gs・指紋 `3bbcf199b51ae127` → `abcd684c0646f4af`）：グループのボタンの受け口に1行（`ot|` のときだけ OfficeTask.gs へ）。ほかは変更なし
+- OFFICE_TASK_MODE（未設定＝何もしない／record／on）。最初は record で入れる
+- テスト：test/office-task.test.js（5件・架空データ）。全357件成功
+- 本番（Apps Script・スクリプトプロパティ・トリガー・デプロイ）は変更していない。LINE は送っていない
+
 ## 2026-11-17 版 2026-11-18a：免許証の写真を AI（Claude API）で確認（ブランチ feature/notification-settings・**本番未導入**）
 - gas/License.gs のみ（指紋 `d9231068099ae8d3`（17c・本番）→ `be87cfbcf5316584`、LIC_VERSION 2026-11-18a）。コード.gs ほかは変更なし。写真の受け口が変わるので **Webアプリの再公開が要る**。新しい権限は要らない見込み（UrlFetchApp は承認済み）
 - 新しいスクリプトプロパティ（安藤さんが設定・未設定でも動く）：ANTHROPIC_API_KEY・LICENSE_AI_CHECK（off／record／on。**未設定＝off＝今までどおり**）・LICENSE_AI_MODEL（既定 claude-sonnet-5-5）・LICENSE_AI_DAILY_MAX（既定 200）

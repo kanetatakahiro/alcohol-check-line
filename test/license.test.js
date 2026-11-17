@@ -201,7 +201,9 @@ test('免許証: 登録のお願い → 3日後・7日後の催促 → 10日後�
   assert.equal(self('2026-11-17').length, 0);
   push = self('2026-11-19');
   assert.deepEqual(push.map((p) => p.body.to).sort(), [U(1), U(2)].sort());
-  assert.match(textOf(push[0].body.messages[0]), /先日お願いした運転免許証の登録が、まだ確認できていません/);
+  assert.equal(textOf(push[0].body.messages[0]), 'お疲れさまです。管理本部です。\n先日お願いした運転免許証の登録が、まだ確認できていません。\n'
+    + '下のボタンを押して、免許証の写真をお送りください。\n※ボタンを押してから画像送付までは30分の有効期限があります。\n'
+    + 'ご対応のほどよろしくお願いいたします。\n\n※このメッセージはAIによる自動送信です。');   // 版 2026-11-17b：宛名なし
   assert.equal(self('2026-11-20').length, 0);
   assert.equal(self('2026-11-23').length, 2);   // 7日後
   assert.equal(self('2026-11-24').length, 0);
@@ -245,22 +247,23 @@ test('免許証: 30日前・7日前・当日・期限切れ（翌朝に本人・
   push = run('2026-11-16');
   assert.equal(push.length, 1);
   assert.equal(push[0].body.to, U(1));
-  assert.match(textOf(push[0].body.messages[0]), /有効期限（2026年12月16日）まで、あと30日になりました/);
+  assert.equal(textOf(push[0].body.messages[0]), 'お疲れさまです。管理本部です。\n運転免許証の有効期限（2026年12月16日）まで、あと30日になりました。\n'
+    + '更新がお済みになりましたら、「免許更新」と送るか下のボタンを押して、新しい免許証の写真をお送りください。\nいつもご協力ありがとうございます。\n\n※このメッセージはAIによる自動送信です。');
   assert.equal(push[0].body.messages[0].contents.footer.contents[0].action.label, '更新を報告する');
   assert.equal(val(master, '90001', '状態'), '更新待ち');
   assert.equal(run('2026-11-16').length, 0);   // 同じ日にもう一度：送らない
   assert.equal(run('2026-12-08').length, 0);   // 8日前：30日前の段階で送り済み
   push = run('2026-12-09');
   assert.equal(push.length, 1);
-  assert.match(textOf(push[0].body.messages[0]), /あと7日です。更新のご報告をまだ確認できていないため/);
+  assert.match(textOf(push[0].body.messages[0]), /^お疲れさまです。管理本部です。\n運転免許証の有効期限（2026年12月16日）まで、あと7日です。更新のご報告をまだ確認できていないため/);
   assert.equal(run('2026-12-15').length, 0);
   push = run('2026-12-16');
   assert.equal(push.length, 1);
-  assert.match(textOf(push[0].body.messages[0]), /有効期限は、本日（2026年12月16日）までです/);
+  assert.match(textOf(push[0].body.messages[0]), /^お疲れさまです。管理本部です。\n運転免許証の有効期限は、本日（2026年12月16日）までです/);
   push = run('2026-12-17');
   assert.deepEqual(push.map((p) => p.body.to).sort(), [U(1), GROUP, ADMIN].sort());
   assert.equal(textOf(push.find((p) => p.body.to === U(1)).body.messages[0]),
-    '試験 一郎さん、お疲れさまです。管理本部です。\n運転免許証の有効期限（2026年12月16日）を過ぎましたが、更新のご報告をまだ確認できていません。\n'
+    'お疲れさまです。管理本部です。\n運転免許証の有効期限（2026年12月16日）を過ぎましたが、更新のご報告をまだ確認できていません。\n'
     + 'すでに更新がお済みでしたら、「免許更新」と送って新しい免許証の写真をお送りいただけますと助かります。\nご協力ありがとうございます。\n\n※このメッセージはAIによる自動送信です。');
   const grp = push.find((p) => p.body.to === GROUP).body.messages[0].text;
   assert.equal(grp, '【免許証】有効期限を過ぎても、更新の報告がない方がいます（1名）\n・90001 試験 一郎（期限 2026年12月16日）\n本人へ更新の状況のご確認をお願いします（すでに更新済みのこともあります）。');
@@ -283,7 +286,7 @@ test('免許証: 更新の報告（ボタン → 写真 → 3年後）。写真�
   post(g, pb(U(1), 'lic|1|start'));
   let { reply, push } = since(g, n);
   assert.equal(push.length, 0);
-  assert.equal(reply[0].body.messages[0].text, 'ありがとうございます。\n免許証の表面の写真を、このトークにお送りください（30分以内にお願いいたします）。\n'
+  assert.equal(reply[0].body.messages[0].text, 'ありがとうございます。\n免許証の表面と裏面の写真を、このトークにお送りください（30分以内にお願いいたします）。\n'
     + '有効期限の文字がはっきり写るように撮っていただけますと助かります。\n\n※このメッセージはAIによる自動送信です。');
   n = g.fetches.length;
   photo(g, U(1));

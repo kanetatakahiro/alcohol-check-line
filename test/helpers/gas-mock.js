@@ -40,6 +40,7 @@ class Sheet {
   static seq = 0;
   constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; this.bg = {}; this.dv = []; this.hidden = false; }
   hideSheet() { this.hidden = true; return this; }
+  copyTo(ss) { const n = ss.insertSheet(this.name + ' のコピー'); n.rows = this.rows.map((r) => (r ? r.slice() : r)); n.fmt = { ...this.fmt }; n.colFmt = { ...this.colFmt }; n.bg = { ...this.bg }; n.copiedFrom = this.name; return n; }
   fmtOf(r, c) { return this.fmt[`${r},${c}`] || this.colFmt[c]; }
   clear() { this.rows = []; this.fmt = {}; this.colFmt = {}; return this; }
   clearContents() { this.rows = []; return this; }

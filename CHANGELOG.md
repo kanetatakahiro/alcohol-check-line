@@ -1,5 +1,15 @@
 # 変更履歴
 
+## 2026-11-19 版 2026-11-19a：交通費申請の受付・照合・締切・社労士共有用の月のタブ（gas/TravelApply.gs・ブランチ feature/travel-apply・**本番未導入**）
+- 新しいファイル gas/TravelApply.gs（指紋 `16989d11f7ca6ce5`）。コード.gs（gas/AlcoholCheck.gs）は AC_handleEvent_ に受け口を1行足しただけ（指紋 `ee046b3013515cd6`。元は 17e の `1f145c99225c987a`）。License.gs・Inquiry.gs・OfficeTask.gs・Travel.gs は変更なし
+- 公式LINEの申請書の写真を、免許証の受付中でない画像・申請の対象の通勤区分の人だけ AI で読む（申請書でなければ今までどおり問い合わせへ）。License.gs の写真の取り出し・API の設定・返信を共用
+- 従業員マスタのファイルに「交通費申請」「交通費明細」「交通費の送る予定」。写真は TRAVEL_APPLY_FOLDER_ID へ
+- 照合：自動計算の距離と片道5km・行き先・15円/km と合計・日付・重複・TOT の出勤（毎朝）。読めない欄は推測せず要確認
+- 毎朝7時台：要確認を「臨時の依頼」に1件1行、回答で確定、回答が空の［完了］は出し直し。4日10時に未提出の人へ催促。6日に前月の締め（月のタブ・管理者へ一覧・要確認は来月へ）
+- 社労士共有用の ID は未受領のため、構成の確認・雛形の作成はしていない（travelApplyInspectSharoushi・travelApplySetupTemplate を用意）
+- Webアプリの再公開とトリガーの追加が要る。手順と戻し方は docs/TRAVEL_APPLY.md
+- テスト：test/travel-apply.test.js 9件（架空のデータ）。模擬環境にタブのコピーを足した。全386件成功。AI・LINE・Maps は呼んでいない
+
 ## 2026-11-18 版 2026-11-18b：交通費（車・バイク）の通勤距離の自動計算と照合（gas/Travel.gs・ブランチ feature/travel-distance・**本番未導入**）
 - 新しいファイル gas/Travel.gs（指紋 `8aed84d5b61a189c`）。ほかの .gs は変更なし。Webアプリの再公開は要らない。トリガーの追加が要る（毎日3時台の travelDistanceDaily）
 - 版 18a（別ファイル「従業員店舗間距離計算」を使う作り。未コミット）を、従業員マスタのファイルの中の新しいタブで動く作りに置き換えた

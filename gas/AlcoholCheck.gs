@@ -3794,6 +3794,7 @@ function AC_handleEvent_(ev) {
   if (src && (src.type === 'group' || src.type === 'room')) { AC_handleGroupEvent_(ev); return; }
   if (!src || src.type !== 'user' || !AC_isUserId(src.userId)) return;   // 1対1のトークだけを扱う
   if (typeof LIC_onUserEvent_ === 'function' && LIC_onUserEvent_(ev)) return;   // 運転免許証（gas/License.gs・版 2026-11-16b）：「免許更新」・免許のボタン・受付中の写真だけ。LICENSE_MODE=on のときだけ
+  if (typeof TA_onUserEvent_ === 'function' && TA_onUserEvent_(ev)) return;   // 交通費申請（gas/TravelApply.gs・版 2026-11-19a）：免許証の受付中でない画像だけ。TRAVEL_APPLY_MODE=on のときだけ止める（record は記録して今までどおり）
   if (ev.type === 'follow') {
     AC_replySelf_(ev.replyToken, AC_render('follow', AC_today_(), {}, AC_templateOverrides_()));
     return;

@@ -1,5 +1,5 @@
 /**
- * 交通費申請の受付・読み取り・照合・締切・社労士共有用の月のタブ（gas/TravelApply.gs・版 2026-11-19a・本番未導入）
+ * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19b・本番未導入）
  *
  * 流れ：
  *   1. 本人が紙の申請書の写真（複数枚可）を公式LINEに送る。
@@ -13,22 +13,22 @@
  *      TOT の出勤の記録は、毎朝の処理（tot-latest.json の日別勤怠）で照合する。
  *   4. 毎朝7時台（travelApplyDaily）：TOT の照合 → 回答が入った行を照合し直して確定 → 要確認の行を「臨時の依頼」（業務一覧ファイル）へ1件1行で追加
  *      （8時の「今日の業務」に出る）。回答が空のまま［完了］になっていたら、確認事項を出し直す。6日は前月の締め（月のタブ・管理者へ一覧）。
- *   5. 締切：毎月4日 10:00（travelApplyRemind・土日祝も日付どおり）に、前月分が届いていない対象者へ個別 LINE で催促。
- *      5日の終わりで締切。6日以降に届いた前月分は「来月反映」（本人にも返信で伝える）。
- *   6. 6日の朝：社労士共有用【リバースHD】の「雛形」タブをコピーして前月の月のタブを作る（同じ名前のタブがあれば作らない・既存の月のタブは書き換えない）。
- *      在籍者を全員並べ、交通費がある行は白、それ以外は薄い灰色。確定した数字だけを入れる。要確認が残る人は状態に出し、数字は入れずに来月へ回す。
+ *   5. 締切（版 2026-11-19b）：提出期日は翌月3日。4日 10:00（travelApplyRemind・土日祝も日付どおり）に、前月分が届いていない対象者へ個別 LINE で催促。
+ *      前月分として受け付けるのは4日 23:59 まで。5日 0時以降に届いた前月分は「来月反映」（本人にも返信で伝える）。5日は管理本部が要確認に回答する日（臨時の依頼の期限）。
+ *   6. 6日の朝（締め）：確定額を給与反映シート（社労士共有用【リバースHD】）の前月のタブ「R{令和}.{M}月分{M+1}月支給」の「通勤手当」に書く
+ *      （gas/PayrollSheet.gs の PAY_writeColumn_。タブが無ければ「テンプレ」から作る。すでに値がある欄は上書きせず管理者へ）。
+ *      要確認が残る人は書かずに来月へ回し、未提出・要確認・書けなかった人の一覧を管理者へ。区間ごとの明細は従業員マスタのファイルに残す。
  *
  * タブ（従業員マスタのファイル。新しいタブだけを足す）：「交通費申請」（1申請1行）・「交通費明細」（1区間1行）・「交通費の送る予定」（record のとき）
  * スクリプトプロパティ：
  *   TRAVEL_APPLY_MODE           off（既定）／record（受け付けて記録するが、LINE・臨時の依頼には送らない。画像は今までどおり問い合わせへも流す）／on
  *   TRAVEL_APPLY_FOLDER_ID      申請書の写真を保存するドライブのフォルダ（閲覧を管理本部に限ったもの）
- *   TRAVEL_SHAROUSHI_SHEET_ID   社労士共有用【リバースHD】のスプレッドシート ID
- *   TRAVEL_SHAROUSHI_TAB_FORMAT 月のタブの名前（既定「{y}年{m}月」）
+ *   PAYROLL_SHEET_ID            給与反映シート（社労士共有用【リバースHD】）のスプレッドシート ID（gas/PayrollSheet.gs と共用）
  *   TRAVEL_YEN_PER_KM           車・バイクの 1km あたりの円（既定 15）
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-19a';
+var TA_VERSION = '2026-11-19b';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
 var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '備考'];
 var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, note: 9 };
@@ -36,8 +36,7 @@ var TA_DETAIL_HEADER = ['申請ID', '社員番号', '日付', '出発', '到着'
   '回答（管理本部が入力）', '確認後の値（管理本部が入力）', '依頼の行'];
 var TA_D = { id: 0, code: 1, date: 2, from: 3, to: 4, means: 5, km: 6, yen: 7, tot: 8, result: 9, issue: 10, answer: 11, value: 12, req: 13 };
 var TA_PLAN_HEADER = ['日時', '種類', '宛先', '内容'];
-var TA_TEMPLATE_SHEET = '雛形';
-var TA_TEMPLATE_HEADER = ['社員番号', '氏名', '所属', '通勤区分', '電車・バス（円）', '車・バイク（km）', '車・バイク（円）', '固定額', '合計', '状態', '備考'];
+var TA_PAY_COLUMN = '通勤手当';   // 給与反映シートで交通費を書く列
 var TA_APPLY_TYPES = ['交通費申請（車・バイク）', '公共交通機関'];   // 写真を受け付ける通勤区分
 var TA_REMIND_TYPE = '交通費申請（車・バイク）';                     // 4日の催促・未提出の対象
 var TA_FIXED_TYPE = '定期（固定額）';
@@ -46,16 +45,15 @@ var TA_MEANS = { car: '車', bike: 'バイク', train: '電車', bus: 'バス', 
 var TA_OK = 'OK', TA_CHECK = '要確認', TA_DONE = '確認済み';
 var TA_TOT_WAIT = '未確認', TA_TOT_YES = 'あり', TA_TOT_NO = 'なし', TA_TOT_UNKNOWN = '確認できない';
 var TA_ST = { recv: '受付', check: '要確認', fixed: '確定', next: '来月反映' };
-var TA_DEADLINE_DAY = 5, TA_REMIND_DAY = 4, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
+var TA_ACCEPT_DAY = 4, TA_ANSWER_DAY = 5, TA_REMIND_DAY = 4, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
 var TA_DEFAULT_YEN_PER_KM = 15, TA_AI_DEFAULT_MAX = 100;
-var TA_WHITE = '#ffffff', TA_GREY = '#efefef';
 var TA_TEXT = {
   ack: '交通費申請の写真を受け付けました（{month}分・{n}件）。\n内容を確認して、気になる点があれば管理本部からご連絡します。',
   ackNoMonth: '交通費申請の写真を受け付けました（{n}件）。\n対象の月が読み取れなかったため、管理本部で確認します。',
   ackNoRead: '交通費申請の写真を受け付けました。\n内容は管理本部が写真で確認します。',
-  late: '\n締切（{deadline}）を過ぎて届いたため、来月のお給料での反映になります。',
+  late: '\n受付の締切（{deadline}）を過ぎて届いたため、来月のお給料での反映になります。',
   fail: '写真をうまく受け取れませんでした。お手数ですが、もう一度送ってください。',
-  remind: '先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。5日を過ぎると、来月のお給料での反映になります。',
+  remind: '先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。5日以降に届いた分は、来月のお給料での反映になります。',
 };
 /** 確認事項（detail：シートに書く。数字を含んでよい／memo：グループに出る「臨時の依頼」のメモ。金額・住所は書かない／fix：どう直すか） */
 var TA_ISSUE = {
@@ -91,9 +89,9 @@ function TA_monthLabel(ym) { return ym ? Number(ym.slice(5, 7)) + '月' : ''; }
 function TA_md(ymd) { return ymd ? Number(ymd.slice(5, 7)) + '/' + Number(ymd.slice(8, 10)) : ''; }
 function TA_validYmd(y, m, d) { var t = new Date(Date.UTC(y, m - 1, d)); return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; }
 
-/** 純粋関数：締切までに受け付けられる月（5日までは前月、6日からは今月） */
+/** 純粋関数：前月分として受け付けられる月（4日までは前月、5日からは今月） */
 function TA_openMonth(today) {
-  return Number(today.slice(8, 10)) <= TA_DEADLINE_DAY ? TA_addMonth(TA_ym(today), -1) : TA_ym(today);
+  return Number(today.slice(8, 10)) <= TA_ACCEPT_DAY ? TA_addMonth(TA_ym(today), -1) : TA_ym(today);
 }
 /** 純粋関数：反映月（対象月と、受け付けた日に開いている月の遅いほう）。対象月が無ければ '' */
 function TA_reflectMonth(target, receivedYmd) {
@@ -101,8 +99,10 @@ function TA_reflectMonth(target, receivedYmd) {
   var open = TA_openMonth(receivedYmd);
   return target < open ? open : target;
 }
-/** 純粋関数：その月の締切の日（翌月5日） */
-function TA_deadlineOf(ym) { return TA_addMonth(ym, 1) + '-' + TA_pad(TA_DEADLINE_DAY); }
+/** 純粋関数：その月の分を受け付ける最後の日（翌月4日） */
+function TA_acceptDeadline(ym) { return TA_addMonth(ym, 1) + '-' + TA_pad(TA_ACCEPT_DAY); }
+/** 純粋関数：要確認に回答する日（翌月5日。臨時の依頼の期限） */
+function TA_answerDay(ym) { return TA_addMonth(ym, 1) + '-' + TA_pad(TA_ANSWER_DAY); }
 
 /** 純粋関数：「YYYY-MM」の形の月（日付・「2026/11」・「2026年11月」）。読めなければ '' */
 function TA_ymOf(v) {
@@ -326,8 +326,9 @@ function TA_totCheck(index, totCode, date) {
 }
 
 /**
- * 純粋関数：月のタブの行。month＝'YYYY-MM'。people＝在籍者 [{ code, name, dept }]、inputs＝「通勤距離」の入力、apps＝[{ ...app, state }]。
- * 返り値 [{ code, values: { 見出し: 値 }, white, pendingIds（来月へ回す申請ID） }]
+ * 純粋関数：締めの月の1人ずつの結果。month＝'YYYY-MM'。people＝在籍者 [{ code, name }]、inputs＝「通勤距離」の入力、apps＝[{ ...app, state }]。
+ * 返り値 [{ code, amount（通勤手当に書く確定額。書かないときは 0）, status（確定・要確認・未提出・来月反映・''）, pendingIds（来月へ回す申請ID） }]
+ * 要確認が1つでもあれば、その人のその月の申請は全部来月へ（数字は書かない）。定期（固定額）の人は「通勤距離」の固定額
  */
 function TA_monthRows(month, people, inputs, apps, rate) {
   return people.map(function (p) {
@@ -335,28 +336,17 @@ function TA_monthRows(month, people, inputs, apps, rate) {
     var mine = apps.filter(function (a) { return a.code === p.code; });
     var here = mine.filter(function (a) { return a.reflect === month; });
     var pend = here.filter(function (a) { return !TA_settled(a.state.status); });
-    var ok = pend.length ? [] : here.filter(function (a) { return TA_settled(a.state.status); });
+    var ok = pend.length ? [] : here;
     var late = mine.filter(function (a) { return a.target === month && a.reflect > month; });
-    var v = { pub: 0, km: 0, car: 0 }, fixed = type === TA_FIXED_TYPE ? TA_parseYen(inp.fixed) : null;
-    ok.forEach(function (a) { v.pub += a.state.pub; v.km += a.state.carKm; v.car += a.state.carYen; });
-    v.km = Math.round(v.km * 10) / 10;
-    var total = v.pub + v.car + (fixed || 0), status = '', note = [];
-    if (pend.length) { status = TA_ST.check; note.push('要確認のため来月に反映'); }
-    else if (ok.length) { status = TA_ST.fixed; if (ok.some(function (a) { return a.target < month; })) note.push('前月以前の分を含む'); if (late.length) note.push('一部は来月反映'); }
+    var fixed = type === TA_FIXED_TYPE ? TA_parseYen(inp.fixed) : null, amount = 0, status = '';
+    ok.forEach(function (a) { amount += a.state.pub + a.state.carYen; });
+    if (!pend.length && fixed !== null) amount += fixed;
+    if (pend.length) status = TA_ST.check;
+    else if (ok.length || fixed !== null) status = TA_ST.fixed;
     else if (late.length) status = TA_ST.next;
     else if (type === TA_REMIND_TYPE && !mine.some(function (a) { return a.target === month; })) status = '未提出';
-    else if (fixed !== null) { status = TA_ST.fixed; note.push(TA_FIXED_TYPE); }
-    else if (type && TA_APPLY_TYPES.indexOf(type) === -1) note.push(type);
-    var hasNums = !pend.length && (ok.length || fixed !== null);
-    var values = { '社員番号': "'" + p.code, '氏名': p.name, '所属': p.dept, '通勤区分': type,
-      '電車・バス（円）': hasNums && v.pub ? v.pub : '', '車・バイク（km）': hasNums && v.km ? v.km : '', '車・バイク（円）': hasNums && v.car ? v.car : '',
-      '固定額': fixed !== null && !pend.length ? fixed : '', '合計': hasNums && total ? total : '', '状態': status, '備考': note.join('・') };
-    return { code: p.code, values: values, white: !!(pend.length || (hasNums && total > 0)), pendingIds: pend.length ? here.map(function (a) { return a.id; }) : [] };
+    return { code: p.code, amount: pend.length ? 0 : amount, status: status, pendingIds: pend.length ? here.map(function (a) { return a.id; }) : [] };
   });
-}
-/** 純粋関数：月のタブの名前（format の {y}・{m}・{mm}） */
-function TA_tabName(format, month) {
-  return String(format || '{y}年{m}月').replace(/\{y\}/g, month.slice(0, 4)).replace(/\{mm\}/g, month.slice(5, 7)).replace(/\{m\}/g, String(Number(month.slice(5, 7))));
 }
 
 // ---------------- シート ----------------
@@ -550,7 +540,7 @@ function TA_receive_(ss, person, blob, ai, today, imageSet) {
   var count = TA_rowsOf_(st, app.id).filter(function (d) { return d.from !== TA_WHOLE; }).length, reply = '';
   if (last) {
     reply = !ai.res ? TA_TEXT.ackNoRead : app.target ? TA_fillText(TA_TEXT.ack, { month: TA_monthLabel(app.target), n: count }) : TA_fillText(TA_TEXT.ackNoMonth, { n: count });
-    if (app.target && app.reflect > app.target) reply += TA_fillText(TA_TEXT.late, { deadline: TA_md(TA_deadlineOf(app.target)) });
+    if (app.target && app.reflect > app.target) reply += TA_fillText(TA_TEXT.late, { deadline: TA_md(TA_acceptDeadline(app.target)) });
   }
   return { id: app.id, added: newRows.length, issues: issueCount, reply: reply };
 }
@@ -635,7 +625,7 @@ function travelApplyDaily() {
       Object.keys(TA_ISSUE).forEach(function (k) { if (d.issue.indexOf(TA_ISSUE[k].memo) !== -1 || (k === 'over' && /申請 [0-9.]+km・自動計算/.test(d.issue)) || (k === 'place' && /行き先がわからない/.test(d.issue))) issues.push({ code: k, field: '出発・到着' }); });
       if (!issues.length) issues.push({ code: 'unclear', field: '確認事項の欄' });
       var q = TA_requestOf(d, app, issues, d.row);
-      var due = app.target && TA_deadlineOf(app.target) > today ? TA_deadlineOf(app.target) : today;
+      var due = app.target && TA_answerDay(app.target) > today ? TA_answerDay(app.target) : today;
       if (reqSheet) {
         reqSheet.appendRow([new Date(), '', q.name, "'" + due, q.memo, '']);
         set(d, TA_D.req, String(reqSheet.getLastRow()));
@@ -662,61 +652,58 @@ function TA_people_(today) {
   return TRV_active(mv, today).map(function (p) { return { code: p.code, name: p.name, dept: p.dept, userId: (lic[p.code] || {}).userId || '' }; });
 }
 
-/** 6日：前月の月のタブを作り、要確認の申請を来月へ回し、管理者へ未提出・要確認の一覧を送る（同じ月は1回だけ） */
+/**
+ * 6日（締め）：前月の確定額を給与反映シートの「通勤手当」に書き（PAY_writeColumn_）、要確認の申請を来月へ回し、
+ * 管理者へ未提出・要確認・書けなかった人の一覧を送る（同じ月は1回だけ。やり直しは travelApplyCloseAgain）
+ */
 function TA_close_(ss, st, month, mode, today) {
   var state = AC_state_(), key = 'ta-close:' + month;
   if (state.getProperty(key)) return month + ' は締め済み';
   var people = TA_people_(today), inputs = TRV_commuteInputs(TRV_sheetValues_(ss, TRV_COMMUTE_SHEET));
   var rows = TA_monthRows(month, people, inputs, st.apps, TA_rate_());
-  var tabMsg = TA_writeMonthTab_(month, rows, mode);
+  var amounts = rows.filter(function (r) { return r.amount > 0; }).map(function (r) { return { code: r.code, value: r.amount }; });
+  var payMsg, pay = null;
+  try {
+    pay = PAY_writeColumn_(month, TA_PAY_COLUMN, amounts, { people: people, mode: mode });
+    payMsg = mode === 'on'
+      ? '\n給与反映シートの「' + pay.tab + '」' + (pay.created ? '（テンプレから作りました）' : '') + 'の「' + TA_PAY_COLUMN + '」に ' + pay.written.length + '人分を書きました。'
+      : '\n（record のため給与反映シートには書いていません。「' + pay.tab + '」の「' + TA_PAY_COLUMN + '」に ' + pay.written.length + '人分を書く予定' + (pay.willCreate ? '・タブはテンプレから作る予定' : '') + '）';
+    if (pay.conflict.length) payMsg += '\n・すでに値があるため書かなかった（上書きしていません）：従業員番号 ' + pay.conflict.join('、');
+    if (pay.missing.length) payMsg += '\n・タブに行が無いため書かなかった：従業員番号 ' + pay.missing.join('、');
+  } catch (e) { payMsg = '\n※給与反映シートに書けませんでした（' + (e && e.message) + '）。直したあと travelApplyCloseAgain を実行してください。'; }
+  if (mode !== 'on') TA_plan_('給与反映シート', TA_PAY_COLUMN, amounts.map(function (a) { return a.code + ' ' + a.value; }).join('\n'));
   // 要確認の申請は来月へ
   var next = TA_addMonth(month, 1), moved = 0;
   rows.forEach(function (r) { r.pendingIds.forEach(function (id) {
     var a = st.apps.filter(function (x) { return x.id === id; })[0];
+    a.reflect = next;
     st.as.getRange(a.row, TA_A.reflect + 1).setValue("'" + next);
     st.as.getRange(a.row, TA_A.note + 1).setValue((a.note ? a.note + '・' : '') + TA_monthLabel(month) + 'の締めで要確認のため来月へ');
     moved++;
   }); });
   var name = {}; people.forEach(function (p) { name[p.code] = p.name; });
-  var list = function (s) { return rows.filter(function (r) { return r.values['状態'] === s; }).map(function (r) { return r.code + ' ' + name[r.code]; }); };
+  var list = function (s2) { return rows.filter(function (r) { return r.status === s2; }).map(function (r) { return r.code + ' ' + name[r.code]; }); };
   var miss = list('未提出'), chk = list(TA_ST.check);
-  var text = '【交通費】' + TA_monthLabel(month) + '分の申請の締切（' + TA_md(TA_deadlineOf(month)) + '）を過ぎました。' + tabMsg
-    + '\n・未提出 ' + miss.length + '人' + (miss.length ? '\n' + miss.map(function (s) { return '　' + s; }).join('\n') : '')
-    + '\n・要確認が残っている ' + chk.length + '人（来月に反映）' + (chk.length ? '\n' + chk.map(function (s) { return '　' + s; }).join('\n') : '')
+  var text = '【交通費】' + TA_monthLabel(month) + '分を締めました（受付は' + TA_md(TA_acceptDeadline(month)) + 'まで・回答は' + TA_md(TA_answerDay(month)) + 'まで）。' + payMsg
+    + '\n・未提出 ' + miss.length + '人' + (miss.length ? '\n' + miss.map(function (x) { return '　' + x; }).join('\n') : '')
+    + '\n・要確認が残っている ' + chk.length + '人（来月に反映）' + (chk.length ? '\n' + chk.map(function (x) { return '　' + x; }).join('\n') : '')
     + (chk.length ? '\n「交通費明細」の回答をお願いします。' : '');
   if (mode === 'on') AC_pushLine_(text); else TA_plan_('管理者のまとめ', '管理者', text);
   state.setProperty(key, new Date().toISOString());
-  return month + ' を締め（未提出 ' + miss.length + '・要確認 ' + chk.length + '・来月へ ' + moved + '件）';
+  return month + ' を締め（書いた ' + (pay ? pay.written.length : 0) + '・上書きしなかった ' + (pay ? pay.conflict.length : 0) + '・未提出 ' + miss.length + '・要確認 ' + chk.length + '・来月へ ' + moved + '件）';
 }
 
-/** 月のタブを作る（on：社労士共有用の「雛形」をコピー。record：従業員マスタのファイルに「（試し）」で）。同じ名前のタブがあれば作らない */
-function TA_writeMonthTab_(month, rows, mode) {
-  var id = TA_props_().getProperty('TRAVEL_SHAROUSHI_SHEET_ID'), sr = id ? SpreadsheetApp.openById(id) : null;
-  if (mode === 'on' && !sr) return '\n※社労士共有用のシートの ID（TRAVEL_SHAROUSHI_SHEET_ID）が未設定のため、月のタブは作っていません。';
-  var dest = mode === 'on' ? sr : TRV_book_();
-  var name = (mode === 'on' ? '' : '交通費（試し）') + TA_tabName(TA_props_().getProperty('TRAVEL_SHAROUSHI_TAB_FORMAT'), month);
-  if (dest.getSheetByName(name)) return '\n※「' + name + '」タブがすでにあるため、月のタブは作っていません（書き換えていません）。';
-  var tpl = sr ? sr.getSheetByName(TA_TEMPLATE_SHEET) : null;
-  if (!tpl && sr && mode === 'on') tpl = TA_template_(sr);
-  var sh;
-  if (tpl) { sh = tpl.copyTo(dest); sh.setName(name); }
-  else { sh = dest.insertSheet(name); sh.getRange(1, 1, 1, TA_TEMPLATE_HEADER.length).setValues([TA_TEMPLATE_HEADER]).setFontWeight('bold'); sh.setFrozenRows(1); }
-  var head = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getValues()[0].map(function (h) { return String(h).trim(); });
-  if (rows.length) {
-    sh.getRange(2, 1, rows.length, head.length).setValues(rows.map(function (r) { return head.map(function (h) { return r.values[h] !== undefined ? r.values[h] : ''; }); }));
-    rows.forEach(function (r, i) { sh.getRange(i + 2, 1, 1, head.length).setBackground(r.white ? TA_WHITE : TA_GREY); });
-  }
-  return '\n「' + name + '」タブを作りました（' + rows.length + '人）。';
-}
-
-/** 社労士共有用に「雛形」タブを作る（無いときだけ。既存のタブは変えない） */
-function TA_template_(sr) {
-  var sh = sr.getSheetByName(TA_TEMPLATE_SHEET);
-  if (sh) return sh;
-  sh = sr.insertSheet(TA_TEMPLATE_SHEET);
-  sh.getRange(1, 1, 1, TA_TEMPLATE_HEADER.length).setValues([TA_TEMPLATE_HEADER]).setFontWeight('bold');
-  sh.setFrozenRows(1);
-  return sh;
+/** 手動実行：締めをやり直す（給与反映シートに書けなかったときなど）。month＝'YYYY-MM'（省略で前月）。すでに値がある欄は上書きしない */
+function travelApplyCloseAgain(month) {
+  var mode = TA_mode_(), today = AC_today_();
+  if (mode === 'off') throw new Error('TRAVEL_APPLY_MODE が off です');
+  month = month || TA_addMonth(TA_ym(today), -1);
+  AC_state_().deleteProperty('ta-close:' + month);
+  var ss = TRV_book_(), st = TA_load_(ss);
+  st.apps.forEach(function (a) { TA_refreshApp_(st, a, today); });
+  var r = TA_close_(ss, st, month, mode, today);
+  Logger.log(TRV_fmt('交通費申請の締めのやり直し（版 %s・%s）：%s', TA_VERSION, mode, r));
+  return r;
 }
 
 // ---------------- 4日の催促 ----------------
@@ -749,23 +736,8 @@ function travelApplyRemind() {
 }
 
 // ---------------- 準備・確認・トリガー（安藤さんが手で実行） ----------------
-/** 社労士共有用のシートの構成を見る（読むだけ。タブの名前・行数・1行目の見出しだけをログに出す） */
-function travelApplyInspectSharoushi() {
-  var id = TA_props_().getProperty('TRAVEL_SHAROUSHI_SHEET_ID');
-  if (!id) throw new Error('TRAVEL_SHAROUSHI_SHEET_ID が未設定です');
-  var out = SpreadsheetApp.openById(id).getSheets().map(function (sh) {
-    var w = Math.max(sh.getLastColumn(), 1);
-    return { name: sh.getName(), rows: sh.getLastRow(), header: sh.getRange(1, 1, 1, w).getValues()[0].map(function (h) { return String(h).trim(); }) };
-  });
-  out.forEach(function (t) { Logger.log(TRV_fmt('社労士共有用：「%s」%s行／見出し：%s', t.name, t.rows, t.header.join('｜'))); });
-  return out;
-}
-/** 社労士共有用のシートに「雛形」タブを作る（無いときだけ） */
-function travelApplySetupTemplate() {
-  var id = TA_props_().getProperty('TRAVEL_SHAROUSHI_SHEET_ID');
-  if (!id) throw new Error('TRAVEL_SHAROUSHI_SHEET_ID が未設定です');
-  return TA_template_(SpreadsheetApp.openById(id)).getName();
-}
+/** 給与反映シート（社労士共有用【リバースHD】）の構成を見る（読むだけ。gas/PayrollSheet.gs の PAY_inspect。氏名・金額は出さない） */
+function travelApplyInspectSharoushi() { return PAY_inspect(); }
 function travelApplySetupTriggers() {
   travelApplyRemoveTriggers();
   ScriptApp.newTrigger('travelApplyDaily').timeBased().everyDays(1).atHour(TA_DAILY_HOUR).inTimezone(AC_TZ).create();
@@ -779,5 +751,5 @@ function travelApplyRemoveTriggers() {
 
 if (typeof module !== 'undefined') {
   module.exports = { TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
-    TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_monthRows: TA_monthRows, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
+    TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_acceptDeadline: TA_acceptDeadline, TA_answerDay: TA_answerDay, TA_monthRows: TA_monthRows, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
 }

@@ -34,13 +34,19 @@ class Range {
   setDataValidation(rule) { this.sheet.dv.push({ r: this.r, c: this.c, nr: this.nr, nc: this.nc, rule }); return this; }
   getBackgrounds() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.bg[`${this.r + i},${this.c + j}`] || '#ffffff'); out.push(row); } return out; }
   setBackground(c) { this.each((r, cc) => { this.sheet.bg[`${r},${cc}`] = c; }); return this; }
+  getFormulasR1C1() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.formulas[`${this.r + i},${this.c + j}`] || ''); out.push(row); } return out; }
+  setFormulaR1C1(f) { this.sheet.formulas[`${this.r},${this.c}`] = f; return this; }
+  clearContent() { this.each((r, c) => this.sheet.set(r, c, '')); return this; }
 }
 
 class Sheet {
   static seq = 0;
-  constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; this.bg = {}; this.dv = []; this.hidden = false; }
+  constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; this.bg = {}; this.dv = []; this.hidden = false; this.formulas = {}; this.cf = []; this.frozen = 0; }
   hideSheet() { this.hidden = true; return this; }
-  copyTo(ss) { const n = ss.insertSheet(this.name + ' のコピー'); n.rows = this.rows.map((r) => (r ? r.slice() : r)); n.fmt = { ...this.fmt }; n.colFmt = { ...this.colFmt }; n.bg = { ...this.bg }; n.copiedFrom = this.name; return n; }
+  copyTo(ss) { const n = ss.insertSheet(this.name + ' のコピー'); n.rows = this.rows.map((r) => (r ? r.slice() : r)); n.fmt = { ...this.fmt }; n.colFmt = { ...this.colFmt }; n.bg = { ...this.bg }; n.formulas = { ...this.formulas }; n.cf = this.cf.slice(); n.frozen = this.frozen; n.copiedFrom = this.name; return n; }
+  getConditionalFormatRules() { return this.cf.slice(); }
+  setConditionalFormatRules(r) { this.cf = r.slice(); return this; }
+  getFrozenRows() { return this.frozen; }
   fmtOf(r, c) { return this.fmt[`${r},${c}`] || this.colFmt[c]; }
   clear() { this.rows = []; this.fmt = {}; this.colFmt = {}; return this; }
   clearContents() { this.rows = []; return this; }
@@ -68,7 +74,7 @@ class Sheet {
     Object.entries(this.fmt).forEach(([k, v]) => { const [rr, cc] = k.split(',').map(Number); if (rr < r) f[k] = v; else if (rr > r) f[`${rr - 1},${cc}`] = v; });
     this.fmt = f;
   }
-  setFrozenRows() { return this; }
+  setFrozenRows(n) { this.frozen = n; return this; }
   /** テスト用：値を2次元配列で（空は''） */
   dump() { return this.getDataRange().getValues(); }
 }
@@ -167,6 +173,7 @@ export function createGas({ files, now, shared }) {
     SpreadsheetApp: {
       openById: (id) => { if (!sheets[id]) throw new Error('ファイルがありません'); return sheets[id]; },
       create: (name) => { const id = `ss${Object.keys(sheets).length + 1}`; sheets[id] = new Spreadsheet(id, name); sheets[id].insertSheet('シート1'); return sheets[id]; },
+      newConditionalFormatRule: () => { const rule = {}; const b = { whenFormulaSatisfied(f) { rule.formula = f; return b; }, setBackground(c) { rule.bg = c; return b; }, setRanges(r) { rule.ranges = r; return b; }, build() { return rule; } }; return b; },
       newDataValidation: () => { const rule = {}; return { requireValueInList(l) { rule.list = l; return this; }, requireValueInRange(r) { rule.range = r; return this; }, setAllowInvalid(b) { rule.allowInvalid = b; return this; }, build() { return rule; } }; },
     },
     PropertiesService: { getScriptProperties: () => scriptProps, getUserProperties: () => userProps },

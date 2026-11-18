@@ -1,5 +1,13 @@
 # 変更履歴
 
+## 2026-11-19 版 2026-11-19b：交通費申請の締切の変更・給与反映シート（社労士共有用【リバースHD】）の今の形に合わせる（ブランチ feature/travel-apply・**本番未導入**）
+- 締切：前月分の受付は4日 23:59 まで。5日 0時以降の前月分は来月反映（返信で伝える）。5日は要確認に回答する日（臨時の依頼の期限）。締めは6日の朝のまま。催促の文面の「5日を過ぎると」を「5日以降に届いた分は」に
+- 給与反映シート：新しいファイル gas/PayrollSheet.gs（指紋 `2f1a99a490c9eee8`）。月のタブ「R{令和}.{M}月分{M+1}月支給」（★付きも同じ月）・2行目の見出し・「テンプレ」に合わせた。無ければテンプレから作る（在籍者全員・合計の式・金額の無い行は灰色の条件付き書式）。確定額は「通勤手当」へ（固定額の人は固定額）。すでに値がある欄は上書きせず管理者へ。列の名前を渡せば立替経費にも使える共通の関数 PAY_writeColumn_
+- 「雛形」タブ・新しい列の月のタブ・record の試しのタブはやめた。プロパティは PAYROLL_SHEET_ID（TRAVEL_SHAROUSHI_* は使わない）。travelApplyInspectSharoushi は PAY_inspect（構成を詳しく。氏名・金額は出さない）。締めのやり直し travelApplyCloseAgain
+- OfficeTask.gs を本番と同じ 18a（`44e88bde089bf96a`・feature/office-task）に合わせた。臨時の依頼のタブ・列・状態「完了」の扱いは 17d と同じで、交通費の行の足し方はそのまま使える
+- gas/TravelApply.gs（指紋 `dd3d7776ed672f98`）。コード.gs は 19a と同じ（`ee046b3013515cd6`）
+- テスト：test/travel-apply.test.js 10件。模擬環境に式・条件付き書式・固定した行を足した。全388件成功
+
 ## 2026-11-19 版 2026-11-19a：交通費申請の受付・照合・締切・社労士共有用の月のタブ（gas/TravelApply.gs・ブランチ feature/travel-apply・**本番未導入**）
 - 新しいファイル gas/TravelApply.gs（指紋 `16989d11f7ca6ce5`）。コード.gs（gas/AlcoholCheck.gs）は AC_handleEvent_ に受け口を1行足しただけ（指紋 `ee046b3013515cd6`。元は 17e の `1f145c99225c987a`）。License.gs・Inquiry.gs・OfficeTask.gs・Travel.gs は変更なし
 - 公式LINEの申請書の写真を、免許証の受付中でない画像・申請の対象の通勤区分の人だけ AI で読む（申請書でなければ今までどおり問い合わせへ）。License.gs の写真の取り出し・API の設定・返信を共用

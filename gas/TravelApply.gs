@@ -1,5 +1,5 @@
 /**
- * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19b・本番未導入）
+ * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19c・本番未導入）
  *
  * 流れ：
  *   1. 本人が紙の申請書の写真（複数枚可）を公式LINEに送る。
@@ -28,7 +28,7 @@
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-19b';
+var TA_VERSION = '2026-11-19c';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
 var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '備考'];
 var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, note: 9 };
@@ -668,8 +668,9 @@ function TA_close_(ss, st, month, mode, today) {
     payMsg = mode === 'on'
       ? '\n給与反映シートの「' + pay.tab + '」' + (pay.created ? '（テンプレから作りました）' : '') + 'の「' + TA_PAY_COLUMN + '」に ' + pay.written.length + '人分を書きました。'
       : '\n（record のため給与反映シートには書いていません。「' + pay.tab + '」の「' + TA_PAY_COLUMN + '」に ' + pay.written.length + '人分を書く予定' + (pay.willCreate ? '・タブはテンプレから作る予定' : '') + '）';
+    if (pay.added.length) payMsg += '\n・並んでいなかったため行を足した' + (mode === 'on' ? '' : '（予定）') + '：従業員番号 ' + pay.added.join('、');
     if (pay.conflict.length) payMsg += '\n・すでに値があるため書かなかった（上書きしていません）：従業員番号 ' + pay.conflict.join('、');
-    if (pay.missing.length) payMsg += '\n・タブに行が無いため書かなかった：従業員番号 ' + pay.missing.join('、');
+    if (pay.missing.length) payMsg += '\n・在籍者に見つからないため書かなかった：従業員番号 ' + pay.missing.join('、');
   } catch (e) { payMsg = '\n※給与反映シートに書けませんでした（' + (e && e.message) + '）。直したあと travelApplyCloseAgain を実行してください。'; }
   if (mode !== 'on') TA_plan_('給与反映シート', TA_PAY_COLUMN, amounts.map(function (a) { return a.code + ' ' + a.value; }).join('\n'));
   // 要確認の申請は来月へ

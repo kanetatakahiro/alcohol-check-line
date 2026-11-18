@@ -4,16 +4,34 @@ import { createGas } from './helpers/gas-mock.js';
 
 // 交通費申請（gas/TravelApply.gs・版 2026-11-19b）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'OfficeTask.gs', 'Travel.gs', 'TravelApply.gs', 'PayrollSheet.gs'];
-// 給与反映シート（社労士共有用【リバースHD】）の今の形（架空の値）：1行目B列に支給月・2行目が見出し・3行目から1人1行・合計は式
-const PAY_HEAD = ['従業員番号', '氏名', '立替経費', '通勤手当', '固定立て替え', '家族補助', 'インセンティブ', '合計'];
-const SUM = '=SUM(R[0]C[-6]:R[0]C[-1])';
+// 給与反映シート（社労士共有用【リバースHD】）の本番の形（2026-11-19 に確認した見出しと形。値は架空）：
+// 1行目 B「2026年」・C「11月支給」／2行目 B〜I の見出し／3行目から人の行（I 列 =SUM(D:H)）／すぐ下に合計の行（D〜I =SUM(D3:D…)）／
+// その下に固定立て替えの表（D〜J）と L 列のチェックボックス・M 列のメモ
+const PAY_HEAD = ['', '従業員番号', '氏名', '立替経費', '通勤手当', '固定立て替え', '家賃補助', 'インセンティブ', '合計'];
+const FIXED_HEAD = ['', '', '', '内容', '', '合計金額', '支払い回数', '期間（開始）', '期間（終了）', '当月徴収金額', '', false, '修正箇所'];
+const FIXED_ROW = ['', '', '', 'テスト備品', '', 30000, 6, "'2026-10", "'2027-03", 5000, '', true, 'テストのメモ'];
+/** 月のタブ（テンプレも同じ形）。people＝[[従業員番号, 氏名, {列: 値}]]（空の行は null） */
+function payTab(sr, name, head1, people) {
+  const sh = sr.insertSheet(name);
+  sh.appendRow(['', ...head1]); sh.appendRow(PAY_HEAD);
+  const cols = { 立替経費: 4, 通勤手当: 5, 固定立て替え: 6, 家賃補助: 7, インセンティブ: 8 };
+  people.forEach((p, i) => {
+    const r = 3 + i;
+    if (p) { sh.getRange(r, 2).setValue("'" + p[0]); sh.getRange(r, 3).setValue(p[1]); Object.entries(p[2] || {}).forEach(([k, v]) => sh.getRange(r, cols[k]).setValue(v)); }
+    sh.getRange(r, 9).setFormula((i === 1 ? '=sum' : '=SUM') + `(D${r}:H${r})`);   // 小文字の =sum の行もある
+  });
+  const sumRow = 3 + people.length;
+  ['D', 'E', 'F', 'G', 'H', 'I'].forEach((c, j) => sh.getRange(sumRow, 4 + j).setFormula(`=SUM(${c}3:${c}${sumRow - 1})`));
+  [FIXED_HEAD, FIXED_ROW].forEach((row, i) => row.forEach((v, j) => { if (v !== '') sh.getRange(sumRow + 3 + i, j + 1).setValue(v); }));
+  sh.setFrozenRows(2);
+  return sh;
+}
+const snap = (sh) => JSON.stringify([sh.dump(), sh.formulas, sh.cf]);
 function payBook(g) {
   const sr = g.newSpreadsheet('【テスト】社労士共有用（架空）');
-  const tpl = sr.insertSheet('テンプレ');
-  [['', '2026年 X月支給'], PAY_HEAD].forEach((r) => tpl.appendRow(r));
-  tpl.getRange(3, 8).setFormulaR1C1(SUM); tpl.setFrozenRows(2);
-  const old = sr.insertSheet('★R8.10月分11月支給');
-  [['', '2026年 11月支給'], PAY_HEAD, ["'90001", '試験 一郎', '', 1234, '', '', '', ''], ["'90002", '試験 二郎', '', '', '', '', '', '']].forEach((r) => old.appendRow(r));
+  sr.insertSheet('従業員コード').appendRow(['触らないタブ']);
+  payTab(sr, 'テンプレ', ['2026年', '月支給'], [['90001', '試験 一郎', { 固定立て替え: 5000 }], ['90009', '試験 九郎（テンプレにいる人）'], null]);
+  payTab(sr, 'R8.10月分11月支給', ['2026年', '11月支給'], [['90001', '試験 一郎', { 通勤手当: 1234 }]]);
   return sr;
 }
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
@@ -282,7 +300,7 @@ test('交通費申請（締切）: 4日 10:00 の催促は対象者だけ・提�
   assert.match(replies(g, n2)[0], /（6月分・1件）。[\s\S]*受付の締切（7\/4）を過ぎて届いたため、来月のお給料での反映になります。/);
 });
 
-test('交通費申請（給与反映シート）: 6日の締めでタブが無ければ「テンプレ」から「R8.11月分12月支給」を作り、在籍者全員と式・条件付き書式。確定額は「通勤手当」へ（固定額の人は固定額）。要確認は書かずに来月へ。既存のタブは変えない', () => {
+test('交通費申請（給与反映シート）: 6日の締めでタブが無ければ「テンプレ」から作る（1行目 B・C・テンプレの人は残し、足りない在籍者だけ足す・合計の行の上に挿入して =SUM を広げる・下の表と L・M 列はそのまま）。確定額は「通勤手当」へ', () => {
   const { g, master, sr } = setup();
   totLatest(g, { '2026-11-05': ['k1'], '2026-11-06': ['k1'], '2026-11-12': ['k2', 'k3'] });
   g.ai.queue.push(form([{ date: '11/5', from: '自宅', to: '甲町', km: '10' }, { date: '11/6', from: '甲町', to: '乙山', km: '20' }]));
@@ -291,7 +309,7 @@ test('交通費申請（給与反映シート）: 6日の締めでタブが無�
   photo(g, U(2));
   g.ai.queue.push(form([{ date: '11/12', from: '大宮駅', to: '浦和駅', means: 'train', yen: '420' }]));
   photo(g, U(3));   // 90003（公共交通機関）
-  const old = tab(sr, '★R8.10月分11月支給'), oldDump = JSON.stringify([old.dump(), old.formulas, old.cf]), tplDump = JSON.stringify([tab(sr, 'テンプレ').dump(), tab(sr, 'テンプレ').formulas]);
+  const before = sr.getSheets().filter((x) => !/R8\.11/.test(x.getName())).map((x) => [x.getName(), snap(x)]);
   at(g, '2026-12-05T07:00:00+09:00');
   assert.equal(g.ctx.travelApplyDaily().closed, '');   // 5日は締めない（回答の日）
   at(g, '2026-12-06T07:00:00+09:00');
@@ -301,16 +319,19 @@ test('交通費申請（給与反映シート）: 6日の締めでタブが無�
   const t = tab(sr, 'R8.11月分12月支給');
   assert.equal(t.copiedFrom, 'テンプレ');
   const v = t.dump();
-  assert.equal(v[0][1], '2026年 12月支給');
-  assert.deepEqual(v[1], PAY_HEAD);
-  assert.deepEqual(v.slice(2).map((x) => [String(x[0]), x[1], x[2], x[3], x[4]]), [
-    ['90001', '試験 一郎', '', 450, ''], ['90002', '試験 二郎', '', '', ''], ['90003', '試験 三郎', '', 420, ''], ['90004', '試験 四郎', '', '', ''], ['90005', '試験 五郎', '', 12000, '']]);
-  assert.deepEqual([3, 4, 5, 6, 7].map((i) => t.formulas[`${i},8`]), [SUM, SUM, SUM, SUM, SUM]);   // 合計の式（テンプレの3行目と同じ形）
-  assert.deepEqual(t.cf.map((c) => [c.formula, c.bg, c.ranges[0].r, c.ranges[0].nr]), [
-    ['=AND($A3<>"",SUM($C3:$G3)=0)', '#efefef', 3, 5], ['=AND($A3<>"",SUM($C3:$G3)<>0)', '#ffffff', 3, 5]]);
-  assert.equal(t.frozen, 2);
-  assert.equal(JSON.stringify([old.dump(), old.formulas, old.cf]), oldDump);   // 既存の月のタブ・テンプレは変えない
-  assert.equal(JSON.stringify([tab(sr, 'テンプレ').dump(), tab(sr, 'テンプレ').formulas]), tplDump);
+  assert.deepEqual(v[0].slice(1, 3), ['2026年', '12月支給']);
+  assert.deepEqual(v[1].slice(0, 9), PAY_HEAD);
+  // テンプレの人（90001・90009）は残し、空いていた5行目に 90002、足りない 90003〜90005 は合計の行の上に挿入
+  assert.deepEqual(v.slice(2, 8).map((x) => [String(x[1]), x[2], x[4], x[5]]), [
+    ['90001', '試験 一郎', 450, 5000], ['90009', '試験 九郎（テンプレにいる人）', '', ''], ['90002', '試験 二郎', '', ''],
+    ['90003', '試験 三郎', 420, ''], ['90004', '試験 四郎', '', ''], ['90005', '試験 五郎', 12000, '']]);
+  assert.deepEqual([3, 4, 5, 6, 7, 8].map((i) => t.formulas[`${i},9`]), ['=SUM(D3:H3)', '=sum(D4:H4)', '=SUM(D5:H5)', '=SUM(D6:H6)', '=SUM(D7:H7)', '=SUM(D8:H8)']);
+  assert.deepEqual([4, 5, 6, 7, 8, 9].map((c) => t.formulas[`9,${c}`]), ['=SUM(D3:D8)', '=SUM(E3:E8)', '=SUM(F3:F8)', '=SUM(G3:G8)', '=SUM(H3:H8)', '=SUM(I3:I8)']);
+  assert.deepEqual(v[11], FIXED_HEAD.map((x) => (x === "'2026-10" ? '2026-10' : x)));   // 固定立て替えの表と L・M 列は3行下へずれただけ
+  assert.deepEqual(v[12].slice(3, 13), [FIXED_ROW[3], '', 30000, 6, '2026-10', '2027-03', 5000, '', true, 'テストのメモ']);
+  assert.deepEqual(t.cf.map((c) => [c.formula, c.bg, c.ranges[0].r, c.ranges[0].nr, c.ranges[0].c, c.ranges[0].nc]), [
+    ['=AND($B3<>"",SUM($D3:$H3)=0)', '#efefef', 3, 6, 2, 8], ['=AND($B3<>"",SUM($D3:$H3)<>0)', '#ffffff', 3, 6, 2, 8]]);
+  sr.getSheets().filter((x) => !/R8\.11/.test(x.getName())).forEach((x) => assert.equal(snap(x), before.find((b) => b[0] === x.getName())[1], x.getName()));   // テンプレ・既存のタブは変えない
   assert.equal(String(apps(master).find((x) => String(x[2]) === '90002')[5]), '2026-12');   // 要確認は来月へ
   const adm = pushes(g, n).filter((p) => p.to === ADMIN);
   assert.equal(adm.length, 1);
@@ -320,38 +341,47 @@ test('交通費申請（給与反映シート）: 6日の締めでタブが無�
   noPersonalLogs(g);
 });
 
-test('交通費申請（給与反映シート）: タブがあれば（★付きでも）そのタブへ。すでに値がある欄は上書きせず管理者へ・行の無い人も知らせる・行は足さない。未提出', () => {
-  const { g, master, sr } = setup();
+test('交通費申請（給与反映シート）: ★付きの既存のタブに書く。値がある欄は上書きせず管理者へ・並んでいない人は合計の行の上に足して =SUM を広げる。共通の関数で立替経費にも書ける・形が違えば止める', () => {
+  const { g, sr } = setup();
   totLatest(g, { '2026-11-05': ['k1'], '2026-11-12': ['k3'] });
   g.ai.queue.push(form([{ date: '11/5', from: '自宅', to: '甲町', km: '10' }]));
   photo(g, U(1));
   g.ai.queue.push(form([{ date: '11/12', from: '大宮駅', to: '浦和駅', means: 'train', yen: '420' }]));
   photo(g, U(3));
-  const ex = sr.insertSheet('R8.11月分12月支給★');
-  [['', '2026年 12月支給'], PAY_HEAD, ["'90001", '試験 一郎', '', 999, '', '', '', ''], ["'90003", '試験 三郎', 500, '', '', '', '', ''], ["'90004", '試験 四郎', '', '', '', '', '', '']].forEach((x) => ex.appendRow(x));
+  const ex = payTab(sr, '★R8.11月分12月支給', ['2026年', '12月支給'], [['90001', '試験 一郎', { 通勤手当: 999 }], ['90003', '試験 三郎', { 立替経費: 500 }]]);
   at(g, '2026-12-06T07:00:00+09:00');
   const n = g.fetches.length;
   g.ctx.travelApplyDaily();
   assert.equal(tab(sr, 'R8.11月分12月支給'), null);   // 新しく作らない
-  assert.deepEqual(ex.dump().slice(2).map((x) => [String(x[0]), x[2], x[3]]), [['90001', '', 999], ['90003', 500, 420], ['90004', '', '']]);
-  assert.equal(ex.dump().length, 5);
-  assert.equal(ex.cf.length, 0);
+  const v = ex.dump();
+  assert.deepEqual(v.slice(2, 5).map((x) => [String(x[1]), x[3], x[4]]), [['90001', '', 999], ['90003', 500, 420], ['90005', '', 12000]]);
+  assert.deepEqual([ex.formulas['5,9'], ex.formulas['6,4'], ex.formulas['6,9']], ['=sum(D5:H5)', '=SUM(D3:D5)', '=SUM(I3:I5)']);
+  assert.equal(v[8][3], '内容');   // 下の表は1行ずれただけ
+  assert.equal(ex.cf.length, 0);   // 既存のタブには条件付き書式を足さない
   const adm = pushes(g, n).filter((p) => p.to === ADMIN)[0].text;
-  assert.match(adm, /「R8.11月分12月支給★」の「通勤手当」に 1人分を書きました。\n・すでに値があるため書かなかった（上書きしていません）：従業員番号 90001\n・タブに行が無いため書かなかった：従業員番号 90005\n・未提出 1人\n　90002 試験 二郎/);
-  // 共通の関数：列の名前を渡せば、立替経費にも書ける。見出しに無い列は何も書かずに止める
-  const people = [{ code: '90001', name: '試験 一郎' }];
-  const w = g.ctx.PAY_writeColumn_('2026-11', '立替経費', [{ code: '90001', value: 3000 }, { code: '90003', value: 100 }], { people, mode: 'on' });
-  assert.deepEqual({ written: [...w.written], conflict: [...w.conflict] }, { written: ['90001'], conflict: ['90003'] });
-  assert.equal(ex.dump()[2][2], 3000);
-  assert.throws(() => g.ctx.PAY_writeColumn_('2026-11', '交通費', [{ code: '90004', value: 1 }], { people, mode: 'on' }), /「交通費」がありません/);
-  assert.equal(ex.dump()[4].join(''), '90004試験 四郎');
+  assert.match(adm, /「★R8.11月分12月支給」の「通勤手当」に 2人分を書きました。\n・並んでいなかったため行を足した：従業員番号 90005\n・すでに値があるため書かなかった（上書きしていません）：従業員番号 90001\n・未提出 1人\n　90002 試験 二郎/);
+  // 共通の関数：列の名前を渡せば立替経費にも（空いている欄だけ）。見出しに無い列・合計の行が無いタブは何も書かずに止める
+  const people = [{ code: '90001', name: '試験 一郎' }, { code: '90003', name: '試験 三郎' }];
+  const w = g.ctx.PAY_writeColumn_('2026-11', '立替経費', [{ code: '90001', value: 3000 }, { code: '90003', value: 500 }], { people, mode: 'on' });
+  assert.deepEqual({ written: [...w.written], same: [...w.same], conflict: [...w.conflict] }, { written: ['90001'], same: ['90003'], conflict: [] });
+  assert.equal(ex.dump()[2][3], 3000);
+  const s1 = snap(ex);
+  assert.throws(() => g.ctx.PAY_writeColumn_('2026-11', '家族補助', [{ code: '90001', value: 1 }], { people, mode: 'on' }), /「家族補助」がありません/);
+  assert.equal(snap(ex), s1);
+  const bad = sr.insertSheet('R8.12月分1月支給');
+  [['', '2026年', '1月支給'], PAY_HEAD, ['', "'90001", '試験 一郎']].forEach((x) => bad.appendRow(x));
+  assert.throws(() => g.ctx.PAY_writeColumn_('2026-12', '通勤手当', [{ code: '90001', value: 1 }], { people, mode: 'on' }), /合計の行.*見つかりません/);
+  assert.equal(bad.dump()[2][4], '');
   // 純粋関数
   const X = g.ctx;
   assert.deepEqual(['2026-11', '2026-12', '2027-01'].map(X.PAY_tabName), ['R8.11月分12月支給', 'R8.12月分1月支給', 'R9.1月分2月支給']);
-  assert.deepEqual(['2026-11', '2026-12'].map(X.PAY_payLabel), ['2026年 12月支給', '2027年 1月支給']);
+  assert.deepEqual(['2026-11', '2026-12'].map((m) => [...X.PAY_payCells(m)]), [['2026年', '12月支給'], ['2027年', '1月支給']]);
   assert.equal(X.PAY_normName(' ★R8.11月分12月支給☆'), X.PAY_normName('R8.11月分12月支給'));
   assert.equal(X.PAY_code("'090001"), X.PAY_code(90001));
   assert.equal(X.PAY_colLetter(28), 'AB');
+  assert.equal(X.PAY_isSum('=sum(D3:D25)'), true);
+  assert.equal(X.PAY_extendSum('=SUM(D3:D25)', 25, 28), '=SUM(D3:D28)');
+  assert.equal(X.PAY_extendSum('=SUM(D3:D28)', 25, 28), '=SUM(D3:D28)');   // シートが自動で広げていればそのまま
 });
 
 test('交通費申請（record）: 受け付けて記録するが LINE・臨時の依頼・給与反映シートには送らず「交通費の送る予定」へ。画像は今までどおり問い合わせへも流す', () => {
@@ -379,7 +409,7 @@ test('交通費申請（record）: 受け付けて記録するが LINE・臨時�
   assert.equal(pushes(g, n3).length, 0);
   assert.deepEqual(plan().slice(-2), ['給与反映シート', '管理者のまとめ']);
   assert.equal(tab(sr, 'R8.11月分12月支給'), null);
-  assert.equal(sr.getSheets().length, 3);   // シート1・テンプレ・既存の月のタブだけ
+  assert.equal(sr.getSheets().length, 4);   // シート1・従業員コード・テンプレ・既存の月のタブだけ
   assert.match(tab(master, '交通費の送る予定').dump().at(-1)[3], /record のため給与反映シートには書いていません。「R8.11月分12月支給」の「通勤手当」に 1人分を書く予定・タブはテンプレから作る予定/);
   noPersonalLogs(g);
 });

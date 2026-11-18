@@ -17,6 +17,12 @@ function convert(v, fmt) {
   return v;
 }
 
+const colNum = (s) => [...s].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+const colStr = (n) => { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+const A1REF = /\$?([A-Z]{1,3})\$?(\d+)/g;
+const a1ToR1C1 = (f, r, c) => f.replace(A1REF, (m, col, row) => `R[${Number(row) - r}]C[${colNum(col) - c}]`);
+const r1c1ToA1 = (f, r, c) => f.replace(/R\[(-?\d+)\]C\[(-?\d+)\]/g, (m, dr, dc) => colStr(c + Number(dc)) + (r + Number(dr)));
+
 class Range {
   constructor(sheet, r, c, nr, nc) { Object.assign(this, { sheet, r, c, nr, nc }); }
   each(fn) { for (let i = 0; i < this.nr; i++) for (let j = 0; j < this.nc; j++) fn(this.r + i, this.c + j, i, j); }
@@ -34,8 +40,12 @@ class Range {
   setDataValidation(rule) { this.sheet.dv.push({ r: this.r, c: this.c, nr: this.nr, nc: this.nc, rule }); return this; }
   getBackgrounds() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.bg[`${this.r + i},${this.c + j}`] || '#ffffff'); out.push(row); } return out; }
   setBackground(c) { this.each((r, cc) => { this.sheet.bg[`${r},${cc}`] = c; }); return this; }
-  getFormulasR1C1() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.formulas[`${this.r + i},${this.c + j}`] || ''); out.push(row); } return out; }
-  setFormulaR1C1(f) { this.sheet.formulas[`${this.r},${this.c}`] = f; return this; }
+  getFormulas() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.formulas[`${this.r + i},${this.c + j}`] || ''); out.push(row); } return out; }
+  getFormula() { return this.sheet.formulas[`${this.r},${this.c}`] || ''; }
+  setFormula(f) { this.each((r, c) => { this.sheet.formulas[`${r},${c}`] = f; this.sheet.set(r, c, ''); }); return this; }
+  // 式は A1 形式で持つ。R1C1 は相対参照（R[行]C[列]）だけを変換する（模擬）
+  getFormulasR1C1() { return this.getFormulas().map((row, i) => row.map((f, j) => (f ? a1ToR1C1(f, this.r + i, this.c + j) : ''))); }
+  setFormulaR1C1(f) { this.each((r, c) => { this.sheet.formulas[`${r},${c}`] = r1c1ToA1(f, r, c); this.sheet.set(r, c, ''); }); return this; }
   clearContent() { this.each((r, c) => this.sheet.set(r, c, '')); return this; }
 }
 
@@ -56,8 +66,18 @@ class Sheet {
   getParent() { return this.ss; }
   get(r, c) { const row = this.rows[r - 1]; const v = row ? row[c - 1] : undefined; return v === undefined || v === null ? '' : v; }
   set(r, c, v) { while (this.rows.length < r) this.rows.push([]); this.rows[r - 1][c - 1] = v; }
-  getLastRow() { let n = 0; this.rows.forEach((row, i) => { if (row && row.some((v) => v !== '' && v !== undefined && v !== null)) n = i + 1; }); return n; }
-  getLastColumn() { let n = 0; this.rows.forEach((row) => (row || []).forEach((v, j) => { if (v !== '' && v !== undefined && v !== null) n = Math.max(n, j + 1); })); return n; }
+  getLastRow() { let n = 0; this.rows.forEach((row, i) => { if (row && row.some((v) => v !== '' && v !== undefined && v !== null)) n = i + 1; }); Object.keys(this.formulas).forEach((k) => { n = Math.max(n, Number(k.split(',')[0])); }); return n; }
+  /** 行の挿入（本物と同じく、挿入した位置より下を指す式の参照を下へずらす。範囲は自動では広げない） */
+  insertRowsBefore(at, k) {
+    this.rows.splice(at - 1, 0, ...Array.from({ length: k }, () => []));
+    const shift = (map) => { const o = {}; Object.entries(map).forEach(([key, v]) => { const [r, c] = key.split(',').map(Number); o[`${r >= at ? r + k : r},${c}`] = v; }); return o; };
+    this.bg = shift(this.bg); this.fmt = shift(this.fmt);
+    const f = shift(this.formulas);
+    Object.keys(f).forEach((key) => { f[key] = f[key].replace(A1REF, (m, col, row) => col + (Number(row) >= at ? Number(row) + k : row)); });
+    this.formulas = f;
+    return this;
+  }
+  getLastColumn() { let n = 0; this.rows.forEach((row) => (row || []).forEach((v, j) => { if (v !== '' && v !== undefined && v !== null) n = Math.max(n, j + 1); })); Object.keys(this.formulas).forEach((k) => { n = Math.max(n, Number(k.split(',')[1])); }); return n; }
   getRange(r, c, nr = 1, nc = 1) {
     if (typeof r === 'string') {   // 'A:A' 'D2:D' 等（列全体の書式設定だけに対応）
       const col = r.charCodeAt(0) - 64, sheet = this;

@@ -20,7 +20,7 @@
  * - お知らせ設定（SAF-01）の「受け取らない」は適用しない（安全に関わるため全員必須）
  * - 写真・有効期限・氏名はログ（Logger）に書かない
  */
-var LIC_VERSION = '2026-11-18b';
+var LIC_VERSION = '2026-11-18c';
 var LIC_SHEET = '免許証管理';
 // 「送信記録」は実際に送ったもの（on）、「記録済み」は送らずに記録したもの（record・DRY_RUN）。同じ人・同じ期限・同じ段階をそれぞれ1回だけにする
 var LIC_HEADER = ['社員番号', '氏名', '免許の有無', '有効期限', '状態', '写真ファイルID', '最終報告日時', '送信記録', '記録済み', '備考', 'AI確認'];
@@ -49,6 +49,7 @@ var LIC_AI_REPLY_SEC = 45;                     // 受け取ってからこれよ
 var LIC_AI_RETRY_MAX = 2;                      // 同じ回で続けて読み取れなかったら、期限のボタンに切り替える回数
 var LIC_AI_PAST_DAYS = 365;                    // 読み取った期限が今日よりこれ以上前なら要確認
 var LIC_AI_FUTURE_YEARS = 10;                  // 読み取った期限が今日からこれ以上先なら要確認
+var LIC_FETCH_WAIT_MS = [1000, 2000];         // 写真の取り出しが一時的に失敗したら、この間をおいてやり直す（最大2回・版 2026-11-18c）
 var LIC_BACK_DAYS = 14;                        // 表面だけ届いた日からこの日数のうちの「免許更新」は、裏面だけの受付にする（版 2026-11-18b）
 var LIC_AI_PROBLEMS = ['not_license', 'cutoff', 'glare', 'dark', 'blur'];   // 理由を1つ選ぶときの優先の順
 var LIC_AI_REASON = {
@@ -624,8 +625,9 @@ function LIC_onUserEvent_(ev) {
     if (!handled && ev.webhookEventId) LIC_cacheDel_(dupKey);
     return handled;
   } catch (err) {
-    Logger.log('免許証の処理エラー：%s', err && err.message ? err.message : '');
-    AC_adminNotice_('license', '【エラー】運転免許証の受付の処理で問題がありました🙇‍♀️\n（' + (err && err.message ? err.message : '不明なエラー') + '）');
+    // 版 2026-11-18c：段階・要約を「免許証お知らせ記録」に残し、管理者の個別 LINE へ必ず送る（同じ人・同じ日・同じエラーは1回）
+    var stage = (err && err.licStage) || (kind === 'photo' ? '受付' : kind === 'word' ? '受付の開始' : 'ボタン');
+    LIC_errorReport_(waiting && waiting.code || (err && err.licCode) || '-', stage, LIC_errSummary(err));
     try { LIC_replyText_(ev.replyToken, LIC_TEXT.photoFail); } catch (e2) { /* 返信できなくても続ける */ }
     return true;
   }
@@ -670,19 +672,26 @@ function LIC_onStart_(ev, uid, fromButton) {
  * - 受け取ってから時間がかかったときと、返信に失敗したときは、プッシュで送る
  */
 function LIC_onPhoto_(ev, uid, waiting) {
+  var st = { stage: '受付' };
+  try { return LIC_onPhotoRun_(ev, uid, waiting, st); } catch (e) { if (e && typeof e === 'object' && !e.licStage) e.licStage = st.stage; throw e; }   // 版 2026-11-18c：どの段階で止まったかを記録に残す
+}
+function LIC_onPhotoRun_(ev, uid, waiting, st) {
   var t0 = Date.now();
   var x = LIC_target_(uid);
   if (!x || x.person.code !== waiting.code) { LIC_cacheDel_('lic:wait:' + uid); return false; }
   x.uid = uid;
   var aiMode = LIC_aiMode_(), blob;
-  try { blob = LIC_fetchPhoto_(ev.message.id); } catch (e) { return LIC_photoFailed_(ev, x, e); }
+  st.stage = '取り出し';
+  try { blob = LIC_fetchPhoto_(ev.message); } catch (e) { return LIC_photoFailed_(ev, x, e, '取り出し'); }
   var ai = null, judge = null;
   if (aiMode !== 'off') {
     LIC_loading_(uid);
-    ai = LIC_aiCheck_(blob);
+    st.stage = 'AI';
+    ai = LIC_aiCheck_(blob, x.person.code);
     if (ai.res) judge = LIC_aiJudge(ai.res, x.today, waiting.base !== undefined && !waiting.backOnly ? waiting.base : x.row.exp || '');
   }
   var out = { messages: [], notify: '' }, w;
+  st.stage = '記録';
   var lock = LockService.getScriptLock();
   lock.waitLock(25000);
   try {
@@ -704,7 +713,7 @@ function LIC_onPhoto_(ev, uid, waiting) {
     } else {
       if (plan.save) {
         var saved;
-        try { saved = LIC_savePhoto_(blob, x.person.code, x.today, w.files.length + 1, w.files); } catch (e) { return LIC_photoFailed_(ev, x, e); }
+        try { saved = LIC_savePhoto_(blob, x.person.code, x.today, w.files.length + 1, w.files); } catch (e) { return LIC_photoFailed_(ev, x, e, '保存'); }
         w.files.push(saved.id);
         LIC_cell_(x.tab, r.i, 'file', w.files.join(','));
         LIC_cell_(x.tab, r.i, 'reportAt', new Date());
@@ -716,6 +725,7 @@ function LIC_onPhoto_(ev, uid, waiting) {
       LIC_cachePut_('lic:wait:' + uid, w, LIC_PENDING_SEC);
     }
   } finally { lock.releaseLock(); }
+  st.stage = '返信';
   LIC_send_(ev.replyToken, uid, out.messages, t0);
   if (out.notify) LIC_notifyCheck_(x.person.code, out.notify);
   return true;
@@ -864,23 +874,85 @@ function LIC_notifyCheck_(code, text) {
   try { AC_pushLine_('【免許証・要確認】社員番号 ' + code + '：' + text + '\n「免許証管理」タブの写真と有効期限をご確認のうえ、状態を直してください。'); } catch (e) { Logger.log('免許証：管理者への送信に失敗'); }
 }
 
-/** 写真を取り出せない・保存できない：本人へお詫び、管理者へ（1日1回） */
-function LIC_photoFailed_(ev, x, e) {
-  Logger.log('免許証の写真の保存に失敗：%s', e && e.message ? e.message : '');
-  AC_adminNotice_('license-photo', '【エラー】運転免許証の写真を保存できませんでした（社員番号 ' + x.person.code + '）🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
+/** 写真を取り出せない・保存できない：本人へお詫び。記録と管理者への知らせ（版 2026-11-18c：LIC_errorReport_） */
+function LIC_photoFailed_(ev, x, e, stage) {
+  LIC_errorReport_(x.person.code, stage, LIC_errSummary(e));
   LIC_replyText_(ev.replyToken, LIC_TEXT.photoFail);   // 受付は続ける（受付の時間内なら送り直せる）
   return true;
 }
 
-/** LINE から写真を取り出す（応答本文は記録しない） */
-function LIC_fetchPhoto_(messageId) {
+/** 純粋関数：エラーの要約（記録・管理者への知らせ用）。URL は伏せ、短くする（氏名・写真の中身は入らない） */
+function LIC_errSummary(e) {
+  var m = String(e && e.message ? e.message : e || '不明なエラー').replace(/https?:\/\/\S+/g, '（URL）').replace(/\s+/g, ' ').trim();
+  return m.length > 120 ? m.slice(0, 120) + '…' : m;
+}
+
+/**
+ * 純粋関数：写真の取り出しをやり直すか（版 2026-11-18c）。0＝通信エラー。
+ * 202（準備中）・404（まだ無い・一時的）・408・429・5xx はやり直す。400・401・403・410（取り消された）などはやり直さない
+ */
+function LIC_fetchRetryable(code) { return code === 0 || code === 202 || code === 404 || code === 408 || code === 429 || code >= 500; }
+
+/**
+ * LINE から写真を取り出す（応答本文は記録しない）。版 2026-11-18c：
+ * - 一時的な失敗（LIC_fetchRetryable）は 1秒・2秒おいて最大2回やり直す
+ * - contentProvider.type が external（LINE の外にある画像）は、Get content では取り出せないため originalContentUrl から取り出す
+ * 失敗したら、要約（例「HTTP 404・3回試した」）を message にしたエラーを投げる
+ */
+function LIC_fetchPhoto_(message) {
   var token = LIC_props_().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!LIC_props_().getProperty('LICENSE_FOLDER_ID')) throw AC_error_('LICENSE_FOLDER_ID が未設定です');
-  if (!token || !messageId) throw AC_error_('LINEの設定がありません');
-  var res = UrlFetchApp.fetch('https://api-data.line.me/v2/bot/message/' + encodeURIComponent(messageId) + '/content', {
-    headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
-  if (res.getResponseCode() !== 200) throw AC_error_('写真を取り出せませんでした HTTP ' + res.getResponseCode());
-  return res.getBlob();
+  var cp = message && message.contentProvider, external = !!(cp && cp.type === 'external');
+  var url, opt = { muteHttpExceptions: true };
+  if (external) {
+    if (!/^https:\/\//.test(String(cp.originalContentUrl || ''))) throw AC_error_('外部の画像（URL がない）');
+    url = cp.originalContentUrl;
+  } else {
+    if (!token || !message || !message.id) throw AC_error_('LINEの設定がありません');
+    url = 'https://api-data.line.me/v2/bot/message/' + encodeURIComponent(message.id) + '/content';
+    opt.headers = { Authorization: 'Bearer ' + token };
+  }
+  var code = 0, last = '', tries = 0;
+  for (var k = 0; k <= LIC_FETCH_WAIT_MS.length; k++) {
+    if (k > 0) Utilities.sleep(LIC_FETCH_WAIT_MS[k - 1]);
+    tries++;
+    try {
+      var res = UrlFetchApp.fetch(url, opt);
+      code = res.getResponseCode();
+      if (code === 200) {
+        if (k > 0) Logger.log('免許証：写真の取り出しを%s回目で取り出せました', tries);
+        return res.getBlob();
+      }
+      last = 'HTTP ' + code;
+    } catch (e) { code = 0; last = '通信エラー（' + LIC_errSummary(e) + '）'; }
+    if (!LIC_fetchRetryable(code)) break;
+  }
+  throw AC_error_((external ? '外部の画像 ' : '') + last + '・' + tries + '回試した');
+}
+
+/**
+ * 免許証の受付のエラー（版 2026-11-18c）：「免許証お知らせ記録」と「通知送信履歴」に1行残し、管理者（安藤さん）の個別 LINE へすぐ送る。
+ * ADMIN_NOTIFY=digest（朝のまとめ）とお知らせ設定は通さない。同じ社員番号・同じ日・同じ段階・同じ要約は1回だけ送る（記録は毎回）。
+ * 氏名・LINE ID・写真の中身は書かない。失敗しても受付の処理は止めない
+ */
+function LIC_errorReport_(code, stage, summary) {
+  var result = '', today = AC_today_(), now = new Date();
+  try {
+    var state = AC_state_(), key = 'sent:' + today + ':lic-err:' + code + ':' + stage + ':' + String(summary).replace(/[0-9]+回試した/, '').slice(0, 80);
+    if (state.getProperty(key)) result = '送らず（同じ日の同じエラーは送信済み）';
+    else {
+      var text = '【免許証・エラー】社員番号 ' + code + '：写真の受付でエラーがありました（段階：' + stage + '／' + summary + '）。\n'
+        + (stage === 'AI' ? '受付は AI を使わずに続けています（期限が未記録なら、本人に期限のボタンで選んでもらい要確認）。' : '本人には「写真をうまく受け取れませんでした」と返しています。') + '「免許証お知らせ記録」をご確認ください。';
+      if (typeof AC_pushAdminNow_ === 'function') AC_pushAdminNow_(text);   // 朝のまとめにためず、すぐ
+      else AC_pushTo_(LIC_props_().getProperty('LINE_ADMIN_USER_ID'), text);
+      state.setProperty(key, now.toISOString());
+      result = '管理者へ送信済み';
+    }
+  } catch (e) { result = '管理者への送信に失敗（' + LIC_errSummary(e) + '）'; }
+  Logger.log('免許証のエラー：%s %s %s（%s）', code, stage, summary, result);
+  try { LIC_record_(AC_masterSheet_().getParent(), [[now, LIC_mode_(), 'エラー（' + stage + '）', '管理者', "'" + code, summary, result]]); } catch (e2) { Logger.log('免許証：エラーの記録に失敗'); }
+  if (typeof AC_noticeLog_ === 'function') AC_noticeLog_([[now, LIC_NOTICE_ID, LIC_NOTICE_NAME, '管理者', "'" + code, '', 'エラー（' + stage + '）・' + result, summary]]);
+  return result;
 }
 
 /** 待っている間、本人のトークに「…」を出す（AI の確認の数秒。失敗しても続ける） */
@@ -956,7 +1028,7 @@ function LIC_aiJudge(res, today, base) {
  * 写真を AI で確認する → { res } か { error: 'key'|'limit'|'size'|'http'|'refusal'|'parse'|'fail' }。
  * 使えないときは、理由ごとにその日1回だけ管理者へ知らせる。キー・写真の中身・応答本文はログに書かない
  */
-function LIC_aiCheck_(blob) {
+function LIC_aiCheck_(blob, empCode) {
   var props = LIC_props_(), key = props.getProperty('ANTHROPIC_API_KEY'), out;
   if (!key) out = { error: 'key' };
   else {
@@ -977,12 +1049,8 @@ function LIC_aiCheck_(blob) {
       }
     }
   }
-  if (out.error) {
-    Logger.log('免許証：AI の確認ができませんでした（%s%s）', out.error, out.status ? ' HTTP ' + out.status : '');
-    if (out.error !== 'size' && out.error !== 'refusal' && out.error !== 'parse') {
-      AC_adminNotice_('license-ai-' + out.error, '【免許証】AI による写真の確認ができませんでした（' + LIC_AI_ERROR_LABEL[out.error] + (out.status ? '・HTTP ' + out.status : '')
-        + '）。今日このあとの写真は、期限のボタンで本人に選んでもらい、状態を要確認にします。');
-    }
+  if (out.error && out.error !== 'size') {   // 版 2026-11-18c：記録して管理者へすぐ（同じ人・同じ日・同じエラーは1回）。大きすぎる写真はエラーではない
+    LIC_errorReport_(empCode || '-', 'AI', LIC_AI_ERROR_LABEL[out.error] + (out.status ? '・HTTP ' + out.status : ''));
   }
   return out;
 }
@@ -1022,7 +1090,7 @@ function licenseAiRecheck() {
     for (var j = 0; j < ids.length && !found; j++) {
       var blob;
       try { blob = DriveApp.getFileById(ids[j]).getBlob(); } catch (e) { error = 'nofile'; continue; }
-      var ai = LIC_aiCheck_(blob);
+      var ai = LIC_aiCheck_(blob, r.code);
       if (ai.error) { error = ai.error; if (ai.error === 'limit' || ai.error === 'key') break; continue; }
       var jd = LIC_aiJudge(ai.res, today, '');
       if (jd.kind === 'front') found = jd.exp; else if (jd.kind === 'back') back = true;
@@ -1089,5 +1157,5 @@ function LIC_onPostback_(ev, uid) {
 if (typeof module !== 'undefined') {
   module.exports = { LIC_parseYmd: LIC_parseYmd, LIC_daysBetween: LIC_daysBetween, LIC_addYears: LIC_addYears, LIC_stage: LIC_stage,
     LIC_statusFor: LIC_statusFor, LIC_plan: LIC_plan, LIC_eventKind: LIC_eventKind, LIC_parsePostback: LIC_parsePostback, LIC_isWaiting: LIC_isWaiting, LIC_photoName: LIC_photoName,
-    LIC_aiParse: LIC_aiParse, LIC_aiJudge: LIC_aiJudge, LIC_aiDateCheck: LIC_aiDateCheck, LIC_backPending: LIC_backPending, LIC_photoPlan: LIC_photoPlan, LIC_aiRequest: LIC_aiRequest, LIC_VERSION: LIC_VERSION };
+    LIC_aiParse: LIC_aiParse, LIC_aiJudge: LIC_aiJudge, LIC_aiDateCheck: LIC_aiDateCheck, LIC_backPending: LIC_backPending, LIC_fetchRetryable: LIC_fetchRetryable, LIC_errSummary: LIC_errSummary, LIC_photoPlan: LIC_photoPlan, LIC_aiRequest: LIC_aiRequest, LIC_VERSION: LIC_VERSION };
 }

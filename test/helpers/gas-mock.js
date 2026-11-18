@@ -111,7 +111,7 @@ export function createGas({ files, now, shared }) {
   const scriptProps = new Store(), userProps = new Store();
   const cache = {};
   const fetches = [];
-  const line = { members: {}, profiles: {}, pushFail: new Set(), contents: {} };   // contents：メッセージID → { type }（画像の取り出しの応答）
+  const line = { members: {}, profiles: {}, pushFail: new Set(), contents: {}, contentFail: {}, external: {}, sleeps: [] };   // contentFail：メッセージID → [202, 500, 'throw', …]（先に返す失敗）。external：URL → { type }（外部の画像）   // contents：メッセージID → { type }（画像の取り出しの応答）
   const ai = { queue: [], calls: [], fallback: null };   // AI（Claude API）の模擬の応答：queue の先頭から { json } / { status } / { refusal } / { throw } / { text }
   const logs = [];
   const triggers = [];
@@ -141,7 +141,7 @@ export function createGas({ files, now, shared }) {
     const files = [];
     const wrap = (f) => ({ getId: () => f.id, getName: () => f.name, isTrashed: () => f.trashed, setTrashed: (v) => { f.trashed = !!v; }, getMimeType: () => f.type });
     drive.folders[id] = { id, files, getId: () => id, getFiles: () => iter(files.map(wrap)),
-      createFile: (blob) => { const f = { id: 'photo-' + ++fileSeq, name: blob.getName(), type: blob.getContentType(), trashed: false, bytes: blob.getBytes ? blob.getBytes() : null }; files.push(f); return wrap(f); } };
+      createFile: (blob) => { if (drive.failCreate) throw new Error(drive.failCreate); const f = { id: 'photo-' + ++fileSeq, name: blob.getName(), type: blob.getContentType(), trashed: false, bytes: blob.getBytes ? blob.getBytes() : null }; files.push(f); return wrap(f); } };
     return drive.folders[id];
   };
   const ctx = {
@@ -172,6 +172,7 @@ export function createGas({ files, now, shared }) {
       parseDate: (s, tz, f) => { if (f !== 'yyyy-MM-dd') throw new Error('未対応の形式'); return new FakeDate(jst(s).getTime()); },
       computeHmacSha256Signature: (text, key) => [...createHmac('sha256', key).update(text, 'utf8').digest()].map((b) => (b > 127 ? b - 256 : b)),
       getUuid: () => randomUUID(),
+      sleep: (ms) => { line.sleeps.push(ms); clock.now += ms; },
       base64Encode: (b) => 'QkFTRTY0' + (b && b.tag ? ':' + b.tag : ''),   // 模擬（写真の目印だけ）
       Charset: { UTF_8: 'UTF-8' },
     },
@@ -183,8 +184,15 @@ export function createGas({ files, now, shared }) {
         const mem = /\/v2\/bot\/group\/([^/]+)\/member\/([^/?]+)$/.exec(url);
         const prof = /\/v2\/bot\/profile\/([^/?]+)$/.exec(url);
         const content = /^https:\/\/api-data\.line\.me\/v2\/bot\/message\/([^/]+)\/content$/.exec(url);
-        if (content) {   // 画像の取り出し（中身は持たない。種類だけ）
-          const c = line.contents[decodeURIComponent(content[1])];
+        const ext = line.external[url];
+        if (content || ext) {   // 画像の取り出し（中身は持たない。種類だけ）
+          const mid = content ? decodeURIComponent(content[1]) : url, fails = line.contentFail[mid];
+          if (fails && fails.length) {
+            const f = fails.shift();
+            if (f === 'throw') throw new Error('Address unavailable: ' + url);
+            return { getResponseCode: () => f, getContentText: () => '{"message":"x"}' };
+          }
+          const c = content ? line.contents[mid] : ext;
           if (!c) return { getResponseCode: () => 404, getContentText: () => '{}' };
           let bname = null;
           const blob = { getContentType: () => c.type || 'image/jpeg', getName: () => bname, setName: (n) => { bname = n; return blob; },

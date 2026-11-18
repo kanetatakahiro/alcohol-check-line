@@ -388,7 +388,8 @@ test('免許証: 受付は30分で解除（その後の写真は今までどお�
   assert.match(r.reply[0].body.messages[0].text, /^申し訳ありません。写真をうまく受け取れませんでした/);
   assert.equal(r.push.length, 1);
   assert.equal(r.push[0].body.to, ADMIN);
-  assert.match(r.push[0].body.messages[0].text, /^【エラー】運転免許証の写真を保存できませんでした（社員番号 90001）/);
+  assert.match(r.push[0].body.messages[0].text, /^【免許証・エラー】社員番号 90001：写真の受付でエラーがありました（段階：取り出し／HTTP 404・3回試した）/);
+  assert.equal(r.content.length, 3);   // 版 2026-11-18c：404 は2回やり直す
   assert.ok(!g.logs.some((l) => /試験 一郎|20261116|image/.test(l)));   // ログに氏名・写真の情報を書かない
 });
 
@@ -925,13 +926,13 @@ test('免許証（AI）: on・AI のエラー・キー未設定・上限超え�
   assert.equal(val(master, '90001', '状態'), '要確認');
   assert.equal(val(master, '90001', 'AI確認'), '未確認（AIのエラー）');
   assert.equal(r.admin.length, 2);
-  assert.match(r.admin[0], /^【免許証】AI による写真の確認ができませんでした（AIのエラー・HTTP 529）/);
+  assert.match(r.admin[0], /^【免許証・エラー】社員番号 90001：写真の受付でエラーがありました（段階：AI／AIのエラー・HTTP 529）。\n受付は AI を使わずに続けています/);
   assert.match(r.admin[1], /^【免許証・要確認】社員番号 90001：写真を AI で確認できなかったため（AIのエラー）/);
-  // 同じ日の2人目：エラーの知らせは重ねない
+  // 版 2026-11-18c：エラーの知らせは人ごと（同じ日の2人目にも届く）
   post(g, pb(U(2), 'lic|1|start'));
   const r2 = shot(g, U(2), { status: 500 });
-  assert.equal(r2.admin.length, 1);
-  assert.match(r2.admin[0], /社員番号 90002/);
+  assert.equal(r2.admin.length, 2);
+  assert.match(r2.admin[0], /^【免許証・エラー】社員番号 90002：.*AIのエラー・HTTP 500/);
   // 断られた・応答が読めない → ボタン（エラーの知らせは出さない）
   for (const resp of [{ refusal: true }, { text: 'not json' }, { throw: true }]) {
     const s = aiSetup();
@@ -949,14 +950,15 @@ test('免許証（AI）: on・AI のエラー・キー未設定・上限超え�
   assert.equal(g.ai.calls.length, before + 1);
   assert.match(lim.msgs[0].text, /有効期限を2029年4月30日で記録しました/);
   assert.equal(lim.admin.length, 1);
-  assert.match(lim.admin[0], /^【免許証】AI による写真の確認ができませんでした（1日の上限）/);
+  assert.match(lim.admin[0], /^【免許証・エラー】社員番号 90001：写真の受付でエラーがありました（段階：AI／1日の上限）/);
   // 次の人（表面より前）：ボタン・要確認
   post(g, ev(U(2), '免許更新'));
   const lim2 = shot(g, U(2));
   assert.equal(lim2.msgs[0].type, 'flex');
   assert.equal(val(master, '90002', 'AI確認'), '未確認（1日の上限）');
-  assert.equal(lim2.admin.length, 1);   // 上限の知らせは重ねない
-  assert.match(lim2.admin[0], /^【免許証・要確認】社員番号 90002：写真を AI で確認できなかったため（1日の上限）/);
+  assert.equal(lim2.admin.length, 2);   // 版 2026-11-18c：エラーの知らせは人ごと
+  assert.match(lim2.admin[0], /^【免許証・エラー】社員番号 90002：.*1日の上限/);
+  assert.match(lim2.admin[1], /^【免許証・要確認】社員番号 90002：写真を AI で確認できなかったため（1日の上限）/);
   // キー未設定
   const k = aiSetup('on', { ANTHROPIC_API_KEY: '' });
   post(k.g, pb(U(1), 'lic|1|start'));
@@ -1080,4 +1082,112 @@ test('免許証（AI）: AI の確認に時間がかかったら返信ではな�
   assert.equal(val(b.master, '90002', 'AI確認'), '未確認（写真が大きすぎる）');
   assert.equal(val(b.master, '90002', '状態'), '要確認');
   assert.equal(val(master, '90001', 'AI確認'), 'OK');
+});
+
+// ---------------- 受付のエラーの記録・やり直し（版 2026-11-18c） ----------------
+const errRows = (master) => { const sh = master.getSheetByName('免許証お知らせ記録'); return sh ? sh.dump().slice(1) : []; };
+/** 写真を送る。fails：取り出しで先に返す失敗（[202, 500, 'throw', …]） */
+const shotFail = (g, uid, fails, ai = [], msgExtra = {}) => {
+  g.ai.queue.push(...ai);
+  const e = ev(uid, { type: 'image', ...msgExtra });
+  g.line.contents[e.message.id] = { type: 'image/jpeg' };
+  if (fails) g.line.contentFail[e.message.id] = [...fails];
+  const n = g.fetches.length, s0 = g.line.sleeps.length;
+  post(g, e);
+  const r = since(g, n);
+  return { msgs: r.reply.concat(r.push.filter((p) => p.body.to === uid)).map((x) => x.body.messages[0]), content: r.content.length,
+    admin: r.push.filter((p) => p.body.to === ADMIN).map((p) => p.body.messages[0].text), sleeps: g.line.sleeps.slice(s0) };
+};
+
+test('免許証（エラー）: 写真の取り出しが 202・404・500・通信エラーなら 1秒・2秒おいて最大2回やり直し、取り出せればふつうの流れ', () => {
+  for (const f of [[202], [404, 404], [500], ['throw', 503]]) {
+    const { g, master, folder } = aiSetup();
+    post(g, pb(U(1), 'lic|1|start'));
+    const r = shotFail(g, U(1), f, [FRONT('2029-04-30')]);
+    assert.equal(r.content, f.length + 1, String(f));
+    assert.deepEqual(r.sleeps, [1000, 2000].slice(0, f.length));
+    assert.deepEqual(r.msgs.map((m) => m.text), [FRONT_OK]);   // 正常な写真の流れは変わらない
+    assert.deepEqual(r.admin, []);
+    assert.deepEqual(mine(folder), ['90001_20261116_1']);
+    assert.equal(errRows(master).length, 0);
+  }
+  // やり直しなし：一度で取り出せれば待たない
+  const { g } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  const ok = shotFail(g, U(1), null, [FRONT('2029-04-30')]);
+  assert.equal(ok.content, 1);
+  assert.deepEqual(ok.sleeps, []);
+  assert.equal(g.ctx.LIC_fetchRetryable(410), false);
+  assert.equal(g.ctx.LIC_fetchRetryable(401), false);
+  assert.equal(g.ctx.LIC_fetchRetryable(429), true);
+});
+
+test('免許証（エラー）: 3回とも取り出せなければ、お詫び・「免許証お知らせ記録」に段階と要約・安藤さんの個別 LINE へすぐ（朝のまとめ・お知らせ設定を通さない）。同じ人・同じ日・同じエラーは1回', () => {
+  const { g, master, folder } = aiSetup('on', { ADMIN_NOTIFY: 'digest' });
+  post(g, pb(U(1), 'lic|1|start'));
+  for (const [f, sum] of [[[202, 202, 202], 'HTTP 202・3回試した'], [[404, 404, 404], 'HTTP 404・3回試した'], [[500, 502, 500], 'HTTP 500・3回試した'], [['throw', 'throw', 'throw'], '通信エラー']]) {
+    const r = shotFail(g, U(1), f);
+    assert.equal(r.content, 3, sum);
+    assert.match(r.msgs[0].text, /^申し訳ありません。写真をうまく受け取れませんでした/);
+    assert.equal(r.admin.length, 1, sum);
+    assert.ok(r.admin[0].startsWith('【免許証・エラー】社員番号 90001：写真の受付でエラーがありました（段階：取り出し／' + sum), r.admin[0]);
+    assert.ok(!r.admin[0].includes('試験') && !r.admin[0].includes(U(1)));
+    const last = errRows(master).at(-1);
+    assert.equal(last[2], 'エラー（取り出し）');
+    assert.equal(String(last[4]).replace("'", ''), '90001');
+    assert.ok(String(last[5]).startsWith(sum), String(last[5]));
+    assert.equal(last[6], '管理者へ送信済み');
+  }
+  assert.deepEqual(mine(folder), []);
+  // 同じ人・同じ日・同じエラー：記録は残すが、送らない
+  const again = shotFail(g, U(1), [404, 404, 404]);
+  assert.deepEqual(again.admin, []);
+  assert.equal(errRows(master).at(-1)[6], '送らず（同じ日の同じエラーは送信済み）');
+  // ほかの人の同じエラーは送る
+  post(g, pb(U(2), 'lic|1|start'));
+  assert.equal(shotFail(g, U(2), [404, 404, 404]).admin.length, 1);
+  // 次の日は送る
+  day(g, '2026-11-17');
+  post(g, pb(U(1), 'lic|1|start'));
+  assert.equal(shotFail(g, U(1), [404, 404, 404]).admin.length, 1);
+  // 410（取り消された）はやり直さない
+  const t = shotFail(g, U(1), [410]);
+  assert.equal(t.content, 1);
+  assert.match(t.admin[0], /HTTP 410・1回試した/);
+  // 通知送信履歴にも残る。記録に氏名・LINE ID は書かない
+  const hist = master.getSheetByName('通知送信履歴').dump().slice(1);
+  assert.ok(hist.some((h) => String(h[6]).startsWith('エラー（取り出し）・管理者へ送信済み')));
+  const all = JSON.stringify(errRows(master)) + JSON.stringify(hist);
+  assert.ok(!all.includes('試験') && !all.includes(U(1)) && !all.includes(U(2)));
+  assert.ok(!g.logs.some((l) => /試験|Uu|U1111/.test(l)));
+});
+
+test('免許証（エラー）: 保存・その他の段階のエラーも記録して安藤さんへ。LINE の外の画像（contentProvider external）は originalContentUrl から取り出す', () => {
+  const { g, master, folder } = aiSetup();
+  post(g, pb(U(1), 'lic|1|start'));
+  g.drive.failCreate = 'Drive の容量がいっぱい';
+  const s = shotFail(g, U(1), null, [FRONT('2029-04-30')]);
+  assert.match(s.msgs[0].text, /^申し訳ありません。写真をうまく受け取れませんでした/);
+  assert.match(s.admin[0], /（段階：保存／Drive の容量がいっぱい）/);
+  assert.equal(errRows(master).at(-1)[2], 'エラー（保存）');
+  delete g.drive.failCreate;
+  // 途中で止まった（例：タブの「免許証管理」が消された）→ 段階つきで記録
+  const t = master;
+  const orig = t.getSheetByName;
+  t.getSheetByName = (n) => { if (n === '免許証管理' && g.__boom) throw new Error('シートを開けません'); return orig.call(t, n); };
+  g.__boom = true;
+  const x = shotFail(g, U(1), null, []);
+  g.__boom = false;
+  assert.match(x.msgs[0].text, /^申し訳ありません/);
+  assert.match(x.admin[0], /^【免許証・エラー】社員番号 90001：写真の受付でエラーがありました（段階：受付／シートを開けません）/);
+  // 外部の画像
+  const url = 'https://example.com/img/1.jpg';
+  g.line.external[url] = { type: 'image/jpeg' };
+  const e = shotFail(g, U(1), null, [FRONT('2029-04-30')], { contentProvider: { type: 'external', originalContentUrl: url } });
+  assert.deepEqual(e.msgs.map((m) => m.text), [FRONT_OK]);
+  assert.ok(g.fetches.some((f) => f.url === url && !(f.opt.headers && f.opt.headers.Authorization)));   // 外部へトークンを送らない
+  assert.deepEqual(mine(folder), ['90001_20261116_1']);
+  const bad = shotFail(g, U(1), null, [], { contentProvider: { type: 'external' } });
+  assert.match(bad.admin[0], /（段階：取り出し／外部の画像（URL がない））/);
+  assert.equal(g.ctx.LIC_errSummary(new Error('x https://api-data.line.me/v2/bot/message/1/content y')), 'x （URL） y');
 });

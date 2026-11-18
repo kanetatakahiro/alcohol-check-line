@@ -1,5 +1,15 @@
 # 変更履歴
 
+## 2026-11-18 版 2026-11-18b：交通費（車・バイク）の通勤距離の自動計算と照合（gas/Travel.gs・ブランチ feature/travel-distance・**本番未導入**）
+- 新しいファイル gas/Travel.gs（指紋 `8aed84d5b61a189c`）。ほかの .gs は変更なし。Webアプリの再公開は要らない。トリガーの追加が要る（毎日3時台の travelDistanceDaily）
+- 版 18a（別ファイル「従業員店舗間距離計算」を使う作り。未コミット）を、従業員マスタのファイルの中の新しいタブで動く作りに置き換えた
+- 新しいタブ「通勤距離」（在籍者と毎朝同期・氏名と所属は自動・自宅住所／通勤区分（プルダウン）／固定額は管理本部が入力・各店舗までの距離）「店舗間距離」「通勤区分の選択肢」「距離（内部）」（隠す）。従業員マスタ本体（列 A〜N）と店舗一覧は変えない
+- 距離は Maps（車）で高速あり・なしを持ち、表には高速を使わない道。住所の指紋で、入った・変わった組だけ計算。1日の上限（TRAVEL_MAPS_DAILY_MAX・既定 800）で数日に分ける
+- 「住所取り込み」タブから在籍者の分だけ写す travelImportAddresses（手動で1回）
+- 照合 travelCheckSegments は新しい表を使う（行き先の判定と片道5km 超で要確認はそのまま。ETC の判定は外した）
+- 設定：EMPLOYEE_MASTER_ID（今あるもの）・TRAVEL_DISTANCE_MODE・TRAVEL_MAPS_DAILY_MAX・TRAVEL_TOLERANCE_KM。TRAVEL_DISTANCE_SHEET_ID は不要。詳しくは docs/TRAVEL_DISTANCE.md
+- テスト：test/travel.test.js 7件（架空のデータ）。模擬環境に Maps・セルの色・プルダウン・隠したタブを足した。全377件成功。Maps・LINE は呼んでいない
+
 ## 2026-11-18 版 2026-11-18c：免許証の受付のエラーを記録して安藤さんへすぐ・写真の取り出しのやり直し（ブランチ feature/notification-settings・**本番未導入**）
 - 本番テストで社員番号10085の人が何度送っても「写真をうまく受け取れませんでした」になり、エラーの知らせが安藤さんに届かず、原因も追えなかった件の対応。調査の結果は docs/LICENSE_MANAGEMENT.md 1-8（17e の ADMIN_NOTIFY=digest では AC_adminNotice_ が朝のまとめ（勤怠管理グループ）に回る・種類ごとに1日1回・記録が残らない、など）
 - ブランチを本番の 17e（origin/feature/office-task。コード.gs `1f145c99225c987a`・Inquiry.gs `6c12f43def73e6c6`）まで進めてから作業。コード.gs・Inquiry.gs は変更なし

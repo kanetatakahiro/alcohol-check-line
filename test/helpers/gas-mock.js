@@ -31,12 +31,15 @@ class Range {
   setNumberFormat(f) { this.each((r, c) => { this.sheet.fmt[`${r},${c}`] = f; }); return this; }
   insertCheckboxes() { this.each((r, c) => { if (this.sheet.get(r, c) === '') this.sheet.set(r, c, false); }); return this; }
   setFontWeight() { return this; }
-  setDataValidation() { return this; }
+  setDataValidation(rule) { this.sheet.dv.push({ r: this.r, c: this.c, nr: this.nr, nc: this.nc, rule }); return this; }
+  getBackgrounds() { const out = []; for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sheet.bg[`${this.r + i},${this.c + j}`] || '#ffffff'); out.push(row); } return out; }
+  setBackground(c) { this.each((r, cc) => { this.sheet.bg[`${r},${cc}`] = c; }); return this; }
 }
 
 class Sheet {
   static seq = 0;
-  constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; }
+  constructor(ss, name) { this.sid = ++Sheet.seq; this.ss = ss; this.name = name; this.rows = []; this.fmt = {}; this.colFmt = {}; this.bg = {}; this.dv = []; this.hidden = false; }
+  hideSheet() { this.hidden = true; return this; }
   fmtOf(r, c) { return this.fmt[`${r},${c}`] || this.colFmt[c]; }
   clear() { this.rows = []; this.fmt = {}; this.colFmt = {}; return this; }
   clearContents() { this.rows = []; return this; }
@@ -112,7 +115,9 @@ export function createGas({ files, now, shared }) {
   const cache = {};
   const fetches = [];
   const line = { members: {}, profiles: {}, pushFail: new Set(), contents: {}, contentFail: {}, external: {}, sleeps: [] };   // contentFail：メッセージID → [202, 500, 'throw', …]（先に返す失敗）。external：URL → { type }（外部の画像）   // contents：メッセージID → { type }（画像の取り出しの応答）
-  const ai = { queue: [], calls: [], fallback: null };   // AI（Claude API）の模擬の応答：queue の先頭から { json } / { status } / { refusal } / { throw } / { text }
+  const ai = { queue: [], calls: [], fallback: null };
+  // 地図（Maps.DirectionFinder）の模擬：maps.route(起点, 終点, 高速を避けるか) → km（数）／null（道なし）／'NOT_FOUND' など／{ throw: '…' }
+  const maps = { route: () => null, calls: [] };   // AI（Claude API）の模擬の応答：queue の先頭から { json } / { status } / { refusal } / { throw } / { text }
   const logs = [];
   const triggers = [];
   const fmtDate = (d, tz, f) => {
@@ -161,7 +166,7 @@ export function createGas({ files, now, shared }) {
     SpreadsheetApp: {
       openById: (id) => { if (!sheets[id]) throw new Error('ファイルがありません'); return sheets[id]; },
       create: (name) => { const id = `ss${Object.keys(sheets).length + 1}`; sheets[id] = new Spreadsheet(id, name); sheets[id].insertSheet('シート1'); return sheets[id]; },
-      newDataValidation: () => ({ requireValueInList() { return this; }, build() { return {}; } }),
+      newDataValidation: () => { const rule = {}; return { requireValueInList(l) { rule.list = l; return this; }, requireValueInRange(r) { rule.range = r; return this; }, setAllowInvalid(b) { rule.allowInvalid = b; return this; }, build() { return rule; } }; },
     },
     PropertiesService: { getScriptProperties: () => scriptProps, getUserProperties: () => userProps },
     CacheService: { getScriptCache: () => ({ get: (k) => (Object.hasOwn(cache, k) ? cache[k] : null), put: (k, v) => { cache[k] = v; }, remove: (k) => { delete cache[k]; } }) },
@@ -230,6 +235,23 @@ export function createGas({ files, now, shared }) {
       },
     },
     Session: { getScriptTimeZone: () => 'Asia/Tokyo' },
+    Maps: {
+      DirectionFinder: { Mode: { DRIVING: 'driving' }, Avoid: { HIGHWAYS: 'highways', TOLLS: 'tolls' } },
+      newDirectionFinder: () => {
+        const q = { mode: 'driving', avoid: '' };
+        const f = { setOrigin: (o) => { q.origin = o; return f; }, setDestination: (d) => { q.dest = d; return f; }, setMode: (m) => { q.mode = m; return f; },
+          setAvoid: (a) => { q.avoid = a; return f; }, setLanguage: () => f, setRegion: () => f,
+          getDirections: () => {
+            maps.calls.push({ ...q });
+            const r = maps.route(q.origin, q.dest, q.avoid === 'highways');
+            if (r && typeof r === 'object' && r.throw) throw new Error(r.throw);
+            if (typeof r === 'string') return { status: r, routes: [] };
+            if (typeof r !== 'number') return { status: 'ZERO_RESULTS', routes: [] };
+            return { status: 'OK', routes: [{ legs: [{ distance: { value: Math.round(r * 1000), text: r + ' km' } }] }] };
+          } };
+        return f;
+      },
+    },
     ScriptApp: {   // トリガーの模擬（作成・削除を記録するだけ）
       WeekDay: { SUNDAY: 'SUNDAY', MONDAY: 'MONDAY', TUESDAY: 'TUESDAY', WEDNESDAY: 'WEDNESDAY', THURSDAY: 'THURSDAY', FRIDAY: 'FRIDAY', SATURDAY: 'SATURDAY' },
       getProjectTriggers: () => triggers.slice(),
@@ -247,7 +269,7 @@ export function createGas({ files, now, shared }) {
   vm.createContext(ctx);
   if (LIC_REGRESSION) scriptProps.setProperty('LICENSE_MODE', 'on');
   for (const f of files) vm.runInContext(readFileSync(new URL(`../../gas/${f}`, import.meta.url), 'utf8'), ctx, { filename: f });
-  return { ctx, clock, sheets, drive, ai, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
+  return { ctx, clock, sheets, drive, ai, maps, shared: { clock, sheets }, scriptProps, userProps, cache, fetches, line, logs, triggers, FakeDate,
     newSpreadsheet: (name) => ctx.SpreadsheetApp.create(name) };
 }
 

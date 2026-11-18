@@ -239,3 +239,13 @@ test('事務の業務一覧: AI化の順番の「稼働の確認」を毎朝ス�
   assert.match(String(v[2][5]), /^未確認.*設定が違います/);
   assert.equal(v[3][5], '（設定なし）');
 });
+
+test('事務の業務一覧 18a: 手順・持ち物の URL は「タップで開く」の押せる文字にする（2つ並んでも別々に）', () => {
+  const X = setup().g.ctx;
+  const parts = [...X.OT_textParts('持ち物・使うもの：', '送付リスト https://docs.google.com/spreadsheets/d/abc/edit\nショップ：https://shop.example.com/a?b=1 と https://example.com/x\n手袋', 'xs', '#555555')];
+  assert.deepEqual(parts.map((p) => p.text), ['持ち物・使うもの：送付リスト 🔗タップで開く', 'ショップ 🔗タップで開く', 'と 🔗タップで開く', '手袋']);
+  assert.deepEqual(parts.filter((p) => p.action).map((p) => p.action.uri), ['https://docs.google.com/spreadsheets/d/abc/edit', 'https://shop.example.com/a?b=1', 'https://example.com/x']);
+  assert.equal(parts[0].action.type, 'uri'); assert.equal(parts[3].action, undefined);
+  const b = X.OT_bubble({ id: 'M24', period: 'Y2026', name: 'お歳暮', steps: '1. 開く https://example.com/list', items: '', minutes: 10, deadline: '2026-11-18' }, 1, '2026-11-18', 'tok');
+  assert.ok(b.body.contents.some((c) => c.action && c.action.uri === 'https://example.com/list'));
+});

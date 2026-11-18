@@ -1,5 +1,5 @@
 /**
- * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-17d）
+ * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-18a：手順・リンクの URL を押して開けるように）
  *
  * 平日（土日祝・休みの日を除く）の毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、
  * 管理本部みんなの「今日のお仕事」をボタン付きで送る。特定の人に固定しない（だれが担当してもよい）。
@@ -19,7 +19,7 @@
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
  * 毎朝・10分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-17d';
+var OT_VERSION = '2026-11-18a';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
 var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
 var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
@@ -197,6 +197,28 @@ function OT_shift(s) {
 /** 純粋関数：手順の文字（改行区切り）を行の配列に */
 function OT_lines(text) { return String(text || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(String); }
 
+/**
+ * 純粋関数（版 2026-11-18a）：文を吹き出しの部品にする。URL がある行は「名前 🔗タップで開く」の青い文字にして、押すとそのページを開く
+ * （LINE の吹き出しの文字は、URL を書いても押せないため）。1行に URL が2つ以上あれば、URL ごとに1行にする
+ */
+function OT_textParts(prefix, text, size, color) {
+  var out = [];
+  OT_lines(text).forEach(function (line, i) {
+    var head = i === 0 ? prefix : '';
+    var urls = line.match(/https?:\/\/[^\s\u3000）)」』、，,]+/g);
+    if (!urls) { out.push({ type: 'text', text: head + line, size: size, wrap: true, color: color }); return; }
+    var rest = line;
+    urls.forEach(function (u, k) {
+      var at = rest.indexOf(u), label = rest.slice(0, at).replace(/[：:\s\u3000]+$/, '').trim();
+      rest = rest.slice(at + u.length);
+      if (k === urls.length - 1 && rest.trim()) label = (label ? label + ' ' : '') + rest.trim();
+      out.push({ type: 'text', text: (k === 0 ? head : '') + (label || 'リンク') + ' 🔗タップで開く', size: size, wrap: true, color: '#1a73e8',
+        decoration: 'underline', action: { type: 'uri', label: '開く', uri: u.slice(0, 1000) } });
+    });
+  });
+  return out;
+}
+
 /** 純粋関数：1件の仕事の吹き出し（ボタン付き） */
 function OT_bubble(it, no, date, token, owner) {
   var data = function (a) { return ['ot', '1', a, date, it.id, it.period, token].join('|'); };
@@ -208,11 +230,11 @@ function OT_bubble(it, no, date, token, owner) {
   if (owner) body.push({ type: 'text', text: '担当：' + owner + 'さん', size: 'xs', color: '#1a73e8', wrap: true });
   if (it.memo) body.push({ type: 'text', text: '📝 ' + it.memo, size: 'sm', wrap: true });
   body.push({ type: 'separator' });
-  OT_lines(it.steps).forEach(function (l) { body.push({ type: 'text', text: l, size: 'sm', wrap: true }); });
-  if (it.items) body.push({ type: 'text', text: '持ち物・使うもの：' + it.items, size: 'xs', wrap: true, color: '#555555' });
-  if (it.tips) body.push({ type: 'text', text: '💡 ' + it.tips, size: 'xs', wrap: true, color: '#555555' });
-  if (it.help) body.push({ type: 'text', text: '困ったら：' + it.help, size: 'xs', wrap: true, color: '#555555' });
-  if (it.report) body.push({ type: 'text', text: '終わったら：' + it.report, size: 'xs', wrap: true, color: '#555555' });
+  body = body.concat(OT_textParts('', it.steps, 'sm'))
+    .concat(OT_textParts('持ち物・使うもの：', it.items, 'xs', '#555555'))
+    .concat(OT_textParts('💡 ', it.tips, 'xs', '#555555'))
+    .concat(OT_textParts('困ったら：', it.help, 'xs', '#555555'))
+    .concat(OT_textParts('終わったら：', it.report, 'xs', '#555555'));
   return { type: 'bubble', size: 'mega',
     body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: body },
     footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('完了', 'done', 'primary'), btn('対応します', 'claim', 'secondary'),

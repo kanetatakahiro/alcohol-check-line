@@ -11,14 +11,14 @@ const PAY_HEAD = ['', '従業員番号', '氏名', '立替経費', '通勤手当
 const FIXED_HEAD = ['', '', '', '内容', '', '合計金額', '支払い回数', '期間（開始）', '期間（終了）', '当月徴収金額', '', false, '修正箇所'];
 const FIXED_ROW = ['', '', '', 'テスト備品', '', 30000, 6, "'2026-10", "'2027-03", 5000, '', true, 'テストのメモ'];
 /** 月のタブ（テンプレも同じ形）。people＝[[従業員番号（空なら書かない）, 氏名, {列: 値}]]（空の行は null）。total＝合計の行の B 列（本番は B〜C 結合で「合計」） */
-function payTab(sr, name, head1, people, total) {
+function payTab(sr, name, head1, people, total, noTotal = []) {   // noTotal＝合計の列を空にする人の行（0 から）
   const sh = sr.insertSheet(name);
   sh.appendRow(['', ...head1]); sh.appendRow(PAY_HEAD);
   const cols = { 立替経費: 4, 通勤手当: 5, 固定立て替え: 6, 家賃補助: 7, インセンティブ: 8 };
   people.forEach((p, i) => {
     const r = 3 + i;
     if (p) { if (p[0]) sh.getRange(r, 2).setValue("'" + p[0]); sh.getRange(r, 3).setValue(p[1]); Object.entries(p[2] || {}).forEach(([k, v]) => sh.getRange(r, cols[k]).setValue(v)); }
-    sh.getRange(r, 9).setFormula((i === 1 ? '=sum' : '=SUM') + `(D${r}:H${r})`);   // 小文字の =sum の行もある
+    if (!noTotal.includes(i)) sh.getRange(r, 9).setFormula((i === 1 ? '=sum' : '=SUM') + `(D${r}:H${r})`);   // 小文字の =sum の行もある
   });
   const sumRow = 3 + people.length;
   if (total) sh.getRange(sumRow, 2).setValue(total);
@@ -356,7 +356,7 @@ test('交通費申請（給与反映シート）: ★付きの既存のタブに
   assert.equal(tab(sr, 'R8.11月分12月支給'), null);   // 新しく作らない
   const v = ex.dump();
   assert.deepEqual(v.slice(2, 5).map((x) => [String(x[1]), x[3], x[4]]), [['90001', '', 999], ['90003', 500, 420], ['90005', '', 12000]]);
-  assert.deepEqual([ex.formulas['5,9'], ex.formulas['6,4'], ex.formulas['6,9']], ['=sum(D5:H5)', '=SUM(D3:D5)', '=SUM(I3:I5)']);
+  assert.deepEqual([ex.formulas['5,9'], ex.formulas['6,4'], ex.formulas['6,9']], ['=SUM(D5:H5)', '=SUM(D3:D5)', '=SUM(I3:I5)']);
   assert.equal(v[8][3], '内容');   // 下の表は1行ずれただけ
   assert.equal(ex.cf.length, 0);   // 既存のタブには条件付き書式を足さない
   const adm = pushes(g, n).filter((p) => p.to === ADMIN)[0].text;
@@ -417,6 +417,25 @@ test('交通費申請（給与反映シート）: 本番の形（合計の行の
   assert.deepEqual([...X.PAY_match(rows, { code: '90001', name: '試験 一郎' })].map((r) => r.row), [3]);
   assert.deepEqual([...X.PAY_match(rows, { code: '90002', name: '試験 二郎' })].map((r) => r.row), [4]);   // 番号が先
   assert.equal(X.PAY_match(rows, { code: '90009', name: '' }).length, 0);
+});
+
+test('給与反映シート（19e）: 足した行の合計の列。3行目の合計が空なら式のある行から同じ形で写す・どの行にも無ければ =SUM(D{行}:H{行})。既存の行の空いた合計の欄には書かない', () => {
+  const { g, sr } = setup();
+  const people = [{ code: '90001', name: '試験 一郎' }, { code: '90002', name: '試験 二郎' }, { code: '90003', name: '試験 三郎' }];
+  // 3行目（90001）の合計が空・4行目（90002）は小文字の =sum
+  const a = payTab(sr, 'R8.12月分1月支給', ['2027年', '1月支給'], [['90001', '試験 一郎'], ['90002', '試験 二郎']], '合計', [0]);
+  g.ctx.PAY_writeColumn_('2026-12', '通勤手当', [{ code: '90003', value: 420 }], { people, mode: 'on' });
+  assert.deepEqual([3, 4, 5].map((r) => a.formulas[`${r},9`] || ''), ['', '=sum(D4:H4)', '=sum(D5:H5)']);
+  assert.deepEqual([String(a.dump()[4][1]), a.dump()[4][4]], ['90003', 420]);
+  assert.equal(a.formulas['6,9'], '=SUM(I3:I5)');
+  // どの行にも合計の式が無い
+  const b = payTab(sr, 'R9.1月分2月支給', ['2027年', '2月支給'], [['90001', '試験 一郎'], ['90002', '試験 二郎']], '合計', [0, 1]);
+  g.ctx.PAY_writeColumn_('2027-01', '通勤手当', [{ code: '90001', value: 100 }, { code: '90003', value: 420 }], { people, mode: 'on' });
+  assert.deepEqual([3, 4, 5].map((r) => b.formulas[`${r},9`] || ''), ['', '', '=SUM(D5:H5)']);
+  assert.equal(b.dump()[2][4], 100);
+  // 純粋関数
+  const X = g.ctx;
+  assert.deepEqual([X.PAY_isRowSum('=SUM(D5:H5)', 5), X.PAY_isRowSum('=sum(D5:H5)', 5), X.PAY_isRowSum('=SUM(D3:D25)', 3), X.PAY_isRowSum('=SUM(D5:H5)+1', 5), X.PAY_isRowSum('', 5)], [true, true, false, false, false]);
 });
 
 test('交通費申請（record）: 受け付けて記録するが LINE・臨時の依頼・給与反映シートには送らず「交通費の送る予定」へ。画像は今までどおり問い合わせへも流す', () => {

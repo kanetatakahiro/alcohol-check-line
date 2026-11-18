@@ -1,5 +1,5 @@
 /**
- * 給与反映シート（社労士共有用【リバースHD】）への書き込みの共通部分（gas/PayrollSheet.gs・版 2026-11-19d・本番未導入）
+ * 給与反映シート（社労士共有用【リバースHD】）への書き込みの共通部分（gas/PayrollSheet.gs・版 2026-11-19e・本番未導入）
  *
  * 交通費（通勤手当）と、今後の AI の経費申請（立替経費）で使い回す。列の名前を渡せば、その列だけに書く。
  *   PAY_writeColumn_(month, '通勤手当', [{ code, value }], { people, mode })
@@ -18,7 +18,10 @@
  *   - その月のタブが無ければ「テンプレ」をコピーして作り、1行目 B・C に支給の年と月を入れる。テンプレに入っている人の行は消さずに使い、
  *     いない在籍者だけを足す。作ったタブだけ、人の行に「金額の無い行は灰色・ある行は白」の条件付き書式を足す
  *   - 人を足すとき：人の並びの空いている行を先に使い、足りなければ合計の行の上に行を挿入する（行ごと挿入するので、下の表と L・M 列は
- *     中身を変えずにそのまま下へずれる）。挿入した行には上の人の行の式（合計の列など）を同じ形で入れ、合計の行の =SUM の範囲を広げる
+ *     中身を変えずにそのまま下へずれる）。合計の行の =SUM の範囲を広げる
+ *   - 挿入した行の合計の列（版 2026-11-19e）：人の行のうち、合計の列に同じ行の =SUM(D?:H?) の形の式がある行を探して同じ形で写す。
+ *     どの行にも無ければ =SUM(D{行}:H{行})（最初〜最後の金額の列）を入れる。既存の行（空いていた行を使うときも）の空いた合計の欄には書かない。
+ *     合計の列より左の式は、今までどおり上の人の行から同じ形で写す
  *   - 既存の月のタブ：書く金額がある人が並んでいなければ、同じやり方で足す。そのほかの行・列・数式・書式は変えない
  *   - 人の照合（版 2026-11-19d）：まず従業員番号。その番号の行が無ければ、従業員番号が空の行を氏名で（全角半角・空白をそろえて。氏名は従業員マスタ）。
  *     同じ人に当たる行が2行以上あれば書かずに conflict（dup にも入れる）。#N/A・氏名が空の行（番号も無いもの）は対象外。
@@ -29,7 +32,7 @@
  * スクリプトプロパティ：PAYROLL_SHEET_ID（社労士共有用【リバースHD】のスプレッドシート ID）
  * ログには件数・タブ名・見出し・行の位置だけを書く（氏名・金額は書かない）。
  */
-var PAY_VERSION = '2026-11-19d';
+var PAY_VERSION = '2026-11-19e';
 var PAY_TEMPLATE = 'テンプレ', PAY_HEADER_ROW = 2, PAY_FIRST_ROW = 3;
 var PAY_CODE = '従業員番号', PAY_NAME = '氏名', PAY_TOTAL = '合計';
 var PAY_AMOUNTS = ['立替経費', '通勤手当', '固定立て替え', '家賃補助', 'インセンティブ'];   // 金額の列（見出しの名前）
@@ -71,6 +74,11 @@ function PAY_match(rows, p) {
   var byCode = rows.filter(function (r) { return c && r.code === c; });
   if (byCode.length) return byCode;
   return n ? rows.filter(function (r) { return !r.code && r.name === n; }) : [];
+}
+/** 純粋関数：その行の合計の式か（=SUM(D5:H5) のように、同じ行の範囲を1つだけ足す式。小文字の =sum も）。row＝その式がある行 */
+function PAY_isRowSum(f, row) {
+  var m = /^=\s*sum\s*\(\s*\$?[A-Z]+\$?(\d+)\s*:\s*\$?[A-Z]+\$?(\d+)\s*\)\s*$/i.exec(String(f || ''));
+  return !!m && Number(m[1]) === row && Number(m[2]) === row;
 }
 /** 純粋関数：=SUM の式か（小文字の =sum も） */
 function PAY_isSum(f) { return /^=\s*sum\s*\(/i.test(String(f || '')); }
@@ -137,9 +145,21 @@ function PAY_addPeople_(sh, lay, people) {
   lay.blanks.forEach(function (row) { if (rest.length) put(row, rest.shift()); });
   if (rest.length) {
     var at = lay.sumRow, k = rest.length, w = Math.max(sh.getLastColumn(), lay.total), src = at - 1;
-    var tmpl = src >= PAY_FIRST_ROW ? sh.getRange(src, 1, 1, lay.total).getFormulasR1C1()[0] : [];   // 上の人の行の式（合計の列まで）
+    var tmpl = src >= PAY_FIRST_ROW ? sh.getRange(src, 1, 1, lay.total - 1).getFormulasR1C1()[0] : [];   // 上の人の行の式（合計の列より左）
+    // 合計の列の式：人の行のうち、その行の =SUM(D?:H?) の形の式がある行を探す（3行目が空のことがある）
+    var totalR1C1 = '';
+    lay.rows.some(function (r) {
+      var c = sh.getRange(r.row, lay.total);
+      if (PAY_isRowSum(c.getFormula(), r.row)) { totalR1C1 = c.getFormulasR1C1()[0][0]; return true; }
+      return false;
+    });
     sh.insertRowsBefore(at, k);
     tmpl.forEach(function (f, j) { if (f) for (var i = 0; i < k; i++) sh.getRange(at + i, j + 1).setFormulaR1C1(f); });
+    for (var i = 0; i < k; i++) {
+      var row = at + i;
+      if (totalR1C1) sh.getRange(row, lay.total).setFormulaR1C1(totalR1C1);
+      else sh.getRange(row, lay.total).setFormula('=SUM(' + PAY_colLetter(lay.first) + row + ':' + PAY_colLetter(lay.lastAmount) + row + ')');
+    }
     var sumRow = at + k, fs = sh.getRange(sumRow, 1, 1, w).getFormulas()[0];
     fs.forEach(function (f, j) {
       if (!f || j + 1 > lay.total) return;   // 合計の列より右（L・M 列など）は変えない
@@ -260,5 +280,5 @@ function PAY_inspect() {
 
 if (typeof module !== 'undefined') {
   module.exports = { PAY_tabName: PAY_tabName, PAY_payCells: PAY_payCells, PAY_normName: PAY_normName, PAY_code: PAY_code, PAY_colLetter: PAY_colLetter,
-    PAY_cols: PAY_cols, PAY_isSum: PAY_isSum, PAY_normPerson: PAY_normPerson, PAY_match: PAY_match, PAY_extendSum: PAY_extendSum, PAY_VERSION: PAY_VERSION };
+    PAY_cols: PAY_cols, PAY_isSum: PAY_isSum, PAY_isRowSum: PAY_isRowSum, PAY_normPerson: PAY_normPerson, PAY_match: PAY_match, PAY_extendSum: PAY_extendSum, PAY_VERSION: PAY_VERSION };
 }

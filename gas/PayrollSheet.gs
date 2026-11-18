@@ -1,5 +1,5 @@
 /**
- * 給与反映シート（社労士共有用【リバースHD】）への書き込みの共通部分（gas/PayrollSheet.gs・版 2026-11-19c・本番未導入）
+ * 給与反映シート（社労士共有用【リバースHD】）への書き込みの共通部分（gas/PayrollSheet.gs・版 2026-11-19d・本番未導入）
  *
  * 交通費（通勤手当）と、今後の AI の経費申請（立替経費）で使い回す。列の名前を渡せば、その列だけに書く。
  *   PAY_writeColumn_(month, '通勤手当', [{ code, value }], { people, mode })
@@ -10,7 +10,9 @@
  *   - 1行目：B＝「2026年」・C＝「11月支給」（2つのセル）
  *   - 2行目の見出し：B 従業員番号／C 氏名／D 立替経費／E 通勤手当／F 固定立て替え／G 家賃補助／H インセンティブ／I 合計（各行 =SUM(D:H)）。
  *     列は見出しの名前で探す（位置を決め打ちしない）
- *   - 3行目から1人1行。人の並びのすぐ下に「合計の行」（従業員番号・氏名が空で、最初の金額の列が =SUM の行。月で位置が変わる）
+ *   - 3行目から1人1行。従業員番号が空で氏名だけの行が多い（氏名の空白の有無はばらばら）。#N/A の行・同じ氏名が2行ある月もある
+ *   - 人の並びのすぐ下に「合計の行」（B〜C 列が結合で B に「合計」・D〜I が =SUM(D3:D36) など。月で位置が変わる）。
+ *     合計の行は「従業員番号か氏名の欄が『合計』、または両方が空」で、最初の金額の列が =SUM の行として見つける
  *   - 合計の行の下に固定立て替えの表、L 列にチェックボックス、M 列にメモ
  * 書き込みの決まり：
  *   - その月のタブが無ければ「テンプレ」をコピーして作り、1行目 B・C に支給の年と月を入れる。テンプレに入っている人の行は消さずに使い、
@@ -18,13 +20,16 @@
  *   - 人を足すとき：人の並びの空いている行を先に使い、足りなければ合計の行の上に行を挿入する（行ごと挿入するので、下の表と L・M 列は
  *     中身を変えずにそのまま下へずれる）。挿入した行には上の人の行の式（合計の列など）を同じ形で入れ、合計の行の =SUM の範囲を広げる
  *   - 既存の月のタブ：書く金額がある人が並んでいなければ、同じやり方で足す。そのほかの行・列・数式・書式は変えない
- *   - 書くのは、渡した列の、従業員番号が一致する行の空いている欄だけ。値か式がある欄は上書きしない（同じ値なら何もしない・違えば conflict）
+ *   - 人の照合（版 2026-11-19d）：まず従業員番号。その番号の行が無ければ、従業員番号が空の行を氏名で（全角半角・空白をそろえて。氏名は従業員マスタ）。
+ *     同じ人に当たる行が2行以上あれば書かずに conflict（dup にも入れる）。#N/A・氏名が空の行（番号も無いもの）は対象外。
+ *     既存の行の従業員番号が空でも、番号を書き足さない（既存のセルは変えない）。人を足すのは、番号でも氏名でも見つからない人だけ
+ *   - 書くのは、渡した列の、照合できた行の空いている欄だけ。値か式がある欄は上書きしない（同じ値なら何もしない・違えば conflict）
  *   - 合計の行より下と、合計の列より右（L・M 列など）には書かない
  *   - 見出しが足りない・合計の行が見つからないときは、何も書かずに止める
  * スクリプトプロパティ：PAYROLL_SHEET_ID（社労士共有用【リバースHD】のスプレッドシート ID）
  * ログには件数・タブ名・見出し・行の位置だけを書く（氏名・金額は書かない）。
  */
-var PAY_VERSION = '2026-11-19c';
+var PAY_VERSION = '2026-11-19d';
 var PAY_TEMPLATE = 'テンプレ', PAY_HEADER_ROW = 2, PAY_FIRST_ROW = 3;
 var PAY_CODE = '従業員番号', PAY_NAME = '氏名', PAY_TOTAL = '合計';
 var PAY_AMOUNTS = ['立替経費', '通勤手当', '固定立て替え', '家賃補助', 'インセンティブ'];   // 金額の列（見出しの名前）
@@ -54,6 +59,18 @@ function PAY_cols(header) {
   var out = {};
   (header || []).forEach(function (h, i) { var k = String(h == null ? '' : h).normalize('NFKC').replace(/\s/g, ''); if (k && !out[k]) out[k] = i + 1; });
   return out;
+}
+/** 純粋関数：氏名を比べる形（全角半角をそろえ、空白を除く）。#N/A・空は '' */
+function PAY_normPerson(v) {
+  var t = String(v == null ? '' : v).normalize('NFKC').replace(/\s/g, '');
+  return /^#(N\/A|REF!|VALUE!|NAME\?|ERROR!|DIV\/0!)/i.test(t) ? '' : t;
+}
+/** 純粋関数：その行が人の行のどれに当たるか。rows＝[{ row, code, name（比べる形） }]、p＝{ code, name }。返り値：行の配列（0・1・2以上） */
+function PAY_match(rows, p) {
+  var c = PAY_code(p.code), n = PAY_normPerson(p.name);
+  var byCode = rows.filter(function (r) { return c && r.code === c; });
+  if (byCode.length) return byCode;
+  return n ? rows.filter(function (r) { return !r.code && r.name === n; }) : [];
 }
 /** 純粋関数：=SUM の式か（小文字の =sum も） */
 function PAY_isSum(f) { return /^=\s*sum\s*\(/i.test(String(f || '')); }
@@ -94,9 +111,13 @@ function PAY_layout_(sh) {
     var codes = sh.getRange(PAY_FIRST_ROW, lay.code, n, 1).getValues(), names = sh.getRange(PAY_FIRST_ROW, lay.name, n, 1).getValues();
     var fs = sh.getRange(PAY_FIRST_ROW, first, n, 1).getFormulas();
     for (var i = 0; i < n; i++) {
-      var c = PAY_code(codes[i][0]), nm = String(names[i][0] == null ? '' : names[i][0]).trim();
-      if (!c && !nm && PAY_isSum(fs[i][0])) { lay.sumRow = PAY_FIRST_ROW + i; break; }
-      if (c) lay.rows.push({ row: PAY_FIRST_ROW + i, code: c }); else if (!nm) lay.blanks.push(PAY_FIRST_ROW + i);
+      var rawCode = String(codes[i][0] == null ? '' : codes[i][0]).trim(), rawName = String(names[i][0] == null ? '' : names[i][0]).trim();
+      var isTotal = PAY_normPerson(rawCode) === PAY_TOTAL || PAY_normPerson(rawName) === PAY_TOTAL || (!rawCode && !rawName);
+      if (isTotal && PAY_isSum(fs[i][0])) { lay.sumRow = PAY_FIRST_ROW + i; break; }
+      var c = PAY_normPerson(rawCode) ? PAY_code(rawCode) : '', nm = PAY_normPerson(rawName);
+      if (c || nm) lay.rows.push({ row: PAY_FIRST_ROW + i, code: c, name: nm });
+      else if (!rawCode && !rawName) lay.blanks.push(PAY_FIRST_ROW + i);
+      else lay.skipped = (lay.skipped || 0) + 1;   // #N/A などの行は対象外（空いている行としても使わない）
     }
   }
   if (!lay.sumRow) throw new Error('「' + sh.getName() + '」に合計の行（' + PAY_CODE + '・' + PAY_NAME + 'が空で、' + PAY_colLetter(first) + '列が =SUM の行）が見つかりません（何も書いていません）');
@@ -141,9 +162,8 @@ function PAY_ensureTab_(ss, month, people) {
   sh.setName(PAY_tabName(month));
   var pc = PAY_payCells(month);
   sh.getRange(1, 2, 1, 2).setValues([pc]);
-  var lay = PAY_layout_(sh), have = {};
-  lay.rows.forEach(function (r) { have[r.code] = true; });
-  lay = PAY_addPeople_(sh, lay, people.filter(function (p) { return !have[PAY_code(p.code)]; }));
+  var lay = PAY_layout_(sh);
+  lay = PAY_addPeople_(sh, lay, people.filter(function (p) { return !PAY_match(lay.rows, p).length; }));   // 番号でも氏名でも見つからない人だけ
   // 条件付き書式（作ったタブだけ）：人の行で、金額の列の合計が0なら灰色・0でなければ白
   var from = PAY_FIRST_ROW, n = lay.sumRow - from;
   if (n > 0) {
@@ -164,7 +184,7 @@ function PAY_ensureTab_(ss, month, people) {
 function PAY_writeColumn_(month, column, amounts, opts) {
   opts = opts || {};
   var ss = PAY_book_(), write = opts.mode === 'on', people = opts.people || [];
-  var out = { tab: PAY_tabName(month), created: false, willCreate: false, added: [], written: [], same: [], conflict: [], missing: [] };
+  var out = { tab: PAY_tabName(month), created: false, willCreate: false, added: [], written: [], same: [], conflict: [], dup: [], missing: [] };
   var byCode = {};
   people.forEach(function (p) { byCode[PAY_code(p.code)] = p; });
   var sh = PAY_findTab_(ss, month);
@@ -177,29 +197,31 @@ function PAY_writeColumn_(month, column, amounts, opts) {
   out.tab = sh.getName();
   var lay = PAY_layout_(sh);
   if (!lay.cols[column] || lay.amounts.indexOf(lay.cols[column]) === -1) throw new Error('「' + sh.getName() + '」の2行目に「' + column + '」がありません（何も書いていません）');
-  var rowOf = function () { var m = {}; lay.rows.forEach(function (r) { if (!m[r.code]) m[r.code] = r.row; }); return m; };
-  var rows = rowOf();
-  // 書く金額がある人が並んでいなければ足す
+  // その人の行（従業員番号 → 無ければ番号の空いた行を氏名で）。在籍者にいない番号は番号だけで探す
+  var find = function (a) { return PAY_match(lay.rows, byCode[PAY_code(a.code)] || { code: a.code, name: '' }); };
+  // 書く金額がある人が、番号でも氏名でも並んでいなければ足す
   var add = [];
   amounts.forEach(function (a) {
-    var c = PAY_code(a.code);
-    if (rows[c]) return;
-    if (!byCode[c]) { out.missing.push(a.code); return; }
-    if (add.indexOf(byCode[c]) === -1) add.push(byCode[c]);
+    var p = byCode[PAY_code(a.code)];
+    if (find(a).length) return;
+    if (!p) { out.missing.push(a.code); return; }
+    if (add.indexOf(p) === -1) add.push(p);
   });
   if (add.length) {
     out.added = add.map(function (p) { return p.code; });
-    if (write) { lay = PAY_addPeople_(sh, lay, add); rows = rowOf(); }
+    if (write) lay = PAY_addPeople_(sh, lay, add);
   }
   var col = lay.cols[column];
   amounts.forEach(function (a) {
-    var c = PAY_code(a.code), r = rows[c];
-    if (!r) { if (!write && out.added.indexOf(a.code) !== -1) out.written.push(a.code); return; }
-    var cell = sh.getRange(r, col), cur = cell.getValue(), f = cell.getFormula();
+    var hit = find(a);
+    if (hit.length > 1) { out.conflict.push(a.code); out.dup.push(a.code); return; }   // 同じ人の行が2行以上：書かない
+    if (!hit.length) { if (!write && out.added.indexOf(a.code) !== -1) out.written.push(a.code); return; }
+    var cell = sh.getRange(hit[0].row, col), cur = cell.getValue(), f = cell.getFormula();
     if (f || (cur !== '' && cur !== null)) { (!f && Number(cur) === Number(a.value) ? out.same : out.conflict).push(a.code); return; }
     if (write) cell.setValue(a.value);
     out.written.push(a.code);
   });
+  if (out.dup.length) Logger.log('給与反映シート：「' + out.tab + '」の「' + column + '」で同じ人の行が2行以上あり書かなかった ' + out.dup.length + '人');
   return out;
 }
 
@@ -216,14 +238,17 @@ function PAY_inspect() {
     var t = { name: sh.getName(), rows: sh.getLastRow(), cols: sh.getLastColumn(), row1: row1, header: head, frozen: sh.getFrozenRows(), cf: sh.getConditionalFormatRules().length };
     try {
       var lay = PAY_layout_(sh);
-      t.sumRow = lay.sumRow; t.people = lay.rows.length; t.blanks = lay.blanks.length;
+      t.sumRow = lay.sumRow; t.people = lay.rows.length; t.blanks = lay.blanks.length; t.skipped = lay.skipped || 0;
+      t.noCode = lay.rows.filter(function (r) { return !r.code; }).length;
+      var seen = {}; t.dupNames = 0;
+      lay.rows.forEach(function (r) { if (!r.code) { if (seen[r.name] === 1) t.dupNames++; seen[r.name] = (seen[r.name] || 0) + 1; } });
       t.sumFormulas = sh.getRange(lay.sumRow, 1, 1, lay.total).getFormulas()[0].map(function (f, j) { return f ? PAY_colLetter(j + 1) + '：' + f : ''; }).filter(Boolean);
       t.rowFormula = lay.rows.length ? sh.getRange(lay.rows[0].row, lay.total).getFormula() : '';
       t.missing = PAY_AMOUNTS.filter(function (k) { return !lay.cols[k]; });
     } catch (e) { t.error = e.message; }
     out.push(t);
     Logger.log('給与反映シート：「' + t.name + '」' + t.rows + '行×' + t.cols + '列・固定 ' + t.frozen + '行・条件付き書式 ' + t.cf + '／1行目：' + t.row1.join('｜')
-      + '／2行目：' + t.header.join('｜') + (t.error ? '／形：' + t.error : '／人の行 ' + t.people + '（空き ' + t.blanks + '）・合計の行 ' + t.sumRow + '行目（' + t.sumFormulas.join('、')
+      + '／2行目：' + t.header.join('｜') + (t.error ? '／形：' + t.error : '／人の行 ' + t.people + '（番号なし ' + t.noCode + '・同じ氏名が2行以上 ' + t.dupNames + '・空き ' + t.blanks + '・#N/A など対象外 ' + t.skipped + '）・合計の行 ' + t.sumRow + '行目（' + t.sumFormulas.join('、')
       + '）・人の行の合計の式 ' + (t.rowFormula || 'なし') + (t.missing.length ? '・見出しに無い金額の列：' + t.missing.join('、') : '')));
   });
   [TA_addMonth(TA_ym(today), -1), TA_ym(today)].forEach(function (m) {
@@ -235,5 +260,5 @@ function PAY_inspect() {
 
 if (typeof module !== 'undefined') {
   module.exports = { PAY_tabName: PAY_tabName, PAY_payCells: PAY_payCells, PAY_normName: PAY_normName, PAY_code: PAY_code, PAY_colLetter: PAY_colLetter,
-    PAY_cols: PAY_cols, PAY_isSum: PAY_isSum, PAY_extendSum: PAY_extendSum, PAY_VERSION: PAY_VERSION };
+    PAY_cols: PAY_cols, PAY_isSum: PAY_isSum, PAY_normPerson: PAY_normPerson, PAY_match: PAY_match, PAY_extendSum: PAY_extendSum, PAY_VERSION: PAY_VERSION };
 }

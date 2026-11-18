@@ -10,17 +10,18 @@ const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'Off
 const PAY_HEAD = ['', '従業員番号', '氏名', '立替経費', '通勤手当', '固定立て替え', '家賃補助', 'インセンティブ', '合計'];
 const FIXED_HEAD = ['', '', '', '内容', '', '合計金額', '支払い回数', '期間（開始）', '期間（終了）', '当月徴収金額', '', false, '修正箇所'];
 const FIXED_ROW = ['', '', '', 'テスト備品', '', 30000, 6, "'2026-10", "'2027-03", 5000, '', true, 'テストのメモ'];
-/** 月のタブ（テンプレも同じ形）。people＝[[従業員番号, 氏名, {列: 値}]]（空の行は null） */
-function payTab(sr, name, head1, people) {
+/** 月のタブ（テンプレも同じ形）。people＝[[従業員番号（空なら書かない）, 氏名, {列: 値}]]（空の行は null）。total＝合計の行の B 列（本番は B〜C 結合で「合計」） */
+function payTab(sr, name, head1, people, total) {
   const sh = sr.insertSheet(name);
   sh.appendRow(['', ...head1]); sh.appendRow(PAY_HEAD);
   const cols = { 立替経費: 4, 通勤手当: 5, 固定立て替え: 6, 家賃補助: 7, インセンティブ: 8 };
   people.forEach((p, i) => {
     const r = 3 + i;
-    if (p) { sh.getRange(r, 2).setValue("'" + p[0]); sh.getRange(r, 3).setValue(p[1]); Object.entries(p[2] || {}).forEach(([k, v]) => sh.getRange(r, cols[k]).setValue(v)); }
+    if (p) { if (p[0]) sh.getRange(r, 2).setValue("'" + p[0]); sh.getRange(r, 3).setValue(p[1]); Object.entries(p[2] || {}).forEach(([k, v]) => sh.getRange(r, cols[k]).setValue(v)); }
     sh.getRange(r, 9).setFormula((i === 1 ? '=sum' : '=SUM') + `(D${r}:H${r})`);   // 小文字の =sum の行もある
   });
   const sumRow = 3 + people.length;
+  if (total) sh.getRange(sumRow, 2).setValue(total);
   ['D', 'E', 'F', 'G', 'H', 'I'].forEach((c, j) => sh.getRange(sumRow, 4 + j).setFormula(`=SUM(${c}3:${c}${sumRow - 1})`));
   [FIXED_HEAD, FIXED_ROW].forEach((row, i) => row.forEach((v, j) => { if (v !== '') sh.getRange(sumRow + 3 + i, j + 1).setValue(v); }));
   sh.setFrozenRows(2);
@@ -382,6 +383,40 @@ test('交通費申請（給与反映シート）: ★付きの既存のタブに
   assert.equal(X.PAY_isSum('=sum(D3:D25)'), true);
   assert.equal(X.PAY_extendSum('=SUM(D3:D25)', 25, 28), '=SUM(D3:D28)');
   assert.equal(X.PAY_extendSum('=SUM(D3:D28)', 25, 28), '=SUM(D3:D28)');   // シートが自動で広げていればそのまま
+});
+
+test('交通費申請（給与反映シート）: 本番の形（合計の行の B が「合計」・番号なしで氏名だけの行・氏名の空白の違い・#N/A・同じ氏名が2行）。氏名で照合して書き、番号は書き足さない。同名2行は書かずに要確認。新しい人だけ足す', () => {
+  const { g, sr } = setup();
+  totLatest(g, { '2026-11-05': ['k1'], '2026-11-06': ['k1'], '2026-11-12': ['k3'] });
+  g.ai.queue.push(form([{ date: '11/5', from: '自宅', to: '甲町', km: '10' }, { date: '11/6', from: '甲町', to: '乙山', km: '20' }]));
+  photo(g, U(1));
+  g.ai.queue.push(form([{ date: '11/12', from: '大宮駅', to: '浦和駅', means: 'train', yen: '420' }]));
+  photo(g, U(3));
+  // 90001 は番号なし・空白なしの「試験一郎」、#N/A の行、90005（固定額）は「試験 五郎」と全角空白の「試験　五郎」の2行、90003 は並んでいない
+  const ex = payTab(sr, '★R8.11月分12月支給', ['2026年', '12月支給'],
+    [['', '試験一郎'], ['', '#N/A'], ['', '試験 五郎'], ['', '試験　五郎', { インセンティブ: 100 }]], '合計');
+  const n0 = g.fetches.length;
+  at(g, '2026-12-06T07:00:00+09:00');
+  g.ctx.travelApplyDaily();
+  const v = ex.dump();
+  assert.deepEqual(v.slice(2, 8).map((x) => [String(x[1]), x[2], x[4]]), [
+    ['', '試験一郎', 450], ['', '#N/A', ''], ['', '試験 五郎', ''], ['', '試験　五郎', ''], ['90003', '試験 三郎', 420], ['合計', '', '']]);   // 番号は書き足さない・同名2行には書かない・90003 だけ合計の行の上に足す
+  assert.deepEqual([4, 5, 9].map((c) => ex.formulas[`8,${c}`]), ['=SUM(D3:D7)', '=SUM(E3:E7)', '=SUM(I3:I7)']);
+  assert.equal(v[10][3], '内容');
+  const adm = pushes(g, n0).filter((p) => p.to === ADMIN)[0].text;
+  assert.match(adm, /「★R8.11月分12月支給」の「通勤手当」に 2人分を書きました。\n・並んでいなかったため行を足した：従業員番号 90003\n・同じ人の行が2行以上あるため書かなかった（要確認）：従業員番号 90005\n/);
+  assert.doesNotMatch(adm, /すでに値がある/);
+  assert.ok(g.logs.some((l) => /同じ人の行が2行以上あり書かなかった 1人/.test(l)));
+  noPersonalLogs(g);
+  // 純粋関数
+  const X = g.ctx;
+  assert.equal(X.PAY_normPerson('試験　一郎 '), X.PAY_normPerson('試験一郎'));
+  assert.equal(X.PAY_normPerson('ｼｹﾝ'), X.PAY_normPerson('シケン'));
+  assert.equal(X.PAY_normPerson('#N/A'), '');
+  const rows = [{ row: 3, code: '', name: '試験一郎' }, { row: 4, code: '90002', name: '別の表記' }, { row: 5, code: '', name: '試験二郎' }];
+  assert.deepEqual([...X.PAY_match(rows, { code: '90001', name: '試験 一郎' })].map((r) => r.row), [3]);
+  assert.deepEqual([...X.PAY_match(rows, { code: '90002', name: '試験 二郎' })].map((r) => r.row), [4]);   // 番号が先
+  assert.equal(X.PAY_match(rows, { code: '90009', name: '' }).length, 0);
 });
 
 test('交通費申請（record）: 受け付けて記録するが LINE・臨時の依頼・給与反映シートには送らず「交通費の送る予定」へ。画像は今までどおり問い合わせへも流す', () => {

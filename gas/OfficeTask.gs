@@ -1,5 +1,5 @@
 /**
- * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-18a：手順・リンクの URL を押して開けるように）
+ * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-19a：［手が空きました］で今日の残りと前倒しをまとめて送る）
  *
  * 平日（土日祝・休みの日を除く）の毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、
  * 管理本部みんなの「今日のお仕事」をボタン付きで送る。特定の人に固定しない（だれが担当してもよい）。
@@ -19,7 +19,7 @@
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
  * 毎朝・10分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-18a';
+var OT_VERSION = '2026-11-19a';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
 var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
 var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
@@ -239,6 +239,43 @@ function OT_bubble(it, no, date, token, owner) {
     body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: body },
     footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('完了', 'done', 'primary'), btn('対応します', 'claim', 'secondary'),
       btn('わからない', 'ask', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
+}
+
+/**
+ * 純粋関数（版 2026-11-19a）：［手が空きました］で渡すお仕事。
+ * today＝今日の一覧でまだ完了していない・担当がいないもの（期限が近い順のまま）、early＝前倒しできるお仕事（plan.extra のうち、まだ完了・一覧にないもの）
+ */
+function OT_freeItems(left, owners, plan, done, tasks, date) {
+  owners = owners || {}; done = done || {};
+  var today = (left || []).filter(function (it) { return !owners[it.id + '|' + it.period]; });
+  var ids = (plan && plan.ids) || [], early = [];
+  ((plan && plan.extra) || []).forEach(function (k) {
+    if (done[k] || ids.indexOf(k) !== -1 || owners[k]) return;
+    var id = k.split('|')[0], per = k.split('|')[1], t = (tasks || []).filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    var pr = OT_periods(OT_parseRule(t.rule) || { type: 'daily' }, date).filter(function (x) { return x.key === per; })[0];
+    early.push(Object.assign({}, t, { period: per, deadline: pr ? pr.end : date, early: pr ? pr.start > date : true }));
+  });
+  return { today: today, early: early };
+}
+
+/** 純粋関数：［手が空きました］の返信（まとめの文＋お仕事の吹き出し。今日の残りを先に、最大10件） */
+function OT_freeMessages(free, who, date, token) {
+  var list = free.today.concat(free.early).slice(0, 10);
+  var lines = [who + 'さん、ありがとうございます！手伝えるお仕事はこちらです👇'];
+  if (free.today.length) {
+    lines.push('', '【今日のお仕事で、まだ担当がいないもの】' + free.today.length + '件');
+    free.today.forEach(function (it) { lines.push('・' + it.name + (it.overdue ? '（期限を過ぎています）' : it.deadline === date ? '（今日まで）' : '')); });
+  }
+  if (free.early.length) {
+    lines.push('', '【前倒しできるお仕事】' + free.early.length + '件');
+    free.early.forEach(function (it) { lines.push('・' + it.name + '（期限 ' + OT_md(it.deadline) + '）'); });
+  }
+  var more = free.today.length + free.early.length - list.length;
+  lines.push('', (free.today.length && free.early.length ? '今日のお仕事を先にお願いします。' : '') + 'やるものの［対応します］を押してから始めてください（ほかの人と重ならないように）。'
+    + (more > 0 ? '\n（ほかに' + more + '件あります。今の分が終わったら、もう一度［手が空きました］を押してください）' : ''));
+  var bubbles = list.map(function (it, i) { return OT_bubble(it, i + 1, date, token, null); });
+  return [OT_text_(lines.join('\n')), { type: 'flex', altText: '手伝えるお仕事：' + list.map(function (it) { return it.name; }).join('、').slice(0, 380), contents: { type: 'carousel', contents: bubbles } }];
 }
 
 /** 純粋関数：朝のメッセージ（まとめ＋1件ずつの吹き出し）。だれか1人あてにしない。opts.requested＝土日祝などに「今日の業務」と頼まれて作った一覧 */
@@ -567,16 +604,14 @@ function OT_onGroupPostback_(ev) {
     var plan = OT_planOf_(p.date) || { ids: [], extra: [] }, info = OT_doneFromLog(logSh.getDataRange().getValues());
     var undoBtn = { type: 'flex', altText: '取り消す', contents: { type: 'bubble', size: 'micro', body: { type: 'box', layout: 'vertical', contents: [
       { type: 'button', style: 'secondary', height: 'sm', action: { type: 'postback', label: '間違えたので取り消す', data: ['ot', '1', 'undo', p.date, p.id, p.period, p.token].join('|'), displayText: '取り消す：' + name } }] } } };
-    if (p.action === 'free') {
-      var next = (plan.extra || []).filter(function (k) { return !info.done[k] && (plan.offered || []).indexOf(k) === -1; })[0];
-      if (!next) { log(OT_ACTIONS.free, '追加の仕事なし'); OT_reply_(ev.replyToken, [OT_text_(who + 'さん、ありがとうございます！今日予定していたお仕事は以上です😊\n手が空いている間は「業務マニュアル」を読んで、わかりにくい所をメモしておいてください。安藤さん、ほかにお願いしたいことがあれば「臨時の依頼」に追加をお願いします。')]); return; }
-      plan.offered = (plan.offered || []).concat([next]); plan.ids = (plan.ids || []).concat([next]); OT_savePlan_(p.date, plan);
-      var nid = next.split('|')[0], nper = next.split('|')[1], nt = tasks.filter(function (t) { return t.id === nid; })[0] || { id: nid, name: nid, minutes: 0 };
-      var pr = OT_periods(OT_parseRule(nt.rule) || { type: 'daily' }, p.date).filter(function (x) { return x.key === nper; })[0];
-      log(OT_ACTIONS.free, '次：' + nt.name);
-      OT_reply_(ev.replyToken, [OT_text_(who + 'さん、ありがとうございます！次はこちらをお願いします👇'),
-        { type: 'flex', altText: '次のお仕事：' + nt.name, contents: OT_bubble(Object.assign({}, nt, { period: nper, deadline: pr ? pr.end : p.date, early: pr ? pr.start > p.date : false }), 0, p.date, p.token, who) }]);
-      log(OT_ACTIONS.claim, '［手が空きました］で受け取り');
+    if (p.action === 'free') {   // 版 2026-11-19a：今日まだ担当がいないお仕事と、前倒しできるお仕事をまとめて送る（押した人を担当にはしない。やるものの［対応します］を押してもらう）
+      var free = OT_freeItems(OT_remaining_(ss, p.date, info) || [], info.owner, plan, info.done, tasks, p.date);
+      log(OT_ACTIONS.free, '今日の残り ' + free.today.length + '件・前倒し ' + free.early.length + '件');
+      if (!free.today.length && !free.early.length) {
+        OT_reply_(ev.replyToken, [OT_text_(who + 'さん、ありがとうございます！今日のお仕事は、すべて担当が決まっているか完了しています😊\n前倒しできるお仕事もいまはありません。手が空いている間は「業務マニュアル」を読んで、わかりにくい所をメモしておいてください。')]);
+        return;
+      }
+      OT_reply_(ev.replyToken, OT_freeMessages(free, who, p.date, p.token));
       return;
     }
     if (p.action === 'done') {
@@ -600,6 +635,7 @@ function OT_onGroupPostback_(ev) {
     if (info.done[key]) { OT_reply_(ev.replyToken, [OT_text_('「' + name + '」は' + info.doneBy[key].name + 'さんが完了にしています。')]); return; }
     if (p.action === 'claim') {
       var cur = info.owner[key];
+      if ((plan.ids || []).indexOf(key) === -1) { plan.ids = (plan.ids || []).concat([key]); OT_savePlan_(p.date, plan); }   // 前倒しのお仕事も「残りの業務」に出す
       log(OT_ACTIONS.claim, cur && cur !== who ? '担当の変更（前：' + cur + 'さん）' : '');
       OT_reply_(ev.replyToken, [OT_text_('「' + name + '」は' + who + 'さんの担当にしました👍' + (cur && cur !== who ? '（' + cur + 'さんから変更しました）' : '') + '\n終わったら［完了］を押してください。')]);
       return;

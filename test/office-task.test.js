@@ -172,7 +172,18 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   n = g.fetches.length;
   post(g, pb(STAFF, car[0].footer.contents[0].action.data, 'e9'));                       // 手が空きました
   const r1 = replies(g, n)[0].body.messages;
-  assert.match(r1[0].text, /次はこちら/); assert.equal(r1[1].type, 'flex');
+  assert.match(r1[0].text, /手伝えるお仕事はこちら[\s\S]*【今日のお仕事で、まだ担当がいないもの】[\s\S]*【前倒しできるお仕事】[\s\S]*［対応します］を押してから/);
+  assert.ok(!/社労士へ送る/.test(r1[0].text));                                              // 見本さんが担当の仕事は出さない
+  assert.equal(r1[1].type, 'flex');
+  const fb = r1[1].contents.contents, early = fb.find((b) => /前倒し/.test(b.body.contents[1].text));
+  assert.ok(fb.length >= 2 && early);
+  assert.ok(!logOps(book).some((x) => x[0] === '対応します' && x[1] === '試験'));            // 押しただけでは担当にしない
+  n = g.fetches.length;
+  post(g, pb(STAFF, btnData(early, '対応します'), 'e9b'));                                // 前倒しを受け取る → 残りの業務に出る
+  assert.match(replies(g, n)[0].body.messages[0].text, /試験さんの担当にしました/);
+  n = g.fetches.length;
+  post(g, msg(STAFF, '残りの業務', 'e9c'));
+  assert.match(replies(g, n)[0].body.messages[0].text, new RegExp(early.body.contents[0].text.replace(/^\d+\. /, '') + '[^\n]*担当：試験さん'));
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(first, '完了').replace(/\|[^|]+$/, '|zzz'), 'e10'));
   assert.match(replies(g, n)[0].body.messages[0].text, /このボタンは使えません/);

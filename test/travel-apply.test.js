@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 交通費申請（gas/TravelApply.gs・版 2026-11-19f）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
+// 交通費申請（gas/TravelApply.gs・版 2026-11-19g）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'OfficeTask.gs', 'Travel.gs', 'TravelApply.gs', 'PayrollSheet.gs'];
 // 給与反映シート（社労士共有用【リバースHD】）の本番の形（2026-11-19 に確認した見出しと形。値は架空）：
 // 1行目 B「2026年」・C「11月支給」／2行目 B〜I の見出し／3行目から人の行（I 列 =SUM(D:H)）／すぐ下に合計の行（D〜I =SUM(D3:D…)）／
@@ -56,7 +56,9 @@ const photo = (g, uid, extra = {}) => { const e = ev(uid, { type: 'image', ...ex
 const V2 = { km: 'one_way_km', yen: 'fare' };
 const row = ({ km, yen, unclear = [], ...o }) => ({ example: false, date: '', means: 'car', from: '', to: '', trip: 'oneway', one_way_km: km ?? '', total_km: '', fare: yen ?? '',
   ...o, unclear: unclear.map((f) => V2[f] || f) });
-const form = (rows, month = '2026-11', total = '', totalKm = '') => ({ json: { is_travel_form: true, month, total_km: totalKm, total_yen: total, rows: rows.map(row) } });
+// 申請書 v3（版 2026-11-19g）：枚数と合計欄①〜④。head＝{ page, pages, sum_km, car_yen, fare_total, grand_total, unclear }
+const form = (rows, month = '2026-11', fare = '', head = {}) => ({ json: { is_travel_form: true, month, page: '', pages: '', sum_km: '', car_yen: '', fare_total: fare, grand_total: '',
+  unclear: [], ...head, rows: rows.map(row) } });
 const at = (g, iso) => { g.clock.now = new Date(iso).getTime(); };
 
 function setup(props = { TRAVEL_APPLY_MODE: 'on' }, now = '2026-12-02T09:00:00+09:00') {
@@ -149,7 +151,7 @@ test('交通費申請（見分け）: 免許証の受付中の写真は免許証
   assert.equal(g.ai.calls.length, 0);
   assert.equal(cases(inq).length, c0 + 1);
   // 申請の対象の人でも、AI が「申請書ではない」と答えた画像は問い合わせへ（保存しない）
-  g.ai.queue.push({ json: { is_travel_form: false, month: '', total_km: '', total_yen: '', rows: [] } });
+  g.ai.queue.push({ json: { is_travel_form: false, month: '', page: '', pages: '', sum_km: '', car_yen: '', fare_total: '', grand_total: '', unclear: [], rows: [] } });
   const files = g.drive.folders['folder-travel'].files.length;
   g.clock.now += 31 * 60000;   // 免許証の受付（30分）が終わってから
   photo(g, U(2));
@@ -221,7 +223,7 @@ test('交通費申請（照合）: 車・バイクは自動計算の距離と片
   assert.deepEqual([d[4][5], d[4][8], d[4][9]], ['電車', '', 420]);
   assert.match(d[5][12], /同じ日・同じ区間/);
   assert.equal(d[6][3], '（申請書全体）');
-  assert.match(d[6][12], /合計と、計算した合計が違います/);
+  assert.match(d[6][12], /③運賃の合計」が、各行の運賃を足したものと違います/);
   // 車・バイクの金額：km × 15円（合計は円未満切り捨て）
   assert.deepEqual([d[0][9], d[3][9]], [225, 135]);
 });
@@ -267,16 +269,16 @@ test('交通費申請（v2 の申請書・19f）: 往復は片道×2（合わな
   g.ai.queue.push(form([{ date: '11/12', from: '自宅', to: '甲町', trip: 'round', one_way_km: '16', total_km: '32' }]));
   photo(g, U(1));
   assert.equal(details(master).at(-1)[12], '要確認（申請 16km・自動計算 10km（高速を使わない道。高速を使う道は 13km））');
-  // 手書きの合計：合計kmの合計・運賃の合計が各行と同じなら OK、違えば申請書全体を要確認
+  // 合計欄（19g では①・③）：各行と同じなら OK、違えば申請書全体を要確認
   g.ai.queue.push(form([{ date: '11/2', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' },
-    { date: '11/3', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'round', fare: '340' }], '2026-11', '340', '10'));
+    { date: '11/3', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'round', fare: '340' }], '2026-11', '340', { sum_km: '10' }));
   photo(g, U(2));
   const d2 = () => details(master).filter((r) => String(r[1]) === '90002');
   assert.deepEqual(d2().map((r) => [r[3], r[11]]), [['自宅', 'OK'], ['大宮駅', 'OK']]);
-  g.ai.queue.push(form([{ date: '11/4', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' }], '2026-11', '', '12'));
+  g.ai.queue.push(form([{ date: '11/4', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' }], '2026-11', '', { sum_km: '12' }));
   photo(g, U(2));
   assert.equal(d2().at(-1)[3], '（申請書全体）');
-  assert.match(d2().at(-1)[12], /合計と、計算した合計が違います/);
+  assert.match(d2().at(-1)[12], /①合計kmの合計」が、各行の合計（km）を足したものと違います/);
   // 毎朝：管理本部が「往復・片道」に 往復 と入れて回答 → 合計＝片道×2 で確定。合わない行は確認後の値で確定
   setD(master, 6, 7, '往復'); setD(master, 6, 14, '本人に確認。往復');
   setD(master, 1, 14, '写真で確認。合計は16'); setD(master, 1, 15, '16');
@@ -287,6 +289,78 @@ test('交通費申請（v2 の申請書・19f）: 往復は片道×2（合わな
   assert.match(String(d3[6][11]), /^確認済み/);
   assert.deepEqual([d3[1][8], d3[1][9]], [16, 240]);
   assert.match(String(d3[1][11]), /^確認済み/);
+  noPersonalLogs(g);
+});
+
+test('交通費申請（v3 の申請書・19g）: 合計欄①〜④を用紙ごとに照合（書いていない欄は比べない）・2枚は1つの申請に・届いていない枚目は要確認（届けば確認済み）・同じ枚目はあとの写真・枚数が空欄は1枚', () => {
+  const { g, master } = setup();
+  const app = (code, month) => apps(master).filter((r) => String(r[2]) === code && String(r[4]) === month);
+  const rowsOf = (id) => details(master).filter((r) => r[0] === id);
+  // 1枚・①〜④が正しい → OK（②＝①×15・④＝②＋③）
+  g.ai.queue.push(form([{ date: '11/2', from: '自宅', to: '甲町', trip: 'round', one_way_km: '8', total_km: '16' },
+    { date: '11/3', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'round', fare: '340' }], '2026-11', '340',
+  { page: '1', pages: '1', sum_km: '16', car_yen: '240', grand_total: '580' }));
+  photo(g, U(1));
+  const call = g.ai.calls[0].body;
+  assert.match(call.system, /□枚目／全□枚/);
+  assert.match(call.system, /④交通費の合計/);
+  const a1 = app('90001', '2026-11');
+  assert.equal(a1.length, 1);
+  assert.equal(String(a1[0][9]), '1/1');
+  assert.deepEqual(rowsOf(a1[0][0]).map((r) => [r[3], r[11]]), [['自宅', 'OK'], ['大宮駅', 'OK']]);   // 申請書全体の行は無い
+  assert.equal(a1[0][6], '受付');
+  // ④だけ違う → 申請書全体を要確認（ほかの欄は合っている）
+  g.ai.queue.push(form([{ date: '11/2', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' }], '2026-11', '',
+    { page: '1', pages: '1', sum_km: '10', car_yen: '150', grand_total: '160' }));
+  photo(g, U(2));
+  const r2 = rowsOf(app('90002', '2026-11')[0][0]);
+  assert.deepEqual(r2.map((r) => [r[3], r[11]]), [['自宅', 'OK'], ['（申請書全体）', '要確認']]);
+  assert.equal(r2[1][12], '用紙の「④交通費の合計」が、②＋③と違います');
+  assert.equal(app('90002', '2026-11')[0][6], '要確認');
+  // 2枚：1/2 だけ届いた → 「2枚目が届いていません」で要確認
+  const n = g.fetches.length;
+  g.ai.queue.push(form([{ date: '10/5', from: '自宅', to: '甲町', one_way_km: '10' }], '2026-10', '', { page: '1', pages: '2', sum_km: '10', car_yen: '150', grand_total: '150' }));
+  photo(g, U(1));
+  let a3 = app('90001', '2026-10');
+  assert.equal(a3.length, 1);
+  assert.equal(a3[0][6], '要確認');
+  let w = rowsOf(a3[0][0]).filter((r) => r[3] === '（申請書全体）');
+  assert.deepEqual(w.map((r) => [r[11], r[12]]), [['要確認', '届いていない枚目があります（2枚目が届いていません）']]);
+  assert.match(replies(g, n)[0], /^交通費申請の写真を受け付けました（10月分・1件）。/);   // 受付の文は今までどおり
+  // 2/2 が届く → 1つの申請にまとまり、届いていない枚目の行は確認済みに
+  g.ai.queue.push(form([{ date: '10/6', from: '自宅', to: '甲町', one_way_km: '10' }], '2026-10', '', { page: '2', pages: '2', sum_km: '10', car_yen: '150', grand_total: '150' }));
+  photo(g, U(1));
+  a3 = app('90001', '2026-10');
+  assert.equal(a3.length, 1);
+  assert.deepEqual([String(a3[0][8]).split(',').length, String(a3[0][9])], [2, '1/2,2/2']);
+  w = rowsOf(a3[0][0]).filter((r) => r[3] === '（申請書全体）');
+  assert.match(String(w[0][11]), /^確認済み（全部の枚目が届いた）$/);
+  assert.deepEqual([a3[0][6], a3[0][7]], ['受付', 300]);
+  // 同じ枚目（2/2）がもう一度 → あとの写真を使う。前の 2枚目の明細は「差し替え」・要確認にはしない
+  g.ai.queue.push(form([{ date: '10/6', from: '自宅', to: '甲町', one_way_km: '9' }], '2026-10', '', { page: '2', pages: '2', sum_km: '9', car_yen: '135', grand_total: '135' }));
+  photo(g, U(1));
+  a3 = app('90001', '2026-10');
+  assert.equal(a3.length, 1);
+  const r3 = rowsOf(a3[0][0]);
+  assert.deepEqual(r3.filter((r) => r[3] !== '（申請書全体）').map((r) => [String(r[2]), r[8], String(r[11]), String(r[16])]), [
+    ['2026-10-05', 10, 'OK', '1'], ['2026-10-06', 10, '差し替え（2枚目を送り直し）', '2'], ['2026-10-06', 9, 'OK', '2']]);   // 重複にもしない
+  assert.ok(!r3.some((r) => r[11] === '要確認'));
+  assert.deepEqual([a3[0][6], a3[0][7], String(a3[0][9])], ['受付', 285, '1/2,2/2,2/2']);
+  // 枚数が空欄 → 1枚として扱う（届いていない枚目にしない）。もう1枚空欄が来ても差し替えずに足す
+  g.ai.queue.push(form([{ date: '11/4', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'oneway', fare: '170' }], '2026-11', '170'));
+  photo(g, U(3));
+  g.ai.queue.push(form([{ date: '11/5', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'oneway', fare: '170' }], '2026-11', '170'));
+  photo(g, U(3));
+  const a4 = app('90003', '2026-11');
+  assert.equal(a4.length, 1);
+  assert.equal(String(a4[0][9]), '-,-');
+  assert.deepEqual(rowsOf(a4[0][0]).map((r) => [r[3], r[9], r[11]]), [['大宮駅', 170, 'OK'], ['大宮駅', 170, 'OK']]);
+  assert.deepEqual([a4[0][6], a4[0][7]], ['受付', 340]);
+  // 毎朝：差し替えの行は TOT の照合もしない
+  totLatest(g, { '2026-11-02': ['k1', 'k2'], '2026-11-03': ['k1'], '2026-11-04': ['k3'], '2026-11-05': ['k3'] });
+  at(g, '2026-12-03T07:00:00+09:00');
+  g.ctx.travelApplyDaily();
+  assert.ok(details(master).filter((r) => /^差し替え/.test(String(r[11]))).every((r) => r[10] === '未確認'));
   noPersonalLogs(g);
 });
 
@@ -559,9 +633,39 @@ test('交通費申請（純粋関数）: 日付・金額・AI の応答・TOT �
   assert.deepEqual(['往復', '片道', 'round', '', '往'].map((t) => X.TA_tripOf(t)), ['往復', '片道', '往復', '', '']);
   assert.equal(X.TA_isExample({ example: false, date: '記入例：4/1' }), true);
   assert.equal(X.TA_isExample({ example: false, date: '4/1', from: '自宅' }), false);
+  // 19g：合計欄①〜④（書いていない欄は比べない）
   const R = [{ means: '車', km: 16, yen: 240 }, { means: '電車', km: null, yen: 340 }];
-  assert.deepEqual([[16, 340], [16, null], [null, 340], [17, 340], [16, 300], [null, null]].map(([k, y]) => X.TA_totalDiffers(R, k, y)), [false, false, false, true, true, false]);
-  assert.equal(X.TA_totalDiffers([{ means: '車', km: null, yen: null }], 16, null), false);   // 読めない行があれば比べない
+  const S = (km, carYen, fare, total) => ({ km, carYen, fare, total });
+  const codes = (rows, s) => [...X.TA_sumIssues(rows, s, 15)].map((i) => i.code).join(',');
+  assert.equal(codes(R, S(16, 240, 340, 580)), '');
+  assert.equal(codes(R, S(null, null, null, null)), '');                       // 空欄だけでは要確認にしない
+  assert.equal(codes(R, S(17, 255, 340, 595)), 'sumKm');                       // ①が行と違う（②＝①×15 は合う）
+  assert.equal(codes(R, S(16, 250, 340, 590)), 'sumCarYen');
+  assert.equal(codes(R, S(16, 240, 300, 540)), 'sumFare');
+  assert.equal(codes(R, S(16, 240, 340, 600)), 'sumTotal');                    // ④だけ違う
+  assert.equal(codes(R, S(null, 240, 340, 580)), '');                          // ①が無ければ②は比べない
+  assert.equal(codes([{ means: '車', km: 10.3, yen: 154.5 }], S(10.3, 155, null, 155)), '');   // 四捨五入・電車が無ければ③は 0
+  assert.equal(codes([{ means: '車', km: 10, yen: 150 }], S(null, null, null, 150)), '');      // ②が書いていなければ④は比べない
+  assert.equal(codes([{ means: '車', km: null, yen: null }], S(16, null, null, null)), '');    // 読めない行があれば①は比べない
+  // 19g：枚数
+  const pg = (a, b) => { const r = X.TA_pageOf(a, b); return [r.page, r.pages, r.explicit, r.ok, r.label]; };
+  assert.deepEqual(pg('', ''), [1, 1, false, true, '-']);
+  assert.deepEqual(pg('1', '2'), [1, 2, true, true, '1/2']);
+  assert.deepEqual(pg('２', '２'), [2, 2, true, true, '2/2']);
+  assert.deepEqual(pg('2', ''), [2, null, true, true, '2/']);
+  assert.deepEqual(pg('', '1'), [1, 1, true, true, '1/1']);
+  assert.deepEqual(pg('', '2'), [null, 2, false, false, '?/2']);
+  assert.deepEqual(pg('3', '2'), [3, 2, false, false, '?/2']);
+  assert.deepEqual(pg(null, '2'), [null, null, false, false, '?']);
+  const miss = (l) => [...X.TA_missingPages(l)];
+  assert.deepEqual(miss(['1/2']), [2]);
+  assert.deepEqual(miss(['1/2', '2/2']), []);
+  assert.deepEqual(miss(['2/3']), [1, 3]);
+  assert.deepEqual(miss(['-']), []);
+  assert.deepEqual(miss(['-', '-']), []);
+  assert.deepEqual(miss(['-', '2/2']), []);
+  assert.deepEqual(miss(['2/']), [1]);
+  assert.deepEqual(miss(['?']), []);
   const idx = { worked: { '1:2026-11-05': true }, covered: { '2026-11-05': true, '2026-11-06': true }, first: '2026-11-01' };
   assert.deepEqual(['2026-11-05', '2026-11-06', '2026-10-30', '2026-12-09'].map((d) => X.TA_totCheck(idx, '0001', d)), ['あり', 'なし', '確認できない', '未確認']);
   assert.equal(X.TA_totCheck(idx, '', '2026-11-05'), '確認できない');

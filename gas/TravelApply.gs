@@ -1,5 +1,5 @@
 /**
- * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19f・本番未導入）
+ * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19g・本番未導入）
  *
  * 流れ：
  *   1. 本人が紙の申請書の写真（複数枚可）を公式LINEに送る。
@@ -10,11 +10,15 @@
  *      読めない文字・数字は推測で埋めず、その欄を空にして「要確認」にする。
  *      申請書（v2・版 2026-11-19f）：1行目に対象（年・月分）／社員番号／氏名。表の上の薄い文字の「記入例：」の行は読まない。
  *      表は No／日付／方法（車・バイク・電車・バスのどれか1つに○）／出発地／到着地／往復・片道（どちらかに○）／片道（km）／合計（km）／運賃（円）の30行。
- *      高速料金・備考の欄は無い（高速・駐車場は立替経費で別に申請する）。下に手書きの合計（合計kmの合計・運賃の合計）。
+ *      高速料金・備考の欄は無い（高速・駐車場は立替経費で別に申請する）。
+ *      申請書 v3（版 2026-11-19g）：右上に「枚数：□枚目／全□枚」。表は1枚25行。下の合計欄は4つ（どれもその用紙の分）：
+ *      ①合計kmの合計（車・バイク）・②車・バイクの金額（①×15円）・③運賃の合計（電車・バス）・④交通費の合計（②＋③）。
  *   3. 照合（受付のとき）：車・バイクは TRV_checkSegment（gas/Travel.gs・高速を使わない道と片道5km。片道（km）で照合）・行き先がわからない区間・
  *      往復は 合計km＝片道km×2・片道は 合計km＝片道km（合わなければ要確認。片方しか書いていなければもう片方を計算）・
  *      金額（合計km × TRAVEL_YEN_PER_KM 円）。電車・バスは書かれた運賃のまま（往復でも2倍にしない）。往復・片道の○が無い・両方は要確認。
- *      日付が対象月の中か・同じ日の同じ区間の重複・申請書の手書きの合計（合計kmの合計・運賃の合計）と各行の合計の違い。
+ *      日付が対象月の中か・同じ日の同じ区間の重複・用紙ごとの合計欄（①〜④。書いていない欄は比べない）。
+ *      2枚以上：同じ人・同じ対象月の写真は1つの申請にまとめる。全N枚のうち届いていない枚目があれば申請を要確認（届けば自動で確認済み）。
+ *      同じ枚目が2回届いたら、あとの写真を使う（前の写真の明細は「差し替え」にして合計に入れない）。枚数が書いていなければ1枚として扱う（差し替えはしない）。
  *      TOT の出勤の記録は、毎朝の処理（tot-latest.json の日別勤怠）で照合する。
  *   4. 毎朝7時台（travelApplyDaily）：TOT の照合 → 回答が入った行を照合し直して確定 → 要確認の行を「臨時の依頼」（業務一覧ファイル）へ1件1行で追加
  *      （8時の「今日の業務」に出る）。回答が空のまま［完了］になっていたら、確認事項を出し直す。6日は前月の締め（月のタブ・管理者へ一覧）。
@@ -33,13 +37,13 @@
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-19f';
+var TA_VERSION = '2026-11-19g';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
-var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '備考'];
-var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, note: 9 };
+var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '枚目', '備考'];
+var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, pages: 9, note: 10 };
 var TA_DETAIL_HEADER = ['申請ID', '社員番号', '日付', '出発', '到着', '手段', '往復・片道', '片道（km）', '合計（km）', '金額（円）', 'TOT の出勤', '照合結果', '確認事項',
-  '回答（管理本部が入力）', '確認後の値（管理本部が入力）', '依頼の行'];
-var TA_D = { id: 0, code: 1, date: 2, from: 3, to: 4, means: 5, trip: 6, one: 7, km: 8, yen: 9, tot: 10, result: 11, issue: 12, answer: 13, value: 14, req: 15 };
+  '回答（管理本部が入力）', '確認後の値（管理本部が入力）', '依頼の行', '枚目'];
+var TA_D = { id: 0, code: 1, date: 2, from: 3, to: 4, means: 5, trip: 6, one: 7, km: 8, yen: 9, tot: 10, result: 11, issue: 12, answer: 13, value: 14, req: 15, page: 16 };
 var TA_PLAN_HEADER = ['日時', '種類', '宛先', '内容'];
 var TA_PAY_COLUMN = '通勤手当';   // 給与反映シートで交通費を書く列
 var TA_APPLY_TYPES = ['交通費申請（車・バイク）', '公共交通機関'];   // 写真を受け付ける通勤区分
@@ -49,7 +53,7 @@ var TA_CAR = ['車', 'バイク'], TA_PUBLIC = ['電車', 'バス'], TA_WHOLE = 
 var TA_MEANS = { car: '車', bike: 'バイク', train: '電車', bus: 'バス', unknown: '' };
 var TA_TRIP = { round: '往復', oneway: '片道', unknown: '' };
 var TA_KM_EPS = 0.05;   // 片道×2 と合計の比べ方（km の小数1桁まで同じなら同じ）
-var TA_OK = 'OK', TA_CHECK = '要確認', TA_DONE = '確認済み';
+var TA_OK = 'OK', TA_CHECK = '要確認', TA_DONE = '確認済み', TA_REPLACED = '差し替え';
 var TA_TOT_WAIT = '未確認', TA_TOT_YES = 'あり', TA_TOT_NO = 'なし', TA_TOT_UNKNOWN = '確認できない';
 var TA_ST = { recv: '受付', check: '要確認', fixed: '確定', next: '来月反映' };
 var TA_ACCEPT_DAY = 4, TA_ANSWER_DAY = 5, TA_REMIND_DAY = 4, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
@@ -78,7 +82,11 @@ var TA_ISSUE = {
   tot: { memo: 'その日の TOT の出勤の記録がありません', fix: '出勤した日か本人に確認し、回答に結果を書く' },
   totUnknown: { memo: 'その日の TOT の出勤の記録を確認できませんでした', fix: 'TOT で出勤の記録を確かめ、回答に結果を書く' },
   dup: { memo: '同じ日・同じ区間がもう1行あります', fix: '写真を見て二重でないか確かめ、二重なら確認後の値に 0 を入れる' },
-  total: { memo: '申請書に書かれた合計と、計算した合計が違います', fix: '写真を見て各行の数字を確かめ、回答に結果を書く' },
+  sumKm: { memo: '用紙の「①合計kmの合計」が、各行の合計（km）を足したものと違います', fix: '写真を見て各行の km と①を確かめ、回答に結果を書く' },
+  sumCarYen: { memo: '用紙の「②車・バイクの金額」が、①×円/km（四捨五入）と違います', fix: '写真を見て①と②を確かめ、回答に結果を書く（金額は各行の合計km から計算します）' },
+  sumFare: { memo: '用紙の「③運賃の合計」が、各行の運賃を足したものと違います', fix: '写真を見て各行の運賃と③を確かめ、回答に結果を書く' },
+  sumTotal: { memo: '用紙の「④交通費の合計」が、②＋③と違います', fix: '写真を見て②・③・④を確かめ、回答に結果を書く' },
+  pages: { memo: '届いていない枚目があります', fix: '本人に残りの枚目の写真を送ってもらう（届けば自動で確認済みになります）。送らない事情があれば回答に書く' },
   month: { memo: '対象の月が読み取れませんでした', fix: '「交通費申請」タブの「対象月」に 2026-11 のように入れる' },
   norows: { memo: '申請書の明細が読み取れませんでした', fix: '写真を見て「交通費明細」に行を足す（申請ID を同じにして、往復・片道と片道・合計の km か運賃を入れ、照合結果は空のまま）' },
   ai: { memo: 'AI で申請書を読み取れませんでした', fix: '写真を見て「交通費明細」に行を足し、「対象月」を入れる（申請ID を同じにして、往復・片道と片道・合計の km か運賃を入れ、照合結果は空のまま）' },
@@ -180,33 +188,37 @@ function TA_carKm(trip, one, total) {
 
 // ---------------- 純粋関数（AI） ----------------
 var TA_AI_SYSTEM = [
-  'あなたは、会社の管理本部が従業員の交通費申請書（紙・A4・1枚）の写真を読み取る係です。',
-  '申請書の形：1行目に対象（年・月分）・社員番号・氏名。表の列は No／日付（月/日）／方法（車・バイク・電車・バスのどれか1つに○）／出発地／到着地／往復・片道（どちらかに○）／片道（km）／合計（km）／運賃（円）。',
+  'あなたは、会社の管理本部が従業員の交通費申請書（紙・A4）の写真を読み取る係です。',
+  '申請書の形：1行目に対象（年・月分）・社員番号・氏名。右上に「枚数：□枚目／全□枚」。',
+  '表（1枚25行）の列は No／日付（月/日）／方法（車・バイク・電車・バスのどれか1つに○）／出発地／到着地／往復・片道（どちらかに○）／片道（km）／合計（km）／運賃（円）。',
   '表の上に薄い文字で「記入例：」と書かれた1行があります。これは書き方の見本で、申請ではありません。rows に入れないでください（もし入れるなら example を true に）。',
-  '表の下に、本人が手書きした合計（合計kmの合計・運賃の合計）があります。',
+  '表の下に、本人が手書きした合計欄が4つあります（どれもその用紙の分）：①合計kmの合計（車・バイク）／②車・バイクの金額（①×15円）／③運賃の合計（電車・バス）／④交通費の合計（②＋③）。',
   '画像を見て、次の項目を JSON で答えてください。',
   '- is_travel_form：交通費（通勤・移動の交通費）の申請書が写っていれば true。それ以外（免許証・レシートだけ・風景など）は false。',
   '- month：申請書に書かれた対象の年月（例 "2026-11"）。書かれていない・読めないときは ""。',
-  '- total_km：表の下に手書きされた「合計kmの合計」（書かれたとおりの数字。例 "64"）。無い・読めないときは ""。',
-  '- total_yen：表の下に手書きされた「運賃の合計」（書かれたとおりの数字。例 "1,360"）。無い・読めないときは ""。',
+  '- page：「□枚目」に書かれた数字（例 "1"）。pages：「全□枚」に書かれた数字（例 "2"）。書かれていないときは ""。',
+  '- sum_km：①（例 "64"）、car_yen：②（例 "960"）、fare_total：③（例 "680"）、grand_total：④（例 "1,640"）。書かれたとおりの数字。書かれていないときは ""（計算して埋めない）。',
+  '- unclear：表の外の欄で、確かに読めない文字・数字がある欄の名前（page・pages・sum_km・car_yen・fare_total・grand_total）。',
   '- rows：表の、何か書かれた行ごとに、書かれたとおりに：',
   '  example（「記入例」の行なら true。ふつうの行は false）、date（例 "11/5"）、',
   '  means（○が付いた方法：car＝車／bike＝バイク／train＝電車／bus＝バス。○が無い・2つ以上・読めないときは unknown）、',
   '  from（出発地）、to（到着地）、trip（○が付いたほう：round＝往復／oneway＝片道。○が無い・両方に○・読めないときは unknown）、',
   '  one_way_km（片道（km）。例 "8"）、total_km（合計（km）。例 "16"）、fare（運賃（円）。例 "340"）。',
   '  書かれていない欄は ""（計算して埋めない）。出発・到着は「自宅」や店舗名・略語を書かれたとおりに（言い換えない・補わない）。',
-  '- unclear：その行で、確かに読めない文字・数字がある欄の名前（date・means・from・to・trip・one_way_km・total_km・fare）。',
+  '  unclear：その行で、確かに読めない文字・数字がある欄の名前（date・means・from・to・trip・one_way_km・total_km・fare）。',
   '大事なこと：読めない文字・数字を推測で埋めないでください。少しでも自信がない欄は "" にして unclear に入れてください。',
   '氏名・住所などの個人情報は答えに含めないでください。',
 ].join('\n');
 var TA_AI_FIELDS = ['date', 'means', 'from', 'to', 'trip', 'one_way_km', 'total_km', 'fare'];
+var TA_AI_HEAD_FIELDS = ['page', 'pages', 'sum_km', 'car_yen', 'fare_total', 'grand_total'];
 var TA_AI_SCHEMA = {
   type: 'object',
   properties: {
     is_travel_form: { type: 'boolean' },
     month: { type: 'string' },
-    total_km: { type: 'string' },
-    total_yen: { type: 'string' },
+    page: { type: 'string' }, pages: { type: 'string' },
+    sum_km: { type: 'string' }, car_yen: { type: 'string' }, fare_total: { type: 'string' }, grand_total: { type: 'string' },
+    unclear: { type: 'array', items: { type: 'string', enum: TA_AI_HEAD_FIELDS } },
     rows: { type: 'array', items: { type: 'object', properties: {
       example: { type: 'boolean' },
       date: { type: 'string' },
@@ -217,7 +229,7 @@ var TA_AI_SCHEMA = {
       unclear: { type: 'array', items: { type: 'string', enum: TA_AI_FIELDS } },
     }, required: ['example', 'date', 'means', 'from', 'to', 'trip', 'one_way_km', 'total_km', 'fare', 'unclear'], additionalProperties: false } },
   },
-  required: ['is_travel_form', 'month', 'total_km', 'total_yen', 'rows'],
+  required: ['is_travel_form', 'month', 'page', 'pages', 'sum_km', 'car_yen', 'fare_total', 'grand_total', 'unclear', 'rows'],
   additionalProperties: false,
 };
 
@@ -235,7 +247,7 @@ function TA_aiRequest(model, mediaType, b64) {
   };
 }
 
-/** 純粋関数：Messages API の応答 → { res: { isForm, month, totalKm, total（運賃の合計）, rows } } か { error }。「記入例」の行は除く */
+/** 純粋関数：Messages API の応答 → { res: { isForm, month, page, pages, sums: { km, carYen, fare, total }, unclear, rows } } か { error }。「記入例」の行は除く */
 function TA_aiParse(text) {
   var body;
   try { body = JSON.parse(text); } catch (e) { return { error: 'parse' }; }
@@ -245,7 +257,9 @@ function TA_aiParse(text) {
   try { r = JSON.parse(block.text); } catch (e2) { return { error: 'parse' }; }
   if (!r || typeof r.is_travel_form !== 'boolean' || !Array.isArray(r.rows)) return { error: 'parse' };
   var str = function (v) { return typeof v === 'string' ? v.trim() : ''; };
-  return { res: { isForm: r.is_travel_form, month: str(r.month), totalKm: str(r.total_km), total: str(r.total_yen),
+  return { res: { isForm: r.is_travel_form, month: str(r.month), page: str(r.page), pages: str(r.pages),
+    sums: { km: str(r.sum_km), carYen: str(r.car_yen), fare: str(r.fare_total), total: str(r.grand_total) },
+    unclear: (Array.isArray(r.unclear) ? r.unclear : []).filter(function (f) { return TA_AI_HEAD_FIELDS.indexOf(f) !== -1; }),
     rows: r.rows.filter(function (x) { return x && typeof x === 'object' && !TA_isExample(x); }).map(function (x) {
       return { date: str(x.date), from: str(x.from), to: str(x.to), means: TA_MEANS[x.means] !== undefined ? x.means : 'unknown',
         trip: TA_TRIP[x.trip] !== undefined ? x.trip : 'unknown', one: str(x.one_way_km), km: str(x.total_km), yen: str(x.fare),
@@ -260,7 +274,8 @@ function TA_isExample(x) {
 }
 
 /**
- * 純粋関数：AI の読み取り → 申請の形。{ target（対象月 or ''）, rows: [{ date, from, to, means, trip, one, km（合計）, yen（運賃）, issues: [{ code, field }] }], appIssues, total（運賃の合計）, totalKm }
+ * 純粋関数：AI の読み取り → 申請の形。{ target（対象月 or ''）, rows: [{ date, from, to, means, trip, one, km（合計）, yen（運賃）, issues: [{ code, field }] }], appIssues,
+ *   sums: { km（①）, carYen（②）, fare（③）, total（④）。書いていない・読めない欄は null }, page: TA_pageOf の結果 }
  * 対象月：書かれた年月。無ければ、読めた日付がすべて同じ月ならその月。推測はしない（読めない欄は空のまま要確認）
  * 車・バイク：TA_carKm（往復は片道×2・片道は同じ。片方だけならもう片方を計算）。km の欄が読めないときは計算しない。
  * 電車・バス：運賃は書かれたまま（往復でも2倍にしない）
@@ -297,25 +312,72 @@ function TA_fromAi(res, receivedYmd) {
     return { date: date, rawDate: x.date, from: !has('from') ? x.from : '', to: !has('to') ? x.to : '',
       means: means, trip: trip, one: one, km: km, yen: yen, issues: issues };
   });
-  var appIssues = [];
+  var appIssues = [], hu = res.unclear || [], s = res.sums || {};
+  var page = TA_pageOf(hu.indexOf('page') === -1 ? res.page : null, hu.indexOf('pages') === -1 ? res.pages : null);
+  if (!page.ok) appIssues.push({ code: 'unclear', field: '枚数' });
   if (!out.length) appIssues.push({ code: 'norows' });
   if (!target) appIssues.push({ code: 'month' });
-  return { target: target, rows: out, appIssues: appIssues, total: TA_parseYen(res.total), totalKm: res.totalKm ? TRV_km(res.totalKm) : null };
+  var sum = function (k, f, parse) { return hu.indexOf(f) === -1 && s[k] ? parse(s[k]) : null; };
+  return { target: target, rows: out, appIssues: appIssues, page: page,
+    sums: { km: sum('km', 'sum_km', TRV_km), carYen: sum('carYen', 'car_yen', TA_parseYen), fare: sum('fare', 'fare_total', TA_parseYen), total: sum('total', 'grand_total', TA_parseYen) } };
 }
 
 /**
- * 純粋関数：申請書の手書きの合計と各行の合計が違うか。rows＝TA_fromAi の rows（km・yen は照合のあと）。
- * 合計kmの合計＝車・バイクの行の合計（km）を足したもの・運賃の合計＝電車・バスの行の運賃を足したもの。読めない行があればその合計は比べない
+ * 純粋関数：「□枚目／全□枚」→ { page（数 or null）, pages（数 or null）, explicit（枚目が書いてある）, ok（読めた・矛盾なし）,
+ *   label（「交通費申請」の枚目の欄に書く形：'1/2'・'-'（枚数なし）・'?'（読めない）・'?/2'（枚目だけ無い）） }
+ * どちらも書いていなければ1枚目（全1枚）として扱う（explicit＝false：差し替えはしない）。読めない（null）・枚目だけ無い・枚目が全枚数より大きいは ok＝false
  */
-function TA_totalDiffers(rows, totalKm, totalYen) {
-  if (!rows.length) return false;
-  var km = 0, kmOk = true, yen = 0, yenOk = true;
-  rows.forEach(function (d) {
-    if (TA_isCar(d.means)) { if (d.km === null) kmOk = false; else km += d.km; }
-    else if (TA_isPublic(d.means)) { if (d.yen === null) yenOk = false; else yen += d.yen; }
-    else { kmOk = false; yenOk = false; }
+function TA_pageOf(page, pages) {
+  var num = function (v) { var t = String(v == null ? '' : v).normalize('NFKC').replace(/[枚目全\s]/g, ''); return /^\d+$/.test(t) && Number(t) >= 1 ? Number(t) : null; };
+  var blank = function (v) { return v !== null && String(v).trim() === ''; };
+  if (page === null || pages === null) return { page: null, pages: null, explicit: false, ok: false, label: '?' };
+  if (blank(page) && blank(pages)) return { page: 1, pages: 1, explicit: false, ok: true, label: '-' };
+  var p = num(page), n = num(pages);
+  if ((!blank(page) && p === null) || (!blank(pages) && n === null)) return { page: null, pages: null, explicit: false, ok: false, label: '?' };
+  if (p === null) return n === 1 ? { page: 1, pages: 1, explicit: true, ok: true, label: '1/1' } : { page: null, pages: n, explicit: false, ok: false, label: '?/' + n };
+  if (n !== null && p > n) return { page: p, pages: n, explicit: false, ok: false, label: '?/' + n };
+  return { page: p, pages: n, explicit: true, ok: true, label: p + '/' + (n === null ? '' : n) };
+}
+
+/**
+ * 純粋関数：届いていない枚目。labels＝「交通費申請」の枚目の欄（写真ごと。'1/2'・'-'（枚数なし＝1枚目）・'?'（読めない））。
+ * 全枚数＝書かれた全枚数と枚目のいちばん大きいもの。返り値：届いていない枚目の配列（1から）
+ */
+function TA_missingPages(labels) {
+  var got = {}, max = 0;
+  labels.forEach(function (l) {
+    var t = String(l == null ? '' : l).trim();
+    if (t === '-') { got[1] = true; max = Math.max(max, 1); return; }
+    var m = /^(\d+|\?)(?:\/(\d*))?$/.exec(t);
+    if (!m) return;
+    var p = m[1] === '?' ? null : Number(m[1]), n = m[2] ? Number(m[2]) : 0;
+    if (p !== null) { got[p] = true; max = Math.max(max, p); }
+    max = Math.max(max, n);
   });
-  return (totalKm !== null && kmOk && Math.abs(km - totalKm) > TA_KM_EPS) || (totalYen !== null && yenOk && yen !== totalYen);
+  var out = [];
+  for (var i = 1; i <= max; i++) if (!got[i]) out.push(i);
+  return out;
+}
+
+/**
+ * 純粋関数：用紙ごとの合計欄（①〜④）の照合。rows＝その用紙の行（TA_fromAi の rows）、sums＝TA_fromAi の sums、rate＝円/km。
+ * ①＝車・バイクの行の合計（km）の合計・②＝①×円/km（四捨五入）・③＝電車・バスの行の運賃の合計・④＝②＋③。
+ * 書いていない（読めない）欄は比べない。読めない行があればその合計は比べない。④は、②・③が書いていなくてもその種類の行が無ければ 0 として比べる。
+ * 返り値：確認事項の配列（[{ code: 'sumKm' }, …]）
+ */
+function TA_sumIssues(rows, sums, rate) {
+  var km = 0, kmOk = true, fare = 0, fareOk = true, cars = 0, pubs = 0, out = [];
+  rows.forEach(function (d) {
+    if (TA_isCar(d.means)) { cars++; if (d.km === null) kmOk = false; else km += d.km; }
+    else if (TA_isPublic(d.means)) { pubs++; if (d.yen === null) fareOk = false; else fare += d.yen; }
+    else { kmOk = false; fareOk = false; }
+  });
+  if (sums.km !== null && kmOk && Math.abs(km - sums.km) > TA_KM_EPS) out.push({ code: 'sumKm' });
+  if (sums.km !== null && sums.carYen !== null && Math.round(sums.km * rate) !== sums.carYen) out.push({ code: 'sumCarYen' });
+  if (sums.fare !== null && fareOk && fare !== sums.fare) out.push({ code: 'sumFare' });
+  var c2 = sums.carYen !== null ? sums.carYen : cars ? null : 0, c3 = sums.fare !== null ? sums.fare : pubs ? null : 0;
+  if (sums.total !== null && c2 !== null && c3 !== null && c2 + c3 !== sums.total) out.push({ code: 'sumTotal' });
+  return out;
 }
 
 /** 純粋関数：TRV_checkSegment の結果 → 確認事項の種類（OK なら null） */
@@ -331,6 +393,8 @@ function TA_trvIssue(r) {
 function TA_issueText(issues) {
   return issues.map(function (i) { return i.detail || (TA_ISSUE[i.code] ? TA_fillText(TA_ISSUE[i.code].memo, i) : i.code); }).join('／');
 }
+/** 純粋関数：届いていない枚目の確認事項（例「届いていない枚目があります（2枚目が届いていません）」） */
+function TA_pagesIssue(missing) { return { code: 'pages', detail: TA_ISSUE.pages.memo + '（' + missing.join('・') + '枚目が届いていません）' }; }
 function TA_fillText(t, v) { return String(t).replace(/\{(\w+)\}/g, function (m, k) { return v && v[k] !== undefined ? String(v[k]) : m; }); }
 
 /** 純粋関数：場所の名前を「臨時の依頼」（グループに出る）に書いてよい形に（住所らしいもの・長いものは伏せる） */
@@ -359,6 +423,7 @@ function TA_requestOf(d, app, issues, sheetRow) {
 function TA_appState(app, rows, rate) {
   var carKm = 0, pub = 0, open = false, wait = false;
   rows.forEach(function (d) {
+    if (d.result === TA_REPLACED) return;
     if (d.result === TA_CHECK || d.result === '') open = true;
     if (d.from === TA_WHOLE) return;
     if (d.tot === TA_TOT_WAIT && d.result !== TA_DONE) wait = true;
@@ -442,13 +507,13 @@ function TA_load_(ss) {
   var as = TA_tab_(ss, TA_APPLY_SHEET, TA_APPLY_HEADER), ds = TA_tab_(ss, TA_DETAIL_SHEET, TA_DETAIL_HEADER);
   var apps = as.getDataRange().getValues().slice(1).map(function (r, i) {
     return { row: i + 2, id: TA_str(r[TA_A.id]), at: r[TA_A.at], code: TA_str(r[TA_A.code]), name: TA_str(r[TA_A.name]), target: TA_ymOf(r[TA_A.target]),
-      reflect: TA_ymOf(r[TA_A.reflect]), status: TA_str(r[TA_A.status]), photo: TA_str(r[TA_A.photo]), note: TA_str(r[TA_A.note]) };
+      reflect: TA_ymOf(r[TA_A.reflect]), status: TA_str(r[TA_A.status]), photo: TA_str(r[TA_A.photo]), pages: TA_str(r[TA_A.pages]), note: TA_str(r[TA_A.note]) };
   }).filter(function (a) { return a.id; });
   var details = ds.getDataRange().getValues().slice(1).map(function (r, i) {
     var num = function (v) { return typeof v === 'number' ? v : v === '' || v == null ? null : TRV_km(v); };
     return { row: i + 2, id: TA_str(r[TA_D.id]), code: TA_str(r[TA_D.code]), date: TA_str(r[TA_D.date]), from: TA_str(r[TA_D.from]), to: TA_str(r[TA_D.to]),
-      means: TA_str(r[TA_D.means]), trip: TA_str(r[TA_D.trip]), one: num(r[TA_D.one]), km: num(r[TA_D.km]), yen: num(r[TA_D.yen]), tot: TA_str(r[TA_D.tot]), result: /^確認済み/.test(TA_str(r[TA_D.result])) ? TA_DONE : TA_str(r[TA_D.result]), issue: TA_str(r[TA_D.issue]),
-      answer: TA_str(r[TA_D.answer]), value: TA_str(r[TA_D.value]), req: TA_str(r[TA_D.req]) };
+      means: TA_str(r[TA_D.means]), trip: TA_str(r[TA_D.trip]), one: num(r[TA_D.one]), km: num(r[TA_D.km]), yen: num(r[TA_D.yen]), tot: TA_str(r[TA_D.tot]), result: /^確認済み/.test(TA_str(r[TA_D.result])) ? TA_DONE : /^差し替え/.test(TA_str(r[TA_D.result])) ? TA_REPLACED : TA_str(r[TA_D.result]), issue: TA_str(r[TA_D.issue]),
+      answer: TA_str(r[TA_D.answer]), value: TA_str(r[TA_D.value]), req: TA_str(r[TA_D.req]), page: TA_str(r[TA_D.page]) };
   }).filter(function (d) { return d.id; });
   return { as: as, ds: ds, apps: apps, details: details };
 }
@@ -566,13 +631,13 @@ function TA_savePhoto_(blob, code, n) {
  */
 function TA_receive_(ss, person, blob, ai, today, imageSet) {
   var st = TA_load_(ss), rate = TA_rate_();
-  var form = ai.res ? TA_fromAi(ai.res, today) : { target: '', rows: [], appIssues: [{ code: 'ai' }], total: null, totalKm: null };
+  var form = ai.res ? TA_fromAi(ai.res, today) : { target: '', rows: [], appIssues: [{ code: 'ai' }], sums: {}, page: { explicit: false, label: '?' } };
   var reflect = TA_reflectMonth(form.target, today);
   var app = form.target ? st.apps.filter(function (a) { return a.code === person.code && a.target === form.target && a.reflect === reflect; })[0] : null;
   if (!app) {
     app = { id: 'T' + today.replace(/-/g, '').slice(2) + '-' + Utilities.getUuid().slice(0, 6), at: new Date(), code: person.code, name: person.name,
       target: form.target, reflect: reflect, status: '', photo: '', note: '' };
-    st.as.appendRow([app.id, app.at, "'" + app.code, app.name, app.target ? "'" + app.target : '', reflect ? "'" + reflect : '', TA_ST.recv, 0, '', '']);
+    st.as.appendRow([app.id, app.at, "'" + app.code, app.name, app.target ? "'" + app.target : '', reflect ? "'" + reflect : '', TA_ST.recv, 0, '', '', '']);
     app.row = st.as.getLastRow();
     st.apps.push(app);
   }
@@ -580,12 +645,20 @@ function TA_receive_(ss, person, blob, ai, today, imageSet) {
   photos.push(TA_savePhoto_(blob, person.code, photos.length + 1));
   app.photo = photos.join(',');
   st.as.getRange(app.row, TA_A.photo + 1).setValue(app.photo);
+  // 枚目（写真ごと）。同じ枚目が前に届いていれば、前の写真の明細を「差し替え」にする（枚目が書いてあるときだけ）
+  var prev = photos.length - 1, labels = prev && app.pages ? app.pages.split(',').slice(0, prev) : [];
+  while (labels.length < prev) labels.push('?');
+  var pageTag = form.page.explicit ? String(form.page.page) : '';
+  if (pageTag && labels.some(function (l) { return l.split('/')[0] === pageTag; })) TA_replacePage_(st, app.id, pageTag);
+  labels.push(form.page.label);
+  app.pages = labels.join(',');
+  st.as.getRange(app.row, TA_A.pages + 1).setValue("'" + app.pages);
   // 照合（車・バイク：自動計算の距離と行き先。片道（km）で照合）
   var cars = form.rows.filter(function (d) { return TA_isCar(d.means) && d.one !== null; });
   var checks = cars.length ? travelCheckSegments(cars.map(function (d) { return { code: person.code, from: d.from, to: d.to, km: d.one }; })) : [];
   cars.forEach(function (d, k) { var i = TA_trvIssue(checks[k]); if (i) d.issues.push(i); });
-  if (TA_totalDiffers(form.rows, form.totalKm, form.total)) form.appIssues.push({ code: 'total' });
-  var existing = TA_rowsOf_(st, app.id);
+  form.appIssues = form.appIssues.concat(TA_sumIssues(form.rows, form.sums, rate));
+  var existing = TA_rowsOf_(st, app.id).filter(function (x) { return x.result !== TA_REPLACED; });
   var newRows = [], issueCount = 0;
   form.rows.forEach(function (d) {
     var key = [d.date, d.from, d.to, d.means].join('|');
@@ -599,11 +672,12 @@ function TA_receive_(ss, person, blob, ai, today, imageSet) {
     if (d.issues.length) issueCount++;
     var n = function (v) { return v === null ? '' : v; };
     return [app.id, "'" + person.code, d.date ? "'" + d.date : '', d.from, d.to, d.means, d.trip, n(d.one), n(d.km), n(d.yen),
-      d.whole ? '-' : TA_TOT_WAIT, d.issues.length ? TA_CHECK : TA_OK, TA_issueText(d.issues), '', '', ''];
+      d.whole ? '-' : TA_TOT_WAIT, d.issues.length ? TA_CHECK : TA_OK, TA_issueText(d.issues), '', '', '', pageTag];
   });
   if (values.length) st.ds.getRange(st.ds.getLastRow() + 1, 1, values.length, TA_DETAIL_HEADER.length).setValues(values);
   st = TA_load_(ss);
   app = st.apps.filter(function (a) { return a.id === app.id; })[0];
+  if (TA_syncPages_(st, app)) st = TA_load_(ss), app = st.apps.filter(function (a) { return a.id === app.id; })[0];
   TA_refreshApp_(st, app, today);
   // 同じ組（imageSet）の写真は、最後の1枚のときだけ返す
   var last = true;
@@ -612,12 +686,46 @@ function TA_receive_(ss, person, blob, ai, today, imageSet) {
     cache.put(k, String(n), 3600);
     last = n >= imageSet.total;
   }
-  var count = TA_rowsOf_(st, app.id).filter(function (d) { return d.from !== TA_WHOLE; }).length, reply = '';
+  var count = TA_rowsOf_(st, app.id).filter(function (d) { return d.from !== TA_WHOLE && d.result !== TA_REPLACED; }).length, reply = '';
   if (last) {
     reply = !ai.res ? TA_TEXT.ackNoRead : app.target ? TA_fillText(TA_TEXT.ack, { month: TA_monthLabel(app.target), n: count }) : TA_fillText(TA_TEXT.ackNoMonth, { n: count });
     if (app.target && app.reflect > app.target) reply += TA_fillText(TA_TEXT.late, { deadline: TA_md(TA_acceptDeadline(app.target)) });
   }
   return { id: app.id, added: newRows.length, issues: issueCount, reply: reply };
+}
+
+/** 同じ枚目の前の明細を「差し替え」にする（合計に入れない）。開いている臨時の依頼は「取り消し」に（on のとき） */
+function TA_replacePage_(st, id, pageTag) {
+  var reqSheet = null;
+  st.details.filter(function (d) { return d.id === id && d.page === pageTag && d.result !== TA_REPLACED; }).forEach(function (d) {
+    st.ds.getRange(d.row, TA_D.result + 1).setValue(TA_REPLACED + '（' + pageTag + '枚目を送り直し）');
+    d.result = TA_REPLACED;
+    if (/^\d+$/.test(d.req) && d.req !== '' && TA_mode_() === 'on' && typeof OT_book_ === 'function') {
+      reqSheet = reqSheet || OT_sheet_(OT_book_(), OT_REQUEST_SHEET, OT_REQUEST_HEADER);
+      if (String(reqSheet.getRange(Number(d.req), 6).getValue() || '').trim() !== '完了') reqSheet.getRange(Number(d.req), 6).setValue('取り消し');
+    }
+  });
+}
+
+/**
+ * 届いていない枚目の確認事項（申請書全体の行）をそろえる。足りなければ行を足す・変われば書き直す・全部届けば確認済みにする。
+ * 管理本部が確認済みにした後は足さない。変えたら true
+ */
+function TA_syncPages_(st, app) {
+  var missing = TA_missingPages(app.pages ? app.pages.split(',') : []);
+  var rows = TA_rowsOf_(st, app.id).filter(function (d) { return d.from === TA_WHOLE && d.result !== TA_REPLACED && d.issue.indexOf(TA_ISSUE.pages.memo) !== -1; });
+  var open = rows.filter(function (d) { return d.result === TA_CHECK; })[0];
+  if (missing.length) {
+    var text = TA_issueText([TA_pagesIssue(missing)]);
+    if (open) { if (open.issue !== text) { st.ds.getRange(open.row, TA_D.issue + 1).setValue(text); return true; } return false; }
+    if (rows.some(function (d) { return d.result === TA_DONE; })) return false;
+    st.ds.getRange(st.ds.getLastRow() + 1, 1, 1, TA_DETAIL_HEADER.length).setValues([[app.id, "'" + app.code, '', TA_WHOLE, '', '', '', '', '', '', '-', TA_CHECK, text, '', '', '', '']]);
+    return true;
+  }
+  if (!open) return false;
+  st.ds.getRange(open.row, TA_D.result + 1).setValue(TA_DONE + '（全部の枚目が届いた）');
+  if (/^\d+$/.test(open.req) && TA_mode_() === 'on' && typeof OT_book_ === 'function') OT_sheet_(OT_book_(), OT_REQUEST_SHEET, OT_REQUEST_HEADER).getRange(Number(open.req), 6).setValue('完了');
+  return true;
 }
 
 // ---------------- 毎朝（7時台）：TOT の照合・回答の確認・臨時の依頼・6日の締め ----------------
@@ -678,7 +786,7 @@ function travelApplyDaily() {
     });
     // 2. TOT の出勤
     var tl = AC_readTotLatest_(), idx = TA_totIndex(tl && tl.results);
-    st.details.filter(function (d) { return d.tot === TA_TOT_WAIT && d.result !== TA_DONE && d.from !== TA_WHOLE; }).forEach(function (d) {
+    st.details.filter(function (d) { return d.tot === TA_TOT_WAIT && d.result !== TA_DONE && d.result !== TA_REPLACED && d.from !== TA_WHOLE; }).forEach(function (d) {
       var t = TA_totCheck(idx, totOf[d.code], /^\d{4}-\d{2}-\d{2}$/.test(d.date) ? d.date : '');
       if (t === TA_TOT_WAIT) return;
       set(d, TA_D.tot, t); d.tot = t; res.tot++;
@@ -844,6 +952,6 @@ function travelApplyRemoveTriggers() {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { TA_carKm: TA_carKm, TA_tripOf: TA_tripOf, TA_isExample: TA_isExample, TA_totalDiffers: TA_totalDiffers, TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
+  module.exports = { TA_carKm: TA_carKm, TA_tripOf: TA_tripOf, TA_isExample: TA_isExample, TA_sumIssues: TA_sumIssues, TA_pageOf: TA_pageOf, TA_missingPages: TA_missingPages, TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
     TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_acceptDeadline: TA_acceptDeadline, TA_answerDay: TA_answerDay, TA_monthRows: TA_monthRows, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
 }

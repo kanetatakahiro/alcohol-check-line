@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 交通費申請（gas/TravelApply.gs・版 2026-11-19h）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
+// 交通費申請（gas/TravelApply.gs・版 2026-11-20a）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'OfficeTask.gs', 'Travel.gs', 'TravelApply.gs', 'PayrollSheet.gs'];
 // 給与反映シート（社労士共有用【リバースHD】）の本番の形（2026-11-19 に確認した見出しと形。値は架空）：
 // 1行目 B「2026年」・C「11月支給」／2行目 B〜I の見出し／3行目から人の行（I 列 =SUM(D:H)）／すぐ下に合計の行（D〜I =SUM(D3:D…)）／
@@ -642,6 +642,109 @@ test('給与反映シート（19e）: 足した行の合計の列。3行目の�
   // 純粋関数
   const X = g.ctx;
   assert.deepEqual([X.PAY_isRowSum('=SUM(D5:H5)', 5), X.PAY_isRowSum('=sum(D5:H5)', 5), X.PAY_isRowSum('=SUM(D3:D25)', 3), X.PAY_isRowSum('=SUM(D5:H5)+1', 5), X.PAY_isRowSum('', 5)], [true, true, false, false, false]);
+});
+
+// 固定店舗（日額×出勤日数）（版 2026-11-20a）：日別勤怠（11/1〜12/1。k9 はどの日にもいる架空の人）。days＝{ key: { 日付: 日別勤怠の項目 } }
+const totDaily = (g, days, skip = []) => {
+  const dates = []; for (let d = new Date(Date.UTC(2026, 10, 1)); d < new Date(Date.UTC(2026, 11, 2)); d.setUTCDate(d.getUTCDate() + 1)) dates.push(d.toISOString().slice(0, 10));
+  const results = { employees: [{ key: 'k1', code: '0001' }, { key: 'k2', code: '0002' }, { key: 'k3', code: '0003' }, { key: 'k4', code: '0004' }, { key: 'k9', code: '0099' }],
+    workings: dates.filter((d) => !skip.includes(d)).map((d) => ({ date: d, dailyWorkings: [{ date: d, employeeKey: 'k9', totalWork: 480, isError: false },
+      ...Object.entries(days).filter(([, v]) => v[d]).map(([k, v]) => ({ date: d, employeeKey: k, totalWork: 0, isError: false, ...v[d] }))] })) };
+  g.drive.files['tot-latest.json'] = { content: JSON.stringify({ today: '2026-12-02', results }), updated: g.clock.now };
+};
+const PAID = { totalWork: 0, holidaysObtained: { fulltimeHoliday: { code: 1, name: '有休' } } };
+const HALF = { totalWork: 240, holidaysObtained: { halfdayHolidays: [{ code: 1, name: '有休' }] } };
+/** 90002・90003・90004 を固定店舗（日額×出勤日数）に。日額は 90002＝700・90003＝空・90004＝800（架空） */
+const dailySetup = (props) => {
+  const o = setup(props);
+  const c = tab(o.master, '通勤距離'), set = (code, col, v) => c.getRange(c.dump().findIndex((r) => String(r[0]) === code) + 1, col).setValue(v);
+  ['90002', '90003', '90004'].forEach((code) => set(code, 6, '固定店舗（日額×出勤日数）'));
+  set('90002', 8, 700); set('90004', 8, 800);
+  totDaily(o.g, {
+    k4: { '2026-11-02': { totalWork: 480 }, '2026-11-03': { totalWork: 480 }, '2026-11-04': PAID, '2026-11-05': HALF,
+      '2026-11-08': { totalWork: 300, workdayTypeName: '法定休日' }, '2026-11-09': { totalWork: 0, holidaysObtained: { fulltimeHoliday: { code: 9, name: '欠勤' } } } },
+    k2: { '2026-11-02': { totalWork: 480 }, '2026-11-03': { totalWork: 0, isError: true } },
+    k3: { '2026-11-02': { totalWork: 480 } },
+  });
+  return o;
+};
+
+test('交通費申請（固定店舗・20a）: 6日の締めで日額×前月の出勤日数を「通勤手当」へ（有給・欠勤の日は数えない・半日有給＋出勤と休日出勤は1日）。エラー勤務の日・日額が空は書かずに要確認で管理者の一覧へ。4日の催促と写真の読み取りの対象外', () => {
+  const { g, master, inq, sr } = dailySetup();
+  // 写真が届いても読まない（ほかの対象外の区分と同じく問い合わせへ）
+  const c0 = cases(inq).length;
+  photo(g, U(4));
+  assert.equal(g.ai.calls.length, 0);
+  assert.equal(cases(inq).length, c0 + 1);
+  assert.equal(apps(master).length, 0);
+  // 4日の催促は「交通費申請（車・バイク）」の 90001 だけ
+  at(g, '2026-12-04T10:00:00+09:00');
+  const n0 = g.fetches.length;
+  g.ctx.travelApplyRemind();
+  assert.deepEqual(pushes(g, n0).map((x) => x.to), [U(1)]);
+  // 6日の締め
+  at(g, '2026-12-06T07:00:00+09:00');
+  const n = g.fetches.length;
+  const r = g.ctx.travelApplyDaily();
+  assert.match(r.closed, /2026-11 を締め（書いた 2・上書きしなかった 0・未提出 1・要確認 0・来月へ 0件・固定店舗 書いた 1・要確認 2）/);
+  const v = tab(sr, 'R8.11月分12月支給').dump(), yen = (code) => v.find((x) => String(x[1]) === code)[4];
+  assert.equal(yen('90004'), 3200);   // 800円 × 4日（11/2・11/3・11/5 半日有給＋出勤・11/8 休日出勤。11/4 有休・11/9 欠勤は数えない）
+  assert.equal(yen('90002'), '');      // エラー勤務の日がある
+  assert.equal(yen('90003'), '');      // 日額が空
+  assert.equal(yen('90005'), 12000);   // 定期（固定額）は今までどおり
+  const adm = pushes(g, n).filter((x) => x.to === ADMIN);
+  assert.equal(adm.length, 1);
+  assert.match(adm[0].text, /・未提出 1人\n　90001 試験 一郎\n・要確認が残っている 0人（来月に反映）\n・固定店舗（日額×出勤日数）：書いた 1人・書かなかった（要確認） 2人\n　90002 試験 二郎（エラー勤務の日がある（11\/3））\n　90003 試験 三郎（日額が空）\nTOT・「通勤距離」の日額を直したあと travelApplyCloseAgain を実行してください。$/);
+  assert.ok(!/3200|800/.test(adm[0].text));   // 管理者への一覧にも金額は出さない
+  // 直してやり直すと、書いていなかった人だけ書く（書いた欄は上書きしない）
+  const c = tab(master, '通勤距離');
+  c.getRange(c.dump().findIndex((x) => String(x[0]) === '90003') + 1, 8).setValue('1,000');
+  g.ctx.travelApplyCloseAgain('2026-11');
+  const v2 = tab(sr, 'R8.11月分12月支給').dump();
+  assert.deepEqual(['90002', '90003', '90004'].map((code) => v2.find((x) => String(x[1]) === code)[4]), ['', 1000, 3200]);
+  noPersonalLogs(g);
+});
+
+test('交通費申請（固定店舗・20a・record）: 書かずに「交通費の送る予定」へ。給与反映シートのタブも作らない', () => {
+  const { g, master, sr } = dailySetup({ TRAVEL_APPLY_MODE: 'record' });
+  at(g, '2026-12-06T07:00:00+09:00');
+  const n = g.fetches.length;
+  const r = g.ctx.travelApplyDaily();
+  assert.match(r.closed, /固定店舗 書いた 1・要確認 2/);
+  assert.equal(pushes(g, n).length, 0);
+  assert.equal(tab(sr, 'R8.11月分12月支給'), null);
+  const plan = tab(master, '交通費の送る予定').dump().slice(1);
+  const pay = plan.find((x) => x[1] === '給与反映シート');
+  assert.ok(pay[3].split('\n').includes('90004 3200'));
+  assert.ok(!pay[3].split('\n').some((l) => /^9000[23] /.test(l)));
+  assert.match(plan.find((x) => x[1] === '管理者のまとめ')[3], /固定店舗（日額×出勤日数）：書いた 1人・書かなかった（要確認） 2人/);
+  noPersonalLogs(g);
+});
+
+test('交通費申請（固定店舗・20a・純粋関数）: 出勤日数・エラー勤務・日額が空・0日・日別勤怠がそろっていない', () => {
+  const { g } = setup({});
+  const X = g.ctx;
+  const R = (rows, days = 30) => ({ employees: [{ key: 'a', code: '0001' }, { key: 'z', code: '0099' }], workings: Array.from({ length: days }, (_, i) => {
+    const d = `2026-11-${String(i + 1).padStart(2, '0')}`;
+    return { date: d, dailyWorkings: [{ date: d, employeeKey: 'z', totalWork: 0 }, ...rows.filter((x) => x.date === d).map((x) => ({ employeeKey: 'a', ...x }))] };
+  }) });
+  const idx = X.TA_dailyIndex(R([{ date: '2026-11-02', totalWork: 480 }, { date: '2026-11-02', totalWork: 60 }, { date: '2026-11-03', ...PAID }, { date: '2026-11-04', ...HALF },
+    { date: '2026-11-05', totalWork: 480, holidaysObtained: { fulltimeHoliday: { code: 1, name: '有休' } } }]), '2026-11');
+  assert.equal(idx.ok, true);
+  assert.equal(idx.byTot[X.AC_totKey('0001')].days, 2);   // 11/2（2行でも1日）・11/4 半日有休＋出勤。11/3・11/5 の全日の有休は数えない
+  assert.deepEqual({ ...X.TA_dailyAmount(500, idx, '0001'), errors: [] }, { amount: 1000, days: 2, issue: '', errors: [] });
+  assert.equal(X.TA_dailyAmount('', idx, '0001').issue, 'noDaily');
+  assert.equal(X.TA_dailyAmount(0, idx, '0001').issue, 'noDaily');
+  assert.equal(X.TA_dailyAmount(500, idx, '0099').issue, 'zero');      // 出勤日数が0
+  assert.equal(X.TA_dailyAmount(500, idx, '0777').issue, 'zero');      // TOT にいない人
+  const err = X.TA_dailyIndex(R([{ date: '2026-11-02', totalWork: 480 }, { date: '2026-11-12', isError: true, totalWork: 0 }, { date: '2026-11-07', isError: true, totalWork: 200 }]), '2026-11');
+  const e = X.TA_dailyAmount(500, err, '0001');
+  assert.deepEqual([e.amount, e.days, e.issue, [...e.errors]], [0, 2, 'error', ['2026-11-07', '2026-11-12']]);
+  assert.equal(X.TA_dailyReason(e), 'エラー勤務の日がある（11/7・11/12）');
+  assert.equal(X.TA_dailyIndex(R([], 29), '2026-11').ok, false);      // 11/30 が無い（月末より前のデータ）
+  assert.equal(X.TA_dailyAmount(500, X.TA_dailyIndex(R([], 29), '2026-11'), '0001').issue, 'noData');
+  assert.equal(X.TA_dailyIndex({ employees: [], workings: { _error: 500 } }, '2026-11').ok, false);
+  assert.equal(X.TA_dailyIndex(null, '2026-11').ok, false);
 });
 
 test('交通費申請（record）: 受け付けて記録するが LINE・臨時の依頼・給与反映シートには送らず「交通費の送る予定」へ。画像は今までどおり問い合わせへも流す', () => {

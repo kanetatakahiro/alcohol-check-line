@@ -1,5 +1,5 @@
 /**
- * 交通費（車・バイク）の通勤距離の自動計算と、申請の照合（gas/Travel.gs・版 2026-11-18b・本番未導入）
+ * 交通費（車・バイク）の通勤距離の自動計算と、申請の照合（gas/Travel.gs・版 2026-11-20a。本番は 18b）
  *
  * 従業員マスタのファイルの中に、新しいタブだけを足して使う（従業員マスタ本体の列 A〜N・行と、既存のタブは変えない）。
  *   読むだけ：
@@ -7,11 +7,13 @@
  *     「店舗一覧」（管理本部が貼る）：A 企業・店舗名／B 住所（郵便番号と住所。改行を含む）／C 電話番号／D 備考／E 略語（読点区切り）
  *     「住所取り込み」（管理本部が一度だけ貼る。A 社員番号／B 自宅住所）：travelImportAddresses だけが読む。スクリプトでは消さない
  *   このファイルが作って、毎朝そろえる：
- *     「通勤距離」：社員番号／氏名／所属／自宅住所／住所の更新日／通勤区分／固定額／（店舗一覧の各店舗までの距離：車・片道・km・高速を使わない道）／計算日。
+ *     「通勤距離」：社員番号／氏名／所属／自宅住所／住所の更新日／通勤区分／固定額／日額／（店舗一覧の各店舗までの距離：車・片道・km・高速を使わない道）／計算日。
  *                  在籍者と同期する（新しい人は行を足し、退職者・対象外の人は行を消す。社員番号の順）。氏名・所属は従業員マスタから。
- *                  管理本部が入力するのは「自宅住所」「通勤区分」「固定額」だけ（その列に色を付ける）
+ *                  管理本部が入力するのは「自宅住所」「通勤区分」「固定額」「日額」だけ（その列に色を付ける）。
+ *                  日額（版 2026-11-20a）：通勤区分が「固定店舗（日額×出勤日数）」の人の1日あたりの通勤手当（gas/TravelApply.gs の6日の締めで使う）
  *     「店舗間距離」：店舗一覧の店舗 × 店舗（車・片道・km・高速を使わない道）。店舗一覧が増減したら行と列も合わせる
- *     「通勤区分の選択肢」：通勤区分のプルダウンの選択肢（ここを直すとプルダウンが変わる。最初の1回だけ作り、あとは変えない）
+ *     「通勤区分の選択肢」：通勤区分のプルダウンの選択肢（ここを直すとプルダウンが変わる。最初の1回だけ作り、あとは変えない。
+ *                  版 2026-11-20a：今あるタブに「固定店舗（日額×出勤日数）」が無ければ、1回だけ下に足す（消しても足し直さない））
  *     「距離（内部）」（隠す）：計算の結果（高速あり・なし・状態・計算日・住所の指紋）
  *
  * 距離の計算：Apps Script の Maps（DirectionFinder・車）。高速を使う道と使わない道（avoid HIGHWAYS）の2通りを持ち、表には使わない道を出す。
@@ -24,14 +26,15 @@
  * 住所は Google の Maps にだけ送る（Claude API には送らない）。ログには件数と社員番号だけを書く（住所・氏名・個人ごとの距離は書かない）。
  * 毎朝の処理は3時台（ほかの毎朝の処理と重ならない時刻）。スクリプトのロックは使わない（ほかの処理を待たせない）。
  */
-var TRV_VERSION = '2026-11-18b';
+var TRV_VERSION = '2026-11-20a';
 var TRV_STORE_SHEET = '店舗一覧', TRV_IMPORT_SHEET = '住所取り込み';
 var TRV_COMMUTE_SHEET = '通勤距離', TRV_MATRIX_SHEET = '店舗間距離', TRV_CHOICE_SHEET = '通勤区分の選択肢', TRV_AUTO_SHEET = '距離（内部）';
-var TRV_FIXED_HEADER = ['社員番号', '氏名', '所属', '自宅住所', '住所の更新日', '通勤区分', '固定額'];
-var TRV_COL = { code: 0, name: 1, dept: 2, addr: 3, addrAt: 4, type: 5, fixed: 6 };   // 「通勤距離」の左の7列
-var TRV_INPUT_COLS = [TRV_COL.addr, TRV_COL.type, TRV_COL.fixed];                     // 管理本部が入力する列（色を付ける）
+var TRV_FIXED_HEADER = ['社員番号', '氏名', '所属', '自宅住所', '住所の更新日', '通勤区分', '固定額', '日額'];
+var TRV_COL = { code: 0, name: 1, dept: 2, addr: 3, addrAt: 4, type: 5, fixed: 6, daily: 7 };   // 「通勤距離」の左の8列（日額は版 2026-11-20a）
+var TRV_INPUT_COLS = [TRV_COL.addr, TRV_COL.type, TRV_COL.fixed, TRV_COL.daily];                     // 管理本部が入力する列（色を付ける）
 var TRV_INPUT_COLOR = '#fff2cc';
-var TRV_COMMUTE_TYPES = ['ガソリンカード', '交通費申請（車・バイク）', '公共交通機関', '定期（固定額）', '会社バイク（立替経費）'];   // 最初に「通勤区分の選択肢」へ入れる
+var TRV_COMMUTE_TYPES = ['ガソリンカード', '交通費申請（車・バイク）', '公共交通機関', '定期（固定額）', '会社バイク（立替経費）', '固定店舗（日額×出勤日数）'];   // 最初に「通勤区分の選択肢」へ入れる
+var TRV_DAILY_TYPE = '固定店舗（日額×出勤日数）', TRV_CHOICE_DAILY_KEY = 'trv-choice-daily';   // 版 2026-11-20a：今ある選択肢のタブに1回だけ足す（AC_state_ に記録）
 var TRV_AUTO_HEADER = ['種類', '起点', '終点', '高速あり（km）', '高速なし（km）', '状態', '計算日', '指紋'];
 var TRV_KIND_HOME = '自宅→店舗', TRV_KIND_STORE = '店舗⇄店舗', TRV_KIND_ADDR = '自宅住所';
 var TRV_DONE = '計算済み', TRV_WAIT = '計算待ち';
@@ -131,29 +134,29 @@ function TRV_byCode(a, b) {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/** 純粋関数：今の「通勤距離」の値 → { 社員番号: { addr, addrAt, type, fixed } }（見出しの名前で列を探す） */
+/** 純粋関数：今の「通勤距離」の値 → { 社員番号: { addr, addrAt, type, fixed, daily } }（見出しの名前で列を探す。日額の列が無ければ ''） */
 function TRV_commuteInputs(values) {
   var out = {}, head = (values && values[0] || []).map(function (h) { return String(h || '').trim(); });
   var col = function (name, def) { var j = head.indexOf(name); return j === -1 ? def : j; };
-  var c = { code: col('社員番号', 0), addr: col('自宅住所', 3), addrAt: col('住所の更新日', 4), type: col('通勤区分', -1), fixed: col('固定額', -1) };
+  var c = { code: col('社員番号', 0), addr: col('自宅住所', 3), addrAt: col('住所の更新日', 4), type: col('通勤区分', -1), fixed: col('固定額', -1), daily: col('日額', -1) };
   (values || []).slice(1).forEach(function (r) {
     var code = TRV_code(r[c.code]);
     if (!code) return;
-    out[code] = { addr: String(r[c.addr] == null ? '' : r[c.addr]).trim(), addrAt: TRV_ymd(r[c.addrAt]), type: c.type === -1 ? '' : r[c.type], fixed: c.fixed === -1 ? '' : r[c.fixed] };
+    out[code] = { addr: String(r[c.addr] == null ? '' : r[c.addr]).trim(), addrAt: TRV_ymd(r[c.addrAt]), type: c.type === -1 ? '' : r[c.type], fixed: c.fixed === -1 ? '' : r[c.fixed], daily: c.daily === -1 ? '' : r[c.daily] };
   });
   return out;
 }
 
 /**
  * 純粋関数：「通勤距離」に並べる人。active＝在籍者、inputs＝今の入力、addrFp＝前回の住所の指紋（{ 社員番号: fp }）。
- * 住所の指紋が前回と違えば、住所の更新日を今日にする。返り値 { people: [{ code, name, dept, addr, fp, addrAt, type, fixed, changed }], added, removed }
+ * 住所の指紋が前回と違えば、住所の更新日を今日にする。返り値 { people: [{ code, name, dept, addr, fp, addrAt, type, fixed, daily, changed }], added, removed }
  */
 function TRV_syncPeople(active, inputs, addrFp, today) {
   var people = active.map(function (a) {
-    var cur = inputs[a.code] || { addr: '', addrAt: '', type: '', fixed: '' }, fp = TRV_fp(cur.addr);
+    var cur = inputs[a.code] || { addr: '', addrAt: '', type: '', fixed: '', daily: '' }, fp = TRV_fp(cur.addr);
     var changed = fp !== (addrFp[a.code] || '');
     return { code: a.code, name: a.name, dept: a.dept, addr: TRV_addr(cur.addr), rawAddr: cur.addr, fp: fp,
-      addrAt: changed && (fp || addrFp[a.code]) ? today : cur.addrAt, type: cur.type, fixed: cur.fixed, changed: changed };
+      addrAt: changed && (fp || addrFp[a.code]) ? today : cur.addrAt, type: cur.type, fixed: cur.fixed, daily: cur.daily == null ? '' : cur.daily, changed: changed };
   });
   var activeSet = {};
   active.forEach(function (a) { activeSet[a.code] = true; });
@@ -235,7 +238,7 @@ function TRV_commuteValues(people, stores, auto) {
       if (ok && a.at > last) last = a.at;
       return p.addr ? TRV_cell(a, p.fp + st.fp) : '';
     });
-    return ["'" + p.code, p.name, p.dept, p.rawAddr, p.addrAt ? "'" + p.addrAt : '', p.type, p.fixed].concat(cells).concat([all && last ? "'" + last : '']);
+    return ["'" + p.code, p.name, p.dept, p.rawAddr, p.addrAt ? "'" + p.addrAt : '', p.type, p.fixed, p.daily == null ? '' : p.daily].concat(cells).concat([all && last ? "'" + last : '']);
   });
   return [head].concat(rows);
 }
@@ -314,14 +317,24 @@ function TRV_write_(sh, values) {
   sh.getRange(1, 1, 1, w).setFontWeight('bold');
   sh.setFrozenRows(1);
 }
-/** 「通勤区分の選択肢」タブ（無ければ作って既定の選択肢を入れる。あれば変えない） */
+/**
+ * 「通勤区分の選択肢」タブ（無ければ作って既定の選択肢を入れる。あれば変えない）。
+ * 版 2026-11-20a：今あるタブに「固定店舗（日額×出勤日数）」が無ければ、1回だけいちばん下に足す（ほかの行は変えない。記録があれば足さない）
+ */
 function TRV_choices_(ss) {
-  var sh = ss.getSheetByName(TRV_CHOICE_SHEET);
+  var sh = ss.getSheetByName(TRV_CHOICE_SHEET), state = AC_state_();
   if (!sh) {
     sh = ss.insertSheet(TRV_CHOICE_SHEET);
     sh.getRange(1, 1, TRV_COMMUTE_TYPES.length + 1, 1).setValues([['通勤区分（ここを直すと「通勤距離」のプルダウンが変わります）']].concat(TRV_COMMUTE_TYPES.map(function (t) { return [t]; })));
     sh.getRange(1, 1).setFontWeight('bold');
+  } else if (!state.getProperty(TRV_CHOICE_DAILY_KEY)) {
+    var last = sh.getLastRow(), vals = last ? sh.getRange(1, 1, last, 1).getValues() : [];
+    if (!vals.some(function (r) { return String(r[0] == null ? '' : r[0]).trim() === TRV_DAILY_TYPE; })) {
+      sh.getRange(Math.max(last, 1) + 1, 1).setValue(TRV_DAILY_TYPE);
+      Logger.log('交通費の距離：「通勤区分の選択肢」に「' + TRV_DAILY_TYPE + '」を足しました');
+    }
   }
+  if (!state.getProperty(TRV_CHOICE_DAILY_KEY)) state.setProperty(TRV_CHOICE_DAILY_KEY, new Date().toISOString());
   return sh;
 }
 /** 「通勤距離」の入力の列に色を付け、通勤区分にプルダウンを付ける */

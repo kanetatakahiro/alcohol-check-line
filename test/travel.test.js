@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 交通費の通勤距離の自動計算と照合（gas/Travel.gs・版 2026-11-18b）。すべて架空の住所・店舗・社員番号・氏名。Maps は模擬（実際には呼ばない）
+// 交通費の通勤距離の自動計算と照合（gas/Travel.gs・版 2026-11-20a）。すべて架空の住所・店舗・社員番号・氏名。Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Notices.gs', 'Travel.gs'];
 const HEAD = ['社員番号', '氏名', '別表記', '在籍状況', '所属・拠点', 'LINEユーザーID', 'LINE表示名', 'LINE登録日時', 'LINE確認済み',
   'アルコールチェック対象', '備考', '社員区分', 'TOT従業員コード', '退職日'];
@@ -42,21 +42,21 @@ test('交通費（通勤距離）: 毎朝、在籍者と同期（追加・退職
   assert.equal(r.mode, 'off');
   assert.equal(g.maps.calls.length, 0);
   const t = tab(book, '通勤距離').dump();
-  assert.deepEqual(t[0], ['社員番号', '氏名', '所属', '自宅住所', '住所の更新日', '通勤区分', '固定額', 'テスト自動車 甲町店', 'テスト自動車 乙山店', '株式会社リ・バースホールディングス 本社', '計算日']);
+  assert.deepEqual(t[0], ['社員番号', '氏名', '所属', '自宅住所', '住所の更新日', '通勤区分', '固定額', '日額', 'テスト自動車 甲町店', 'テスト自動車 乙山店', '株式会社リ・バースホールディングス 本社', '計算日']);
   assert.deepEqual(t.slice(1).map((x) => [String(x[0]), x[1], x[2], x[3]]), [['7', '試験 七郎', '部署A', ''], ['90002', '試験 二郎', '部署A', ''], ['90010', '試験 十郎', '部署B', '']]);
   assert.equal(snap(), before);   // 従業員マスタ・店舗一覧は変えない
-  // 入力の列（自宅住所・通勤区分・固定額）に色、通勤区分にプルダウン（選択肢は「通勤区分の選択肢」タブ）
+  // 入力の列（自宅住所・通勤区分・固定額・日額）に色、通勤区分にプルダウン（選択肢は「通勤区分の選択肢」タブ）
   const sh = tab(book, '通勤距離');
-  assert.equal(sh.bg['2,4'], '#fff2cc'); assert.equal(sh.bg['2,6'], '#fff2cc'); assert.equal(sh.bg['2,7'], '#fff2cc'); assert.equal(sh.bg['2,8'], undefined);
+  assert.equal(sh.bg['2,4'], '#fff2cc'); assert.equal(sh.bg['2,6'], '#fff2cc'); assert.equal(sh.bg['2,7'], '#fff2cc'); assert.equal(sh.bg['2,8'], '#fff2cc'); assert.equal(sh.bg['2,9'], undefined);
   const dv = sh.dv.at(-1);
   assert.deepEqual([dv.c, dv.r], [6, 2]);
   assert.equal(dv.rule.range.sheet.getName(), '通勤区分の選択肢');
-  assert.deepEqual(tab(book, '通勤区分の選択肢').dump().slice(1).map((x) => x[0]), ['ガソリンカード', '交通費申請（車・バイク）', '公共交通機関', '定期（固定額）', '会社バイク（立替経費）']);
+  assert.deepEqual(tab(book, '通勤区分の選択肢').dump().slice(1).map((x) => x[0]), ['ガソリンカード', '交通費申請（車・バイク）', '公共交通機関', '定期（固定額）', '会社バイク（立替経費）', '固定店舗（日額×出勤日数）']);
   assert.equal(tab(book, '距離（内部）').hidden, true);
   // 管理本部の入力（住所・通勤区分・固定額）は残る。選択肢のタブを直しても上書きしない
   const t2 = tab(book, '通勤距離'), i = t2.dump().findIndex((x) => String(x[0]) === '90002') + 1;
   t2.getRange(i, 6).setValue('定期（固定額）'); t2.getRange(i, 7).setValue(12000);
-  tab(book, '通勤区分の選択肢').getRange(7, 1).setValue('徒歩');
+  tab(book, '通勤区分の選択肢').getRange(8, 1).setValue('徒歩');
   // 新しい在籍者・退職者
   m.appendRow(emp('90001', '試験 一郎', '部署A'));
   m.getRange(6, 4).setValue('退職');   // 7 番が退職
@@ -64,11 +64,37 @@ test('交通費（通勤距離）: 毎朝、在籍者と同期（追加・退職
   assert.deepEqual({ added: r2.added, removed: r2.removed, people: r2.people }, { added: 1, removed: 1, people: 3 });
   assert.deepEqual(tab(book, '通勤距離').dump().slice(1).map((x) => String(x[0])), ['90001', '90002', '90010']);
   assert.deepEqual(rowOf(book, '90002').slice(5, 7), ['定期（固定額）', 12000]);
-  assert.equal(tab(book, '通勤区分の選択肢').dump()[6][0], '徒歩');
+  assert.equal(tab(book, '通勤区分の選択肢').dump()[7][0], '徒歩');
   // 氏名・所属の変更も反映
   m.getRange(3, 2).setValue('試験 二郎（新）'); m.getRange(3, 5).setValue('部署Z');
   g.ctx.travelDistanceDaily();
   assert.deepEqual(rowOf(book, '90002').slice(1, 3), ['試験 二郎（新）', '部署Z']);
+  noPersonalLogs(g);
+});
+
+test('交通費（通勤距離・20a）: 「日額」の列（入力の色・毎朝残る）。今ある「通勤区分の選択肢」に「固定店舗（日額×出勤日数）」が無ければ1回だけ下に足す（ほかの行は変えない・消しても足し直さない）', () => {
+  const { g, book } = setup({});
+  // 18b で作った選択肢のタブ（新しい区分が無い・管理本部が「徒歩」を足した）
+  const ch = book.insertSheet('通勤区分の選択肢');
+  [['通勤区分（ここを直すと「通勤距離」のプルダウンが変わります）'], ['ガソリンカード'], ['交通費申請（車・バイク）'], ['公共交通機関'], ['定期（固定額）'], ['会社バイク（立替経費）'], ['徒歩']]
+    .forEach((r) => ch.appendRow(r));
+  g.ctx.travelDistanceDaily();
+  const list = () => tab(book, '通勤区分の選択肢').dump().slice(1).map((x) => x[0]);
+  assert.deepEqual(list(), ['ガソリンカード', '交通費申請（車・バイク）', '公共交通機関', '定期（固定額）', '会社バイク（立替経費）', '徒歩', '固定店舗（日額×出勤日数）']);
+  g.ctx.travelDistanceDaily();
+  assert.equal(list().length, 7);   // 2回目は足さない
+  ch.getRange(8, 1).setValue('');   // 管理本部が消した
+  g.ctx.travelDistanceDaily();
+  assert.equal(list().filter((x) => x).length, 6);   // 足し直さない
+  // 日額の入力は毎朝の同期で残る（見出しの名前で読む）
+  const t = tab(book, '通勤距離'), i = t.dump().findIndex((x) => String(x[0]) === '90002') + 1;
+  t.getRange(i, 6).setValue('固定店舗（日額×出勤日数）'); t.getRange(i, 8).setValue(800);
+  g.ctx.travelDistanceDaily();
+  assert.deepEqual(rowOf(book, '90002').slice(5, 8), ['固定店舗（日額×出勤日数）', '', 800]);
+  assert.equal(tab(book, '通勤距離').bg['2,8'], '#fff2cc');
+  // 日額の列が無い前の形（18b）でも読める（日額は空）
+  assert.deepEqual({ ...g.ctx.TRV_commuteInputs([['社員番号', '氏名', '所属', '自宅住所', '住所の更新日', '通勤区分', '固定額'], ["'90002", '', '', '', '', '定期（固定額）', 100]])['90002'] },
+    { addr: '', addrAt: '', type: '定期（固定額）', fixed: 100, daily: '' });
   noPersonalLogs(g);
 });
 
@@ -99,9 +125,9 @@ test('交通費（距離）: 住所が入った人と店舗の組だけを計算
   const r = g.ctx.travelDistanceDaily();
   assert.deepEqual({ todo: r.todo, done: r.done, calls: r.calls }, { todo: 3, done: 3, calls: 6 });
   const row = rowOf(book, '90002'), a1 = norm(STORES[1][1]);
-  assert.equal(row[7], kmOf('架空県甲市北町', a1));   // 高速を使わない道
-  assert.equal(String(row[10]), '2026-11-18');           // 計算日（全店舗がそろった）
-  assert.equal(rowOf(book, '7')[7], '');                  // 住所なし
+  assert.equal(row[8], kmOf('架空県甲市北町', a1));   // 高速を使わない道
+  assert.equal(String(row[11]), '2026-11-18');           // 計算日（全店舗がそろった）
+  assert.equal(rowOf(book, '7')[8], '');                  // 住所なし
   assert.ok(g.maps.calls.slice(-6).every((c) => c.mode === 'driving' && c.origin === '架空県甲市北町'));
   assert.equal(g.maps.calls.slice(-6).filter((c) => c.avoid === 'highways').length, 3);
   // 店舗間の表（同じ店舗は 0、対称）
@@ -118,30 +144,30 @@ test('交通費（距離）: 住所が入った人と店舗の組だけを計算
   g.maps.route = () => ({ throw: 'Service invoked too many times for one day: route.' });   // 計算できない日
   g.ctx.travelDistanceDaily();
   assert.equal(String(rowOf(book, '90002')[4]), '2026-11-19');
-  assert.equal(rowOf(book, '90002')[7], '');   // 前の住所の距離は出さない
+  assert.equal(rowOf(book, '90002')[8], '');   // 前の住所の距離は出さない
   g.maps.route = (o, d, avoid) => (/不明/.test(o + d) ? 'NOT_FOUND' : kmOf(o, d) + (avoid ? 0 : 3));
   g.clock.now += 24 * 3600000;
   const r3 = g.ctx.travelDistanceDaily();
   assert.equal(r3.todo, 3);
-  assert.equal(rowOf(book, '90002')[7], kmOf('架空県甲市南町', a1));
+  assert.equal(rowOf(book, '90002')[8], kmOf('架空県甲市南町', a1));
   // 店舗の追加：列・店舗間の行と列が増え、新しい店舗の組だけ計算
   st.appendRow(['架空商事', '〒100-0004\n架空県丁市4-4', '', '取引先', '']);
   const r4 = g.ctx.travelDistanceDaily();
   assert.equal(r4.todo, 4);   // 自宅1 ＋ 店舗どうし3
-  assert.equal(tab(book, '通勤距離').dump()[0][10], '架空商事');
+  assert.equal(tab(book, '通勤距離').dump()[0][11], '架空商事');
   assert.equal(tab(book, '店舗間距離').dump().length, 5);
   // 店舗の削除：列と行が減る（前より短い表になっても、余りは残らない）
   st.deleteRow(3);   // 乙山店
   const r5 = g.ctx.travelDistanceDaily();
   assert.equal(r5.calls, 0);
   const head = tab(book, '通勤距離').dump()[0];
-  assert.deepEqual(head.slice(7), ['テスト自動車 甲町店', '株式会社リ・バースホールディングス 本社', '架空商事', '計算日']);
+  assert.deepEqual(head.slice(8), ['テスト自動車 甲町店', '株式会社リ・バースホールディングス 本社', '架空商事', '計算日']);
   assert.equal(tab(book, '店舗間距離').dump().length, 4);
   assert.equal(tab(book, '店舗間距離').dump()[0].length, 4);
   // 見つからない住所は「計算できない」
   setAddr(book, '7', '不明な町');
   g.ctx.travelDistanceDaily();
-  assert.equal(rowOf(book, '7')[7], '計算できない');
+  assert.equal(rowOf(book, '7')[8], '計算できない');
   noPersonalLogs(g);
 });
 
@@ -175,7 +201,7 @@ test('交通費（距離）: 1日の上限（TRAVEL_MAPS_DAILY_MAX）を超え�
   const off = o.g.ctx.travelDistanceDaily();
   assert.deepEqual({ mode: off.mode, calls: off.calls, left: off.left }, { mode: 'off', calls: 0, left: 6 });
   assert.equal(o.g.maps.calls.length, 0);
-  assert.equal(rowOf(o.book, '90002')[7], '');
+  assert.equal(rowOf(o.book, '90002')[8], '');
 });
 
 test('交通費（照合）: 新しい表で、片道5km 以内は OK・5km 超は要確認（理由に両方の km）。行き先がわからない・計算できない区間は要確認。許容の km は変えられる', () => {

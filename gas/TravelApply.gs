@@ -1,5 +1,5 @@
 /**
- * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19h・本番未導入）
+ * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-20a・本番未導入）
  *
  * 流れ：
  *   1. 本人が紙の申請書の写真（複数枚可）を公式LINEに送る。
@@ -29,6 +29,11 @@
  *   6. 6日の朝（締め）：確定額を給与反映シート（社労士共有用【リバースHD】）の前月のタブ「R{令和}.{M}月分{M+1}月支給」の「通勤手当」に書く
  *      （gas/PayrollSheet.gs の PAY_writeColumn_。タブが無ければ「テンプレ」から作る。すでに値がある欄は上書きせず管理者へ）。
  *      要確認が残る人は書かずに来月へ回し、未提出・要確認・書けなかった人の一覧を管理者へ。区間ごとの明細は従業員マスタのファイルに残す。
+ *   7. 固定店舗（日額×出勤日数）（版 2026-11-20a）：通勤区分が「固定店舗（日額×出勤日数）」の人は申請書なし。6日の締めで
+ *      「通勤距離」の日額 × 前月の出勤日数を「通勤手当」に書く（PAY_writeColumn_）。出勤日数は tot-latest.json の日別勤怠（workings）で
+ *      総労働時間が0より多い日（半日の休暇＋出勤・休日出勤も1日。全日の休暇の日は数えない）。VPS の中継（src/tot-relay.js）は変えない。
+ *      前月にエラー勤務の日がある・日額が空・出勤日数が0・前月の日別勤怠がそろっていないときは書かずに要確認にして、管理者への一覧に理由と出す
+ *      （直したあと travelApplyCloseAgain）。4日の催促・未提出の一覧の対象外。写真が届いても読まない（ほかの対象外の区分と同じ）。
  *
  * タブ（従業員マスタのファイル。新しいタブだけを足す）：「交通費申請」（1申請1行）・「交通費明細」（1区間1行）・「交通費の送る予定」（record のとき）
  * スクリプトプロパティ：
@@ -39,7 +44,7 @@
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-19h';
+var TA_VERSION = '2026-11-20a';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
 var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '枚目', '備考'];
 var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, pages: 9, note: 10 };
@@ -51,6 +56,8 @@ var TA_PAY_COLUMN = '通勤手当';   // 給与反映シートで交通費を書
 var TA_APPLY_TYPES = ['交通費申請（車・バイク）', '公共交通機関'];   // 写真を受け付ける通勤区分
 var TA_REMIND_TYPE = '交通費申請（車・バイク）';                     // 4日の催促・未提出の対象
 var TA_FIXED_TYPE = '定期（固定額）';
+var TA_DAILY_TYPE = '固定店舗（日額×出勤日数）';   // 版 2026-11-20a：日額 × 前月の出勤日数（申請書なし。gas/Travel.gs の TRV_DAILY_TYPE と同じ）
+var TA_DAILY_ISSUE = { noData: 'TOT の前月の日別勤怠がそろっていない', noDaily: '日額が空', error: 'エラー勤務の日がある', zero: '出勤日数が0日' };
 var TA_CAR = ['車', 'バイク'], TA_PUBLIC = ['電車', 'バス'], TA_WHOLE = '（申請書全体）';
 var TA_MEANS = { car: '車', bike: 'バイク', train: '電車', bus: 'バス', unknown: '' };
 var TA_TRIP = { round: '往復', oneway: '片道', unknown: '' };
@@ -471,11 +478,54 @@ function TA_totCheck(index, totCode, date) {
 }
 
 /**
+ * 純粋関数（版 2026-11-20a）：固定店舗（日額×出勤日数）の出勤日数。R＝tot-latest.json の results、month＝'YYYY-MM'。
+ * 出勤日＝日別勤怠（workings）で総労働時間（totalWork）が0より多い日（半日の休暇＋出勤も1日・休日出勤も1日・全日の休暇の日は数えない）。
+ * エラー勤務（isError）の日は errors に入れる。ok＝その月の全部の日の日別勤怠がある（読み取りエラーが無い）。
+ * 返り値 { ok, byTot: { TOTコード（AC_totKey）: { days, errors: [日付] } } }
+ */
+function TA_dailyIndex(R, month) {
+  var out = { ok: false, byTot: {} };
+  if (!R || !Array.isArray(R.workings) || R.workings.some(function (d) { return !d || d._error; })) return out;
+  var codeByKey = AC_totCodeByKey_(R.employees || []), dates = {}, seen = {};
+  AC_totFlat_(R.workings).forEach(function (w) {
+    var d = w && w.date ? String(w.date).slice(0, 10) : '';
+    if (d.slice(0, 7) !== month) return;
+    dates[d] = true;
+    var tot = codeByKey[w.employeeKey];
+    if (!tot) return;
+    var t = AC_totKey(tot), e = out.byTot[t] || (out.byTot[t] = { days: 0, errors: [] });
+    if (w.isError === true && e.errors.indexOf(d) === -1) e.errors.push(d);
+    if (seen[t + ':' + d] || AC_isFullHoliday(w) || !(Number(w.totalWork) > 0)) return;
+    seen[t + ':' + d] = true;
+    e.days++;
+  });
+  var y = Number(month.slice(0, 4)), m = Number(month.slice(5, 7));
+  out.ok = Object.keys(dates).length === new Date(Date.UTC(y, m, 0)).getUTCDate();
+  Object.keys(out.byTot).forEach(function (t) { out.byTot[t].errors.sort(); });
+  return out;
+}
+/**
+ * 純粋関数（版 2026-11-20a）：固定店舗（日額×出勤日数）の1人の結果。daily＝「通勤距離」の日額、index＝TA_dailyIndex、totCode＝TOT従業員コード。
+ * 返り値 { amount（書かないときは 0）, days, issue（TA_DAILY_ISSUE のキー。問題が無ければ ''）, errors: [エラー勤務の日] }
+ */
+function TA_dailyAmount(daily, index, totCode) {
+  var yen = TA_parseYen(daily), e = (index && index.ok && totCode && index.byTot[AC_totKey(totCode)]) || { days: 0, errors: [] };
+  var issue = !index || !index.ok ? 'noData' : !yen ? 'noDaily' : e.errors.length ? 'error' : !e.days ? 'zero' : '';
+  return { amount: issue ? 0 : yen * e.days, days: e.days, issue: issue, errors: e.errors.slice() };
+}
+/** 純粋関数（版 2026-11-20a）：管理者への一覧に出す、書かなかった理由（エラー勤務の日は M/D で） */
+function TA_dailyReason(r) {
+  return TA_DAILY_ISSUE[r.issue] + (r.issue === 'error' ? '（' + r.errors.map(TA_md).join('・') + '）' : '');
+}
+
+/**
  * 純粋関数：締めの月の1人ずつの結果。month＝'YYYY-MM'。people＝在籍者 [{ code, name }]、inputs＝「通勤距離」の入力、apps＝[{ ...app, state }]。
  * 返り値 [{ code, amount（通勤手当に書く確定額。書かないときは 0）, status（確定・要確認・未提出・来月反映・''）, pendingIds（来月へ回す申請ID） }]
- * 要確認が1つでもあれば、その人のその月の申請は全部来月へ（数字は書かない）。定期（固定額）の人は「通勤距離」の固定額
+ * 要確認が1つでもあれば、その人のその月の申請は全部来月へ（数字は書かない）。定期（固定額）の人は「通勤距離」の固定額。
+ * 固定店舗（日額×出勤日数）の人（版 2026-11-20a）：daily＝{ index: TA_dailyIndex, totOf: { 社員番号: TOT従業員コード } }。日額 × 出勤日数。
+ *   問題があれば書かずに要確認（dailyIssue に TA_dailyAmount の結果）
  */
-function TA_monthRows(month, people, inputs, apps, rate) {
+function TA_monthRows(month, people, inputs, apps, rate, daily) {
   return people.map(function (p) {
     var inp = inputs[p.code] || {}, type = String(inp.type || '').trim();
     var mine = apps.filter(function (a) { return a.code === p.code; });
@@ -484,13 +534,16 @@ function TA_monthRows(month, people, inputs, apps, rate) {
     var ok = pend.length ? [] : here;
     var late = mine.filter(function (a) { return a.target === month && a.reflect > month; });
     var fixed = type === TA_FIXED_TYPE ? TA_parseYen(inp.fixed) : null, amount = 0, status = '';
+    var dl = type === TA_DAILY_TYPE ? TA_dailyAmount(inp.daily, daily && daily.index, daily && daily.totOf && (daily.totOf[p.code] || p.code)) : null;
+    if (dl && dl.issue) return { code: p.code, amount: 0, status: TA_ST.check, pendingIds: here.map(function (a) { return a.id; }), daily: dl, dailyIssue: dl };
     ok.forEach(function (a) { amount += a.state.pub + a.state.carYen; });
     if (!pend.length && fixed !== null) amount += fixed;
+    if (!pend.length && dl) amount += dl.amount;
     if (pend.length) status = TA_ST.check;
-    else if (ok.length || fixed !== null) status = TA_ST.fixed;
+    else if (ok.length || fixed !== null || dl) status = TA_ST.fixed;
     else if (late.length) status = TA_ST.next;
     else if (type === TA_REMIND_TYPE && !mine.some(function (a) { return a.target === month; })) status = '未提出';
-    return { code: p.code, amount: pend.length ? 0 : amount, status: status, pendingIds: pend.length ? here.map(function (a) { return a.id; }) : [] };
+    return { code: p.code, amount: pend.length ? 0 : amount, status: status, pendingIds: pend.length ? here.map(function (a) { return a.id; }) : [], daily: dl };
   });
 }
 
@@ -865,7 +918,13 @@ function TA_close_(ss, st, month, mode, today) {
   var state = AC_state_(), key = 'ta-close:' + month;
   if (state.getProperty(key)) return month + ' は締め済み';
   var people = TA_people_(today), inputs = TRV_commuteInputs(TRV_sheetValues_(ss, TRV_COMMUTE_SHEET));
-  var rows = TA_monthRows(month, people, inputs, st.apps, TA_rate_());
+  var daily = null;   // 固定店舗（日額×出勤日数）の人がいるときだけ、TOT のデータと TOT従業員コードを読む
+  if (people.some(function (p) { return String((inputs[p.code] || {}).type || '').trim() === TA_DAILY_TYPE; })) {
+    var tl = AC_readTotLatest_(), totOf = {};
+    AC_masterSheet_().getDataRange().getValues().slice(1).forEach(function (r) { var c = AC_cellCode_(r[AC_COL.code]); if (c && !totOf[c]) totOf[c] = String(r[AC_COL.totCode] || '').trim() || c; });
+    daily = { index: TA_dailyIndex(tl && tl.results, month), totOf: totOf };
+  }
+  var rows = TA_monthRows(month, people, inputs, st.apps, TA_rate_(), daily);
   var amounts = rows.filter(function (r) { return r.amount > 0; }).map(function (r) { return { code: r.code, value: r.amount }; });
   var payMsg, pay = null;
   try {
@@ -891,14 +950,18 @@ function TA_close_(ss, st, month, mode, today) {
   }); });
   var name = {}; people.forEach(function (p) { name[p.code] = p.name; });
   var list = function (s2) { return rows.filter(function (r) { return r.status === s2; }).map(function (r) { return r.code + ' ' + name[r.code]; }); };
-  var miss = list('未提出'), chk = list(TA_ST.check);
+  var miss = list('未提出'), chk = rows.filter(function (r) { return r.status === TA_ST.check && !r.dailyIssue; }).map(function (r) { return r.code + ' ' + name[r.code]; });
+  var dOk = rows.filter(function (r) { return r.daily && !r.dailyIssue; }).length;
+  var dNg = rows.filter(function (r) { return r.dailyIssue; }).map(function (r) { return r.code + ' ' + name[r.code] + '（' + TA_dailyReason(r.dailyIssue) + '）'; });
   var text = '【交通費】' + TA_monthLabel(month) + '分を締めました（受付は' + TA_md(TA_acceptDeadline(month)) + 'まで・回答は' + TA_md(TA_answerDay(month)) + 'まで）。' + payMsg
     + '\n・未提出 ' + miss.length + '人' + (miss.length ? '\n' + miss.map(function (x) { return '　' + x; }).join('\n') : '')
     + '\n・要確認が残っている ' + chk.length + '人（来月に反映）' + (chk.length ? '\n' + chk.map(function (x) { return '　' + x; }).join('\n') : '')
-    + (chk.length ? '\n「交通費明細」の回答をお願いします。' : '');
+    + (chk.length ? '\n「交通費明細」の回答をお願いします。' : '')
+    + (daily ? '\n・固定店舗（日額×出勤日数）：書いた ' + dOk + '人・書かなかった（要確認） ' + dNg.length + '人'
+      + (dNg.length ? '\n' + dNg.map(function (x) { return '　' + x; }).join('\n') + '\nTOT・「通勤距離」の日額を直したあと travelApplyCloseAgain を実行してください。' : '') : '');
   if (mode === 'on') AC_pushLine_(text); else TA_plan_('管理者のまとめ', '管理者', text);
   state.setProperty(key, new Date().toISOString());
-  return month + ' を締め（書いた ' + (pay ? pay.written.length : 0) + '・上書きしなかった ' + (pay ? pay.conflict.length : 0) + '・未提出 ' + miss.length + '・要確認 ' + chk.length + '・来月へ ' + moved + '件）';
+  return month + ' を締め（書いた ' + (pay ? pay.written.length : 0) + '・上書きしなかった ' + (pay ? pay.conflict.length : 0) + '・未提出 ' + miss.length + '・要確認 ' + chk.length + '・来月へ ' + moved + '件' + (daily ? '・固定店舗 書いた ' + dOk + '・要確認 ' + dNg.length : '') + '）';
 }
 
 /** 手動実行：締めをやり直す（給与反映シートに書けなかったときなど）。month＝'YYYY-MM'（省略で前月）。すでに値がある欄は上書きしない */
@@ -1010,5 +1073,5 @@ function travelApplyRemoveTriggers() {
 
 if (typeof module !== 'undefined') {
   module.exports = { TA_carKm: TA_carKm, TA_tripOf: TA_tripOf, TA_isExample: TA_isExample, TA_sumIssues: TA_sumIssues, TA_pageOf: TA_pageOf, TA_missingPages: TA_missingPages, TA_pagesDue: TA_pagesDue, TA_pagesText: TA_pagesText, TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
-    TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_acceptDeadline: TA_acceptDeadline, TA_answerDay: TA_answerDay, TA_monthRows: TA_monthRows, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
+    TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_acceptDeadline: TA_acceptDeadline, TA_answerDay: TA_answerDay, TA_monthRows: TA_monthRows, TA_dailyIndex: TA_dailyIndex, TA_dailyAmount: TA_dailyAmount, TA_dailyReason: TA_dailyReason, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
 }

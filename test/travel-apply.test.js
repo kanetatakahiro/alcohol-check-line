@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 交通費申請（gas/TravelApply.gs・版 2026-11-19b）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
+// 交通費申請（gas/TravelApply.gs・版 2026-11-19f）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'OfficeTask.gs', 'Travel.gs', 'TravelApply.gs', 'PayrollSheet.gs'];
 // 給与反映シート（社労士共有用【リバースHD】）の本番の形（2026-11-19 に確認した見出しと形。値は架空）：
 // 1行目 B「2026年」・C「11月支給」／2行目 B〜I の見出し／3行目から人の行（I 列 =SUM(D:H)）／すぐ下に合計の行（D〜I =SUM(D3:D…)）／
@@ -52,8 +52,11 @@ const ev = (uid, message, id = 'ta' + ++seq) => ({ type: 'message', webhookEvent
   source: { type: 'user', userId: uid }, message: { id: 'm' + id, ...(typeof message === 'string' ? { type: 'text', text: message } : message) } });
 const post = (g, ...events) => g.ctx.doPost({ postData: { contents: JSON.stringify({ destination: 'x', events }) } });
 const photo = (g, uid, extra = {}) => { const e = ev(uid, { type: 'image', ...extra }); g.line.contents[e.message.id] = { type: 'image/jpeg' }; post(g, e); return e; };
-const row = (o) => ({ date: '', from: '', to: '', means: 'car', km: '', yen: '', unclear: [], ...o });
-const form = (rows, month = '2026-11', total = '') => ({ json: { is_travel_form: true, month, total_yen: total, rows: rows.map(row) } });
+// 申請書 v2（版 2026-11-19f）の AI の答え。km（片道）・yen（運賃）は前の書き方のまま渡せる（片道・km を合計に。trip の既定は片道）
+const V2 = { km: 'one_way_km', yen: 'fare' };
+const row = ({ km, yen, unclear = [], ...o }) => ({ example: false, date: '', means: 'car', from: '', to: '', trip: 'oneway', one_way_km: km ?? '', total_km: '', fare: yen ?? '',
+  ...o, unclear: unclear.map((f) => V2[f] || f) });
+const form = (rows, month = '2026-11', total = '', totalKm = '') => ({ json: { is_travel_form: true, month, total_km: totalKm, total_yen: total, rows: rows.map(row) } });
 const at = (g, iso) => { g.clock.now = new Date(iso).getTime(); };
 
 function setup(props = { TRAVEL_APPLY_MODE: 'on' }, now = '2026-12-02T09:00:00+09:00') {
@@ -109,8 +112,8 @@ test('交通費申請（受付）: 写真を AI で読み、申請と明細を�
   assert.match(String(a[0][8]), /^photo-\d+$/);
   assert.match(g.drive.folders['folder-travel'].files[0].name, /^90001_20261202_\d{6}_1$/);
   const d = details(master);
-  assert.deepEqual(d.map((r) => [String(r[2]), r[3], r[4], r[5], r[6], r[7], r[8], r[9]]),
-    [['2026-11-05', '自宅', '甲町', '車', 10, 150, '未確認', 'OK'], ['2026-11-05', '甲町店', '自宅', '車', 12, 180, '未確認', 'OK']]);
+  assert.deepEqual(d.map((r) => [String(r[2]), r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11]]),
+    [['2026-11-05', '自宅', '甲町', '車', '片道', 10, 10, 150, '未確認', 'OK'], ['2026-11-05', '甲町店', '自宅', '車', '片道', 12, 12, 180, '未確認', 'OK']]);
   assert.deepEqual(replies(g, n).map((t) => t.split('\n')[0]), ['交通費申請の写真を受け付けました（11月分・2件）。']);
   assert.equal(cases(inq).length, 0);   // 問い合わせにはしない
   // AI へは写真と指示だけ（住所・氏名・LINE ID は送らない）。License.gs と同じ宛先・版・既定のモデル
@@ -146,7 +149,7 @@ test('交通費申請（見分け）: 免許証の受付中の写真は免許証
   assert.equal(g.ai.calls.length, 0);
   assert.equal(cases(inq).length, c0 + 1);
   // 申請の対象の人でも、AI が「申請書ではない」と答えた画像は問い合わせへ（保存しない）
-  g.ai.queue.push({ json: { is_travel_form: false, month: '', total_yen: '', rows: [] } });
+  g.ai.queue.push({ json: { is_travel_form: false, month: '', total_km: '', total_yen: '', rows: [] } });
   const files = g.drive.folders['folder-travel'].files.length;
   g.clock.now += 31 * 60000;   // 免許証の受付（30分）が終わってから
   photo(g, U(2));
@@ -172,15 +175,15 @@ test('交通費申請（読み取り）: 読めない欄は推測で埋めずに
   ]));
   photo(g, U(1));
   const d = details(master);
-  assert.deepEqual(d.map((r) => [r[6], r[9]]), [['', '要確認'], [30, '要確認'], [10, '要確認'], [10, '要確認'], [10, '要確認']]);
-  assert.match(d[0][10], /距離（km）が読み取れませんでした/);
-  assert.match(d[1][10], /日付が読み取れませんでした/);
+  assert.deepEqual(d.map((r) => [r[8], r[11]]), [['', '要確認'], [30, '要確認'], [10, '要確認'], [10, '要確認'], [10, '要確認']]);
+  assert.match(d[0][12], /距離（km）が読み取れませんでした/);
+  assert.match(d[1][12], /日付が読み取れませんでした/);
   assert.equal(String(d[1][2]), '');
-  assert.match(d[2][10], /手段/);
+  assert.match(d[2][12], /手段/);
   assert.equal(d[2][5], '');
-  assert.match(d[3][10], /読み取れませんでした/);
+  assert.match(d[3][12], /読み取れませんでした/);
   assert.equal(d[3][3], '');
-  assert.match(d[4][10], /対象の月の外/);
+  assert.match(d[4][12], /対象の月の外/);
   assert.equal(apps(master)[0][6], '要確認');
   // AI が使えない（HTTP 500）：写真は保存し、申請書全体を要確認。返信は「管理本部が写真で確認」
   g.ai.queue.push({ status: 500 });
@@ -188,7 +191,7 @@ test('交通費申請（読み取り）: 読めない欄は推測で埋めずに
   photo(g, U(2));
   const a2 = apps(master).find((r) => String(r[2]) === '90002');
   assert.deepEqual([String(a2[4]), a2[6]], ['', '要確認']);
-  assert.ok(details(master).some((r) => String(r[1]) === '90002' && r[3] === '（申請書全体）' && /AI で申請書を読み取れませんでした/.test(r[10])));
+  assert.ok(details(master).some((r) => String(r[1]) === '90002' && r[3] === '（申請書全体）' && /AI で申請書を読み取れませんでした/.test(r[12])));
   assert.match(replies(g, n)[0], /内容は管理本部が写真で確認します/);
   assert.ok(pushes(g, n).some((p) => p.to === ADMIN && /交通費申請・エラー/.test(p.text)));
   // 対象月が書かれておらず、日付の月もばらばら
@@ -196,7 +199,7 @@ test('交通費申請（読み取り）: 読めない欄は推測で埋めずに
   photo(g, U(1));
   const a3 = apps(master).filter((r) => String(r[2]) === '90001' && String(r[4]) === '');
   assert.equal(a3.length, 1);
-  assert.ok(details(master).some((r) => r[0] === a3[0][0] && r[3] === '（申請書全体）' && /対象の月が読み取れませんでした/.test(r[10])));
+  assert.ok(details(master).some((r) => r[0] === a3[0][0] && r[3] === '（申請書全体）' && /対象の月が読み取れませんでした/.test(r[12])));
   noPersonalLogs(g);
 });
 
@@ -212,15 +215,79 @@ test('交通費申請（照合）: 車・バイクは自動計算の距離と片
   ], '2026-11', '9,999'));
   photo(g, U(1));
   const d = details(master);
-  assert.deepEqual(d.map((r) => r[9]), ['OK', '要確認', '要確認', 'OK', 'OK', '要確認', '要確認']);
-  assert.equal(d[1][10], '要確認（申請 15.1km・自動計算 10km（高速を使わない道。高速を使う道は 13km））');
-  assert.equal(d[2][10], '要確認（行き先がわからない：大宮）');
-  assert.deepEqual([d[4][5], d[4][6], d[4][7]], ['電車', '', 420]);
-  assert.match(d[5][10], /同じ日・同じ区間/);
+  assert.deepEqual(d.map((r) => r[11]), ['OK', '要確認', '要確認', 'OK', 'OK', '要確認', '要確認']);
+  assert.equal(d[1][12], '要確認（申請 15.1km・自動計算 10km（高速を使わない道。高速を使う道は 13km））');
+  assert.equal(d[2][12], '要確認（行き先がわからない：大宮）');
+  assert.deepEqual([d[4][5], d[4][8], d[4][9]], ['電車', '', 420]);
+  assert.match(d[5][12], /同じ日・同じ区間/);
   assert.equal(d[6][3], '（申請書全体）');
-  assert.match(d[6][10], /合計と、計算した合計が違います/);
+  assert.match(d[6][12], /合計と、計算した合計が違います/);
   // 車・バイクの金額：km × 15円（合計は円未満切り捨て）
-  assert.deepEqual([d[0][7], d[3][7]], [225, 135]);
+  assert.deepEqual([d[0][9], d[3][9]], [225, 135]);
+});
+
+test('交通費申請（v2 の申請書・19f）: 往復は片道×2（合わなければ要確認・片方だけなら計算）・片道は同じ・電車は運賃のまま・○が無ければ要確認・記入例は読まない・距離の照合は片道・手書きの合計', () => {
+  const { g, master } = setup();
+  g.ai.queue.push(form([
+    { example: true, date: '4/1', from: '自宅', to: '本社', trip: 'round', one_way_km: '8', total_km: '16' },   // 記入例（AI の印）
+    { date: '記入例：4/1', from: '自宅', to: '本社', trip: 'round', one_way_km: '8', total_km: '16' },          // 記入例（印が無くても）
+    { date: '11/2', from: '自宅', to: '甲町', trip: 'round', one_way_km: '8', total_km: '16' },
+    { date: '11/3', from: '自宅', to: '甲町', trip: 'round', one_way_km: '8', total_km: '15' },
+    { date: '11/4', from: '自宅', to: '甲町', trip: 'round', one_way_km: '10' },
+    { date: '11/5', from: '自宅', to: '甲町', means: 'bike', trip: 'round', total_km: '20' },
+    { date: '11/6', from: '自宅', to: '甲町', trip: 'oneway', one_way_km: '9' },
+    { date: '11/9', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'round', fare: '340' },
+    { date: '11/10', from: '自宅', to: '甲町', trip: 'unknown', one_way_km: '8', total_km: '16' },
+    { date: '11/11', from: '大宮駅', to: '浦和駅', means: 'bus', trip: 'unknown', fare: '220' },
+  ]));
+  photo(g, U(1));
+  const call = g.ai.calls[0].body;
+  assert.match(call.system, /記入例/);
+  assert.deepEqual(Object.keys(call.output_config.format.schema.properties.rows.items.properties),
+    ['example', 'date', 'means', 'from', 'to', 'trip', 'one_way_km', 'total_km', 'fare', 'unclear']);
+  assert.ok(!/高速/.test(JSON.stringify(call.output_config)));   // 高速料金は読まない
+  const d = details(master);
+  assert.equal(d.length, 8);                                       // 記入例の2行は記録しない
+  assert.ok(!d.some((r) => /記入例/.test(r.join('|'))));
+  // [日付, 手段, 往復・片道, 片道, 合計, 金額, 照合結果]
+  assert.deepEqual(d.map((r) => [String(r[2]).slice(5), r[5], r[6], r[7], r[8], r[9], r[11]]), [
+    ['11-02', '車', '往復', 8, 16, 240, 'OK'],                     // 往復で片道8・合計16
+    ['11-03', '車', '往復', 8, 15, 225, '要確認'],                 // 合計が片道×2 と違う
+    ['11-04', '車', '往復', 10, 20, 300, 'OK'],                    // 片道だけ → 合計を計算（距離の照合は片道 10km）
+    ['11-05', 'バイク', '往復', 10, 20, 300, 'OK'],                // 合計だけ → 片道を計算
+    ['11-06', '車', '片道', 9, 9, 135, 'OK'],                      // 片道：合計＝片道
+    ['11-09', '電車', '往復', '', '', 340, 'OK'],                  // 電車の往復の運賃は2倍にしない
+    ['11-10', '車', '', 8, 16, '', '要確認'],                      // ○が無い：計算しない・金額も出さない
+    ['11-11', 'バス', '', '', '', 220, '要確認'],
+  ]);
+  assert.match(d[1][12], /合計（km）が片道（km）と合いません/);
+  assert.match(d[6][12], /往復・片道の○が無いか、両方に○が付いています/);
+  assert.match(d[7][12], /往復・片道の○/);
+  // 距離の照合は片道で：片道16km（自動計算 10km）は 5km 超で要確認、往復の合計 20km（片道 10km）は OK（上の 11/4）
+  g.ai.queue.push(form([{ date: '11/12', from: '自宅', to: '甲町', trip: 'round', one_way_km: '16', total_km: '32' }]));
+  photo(g, U(1));
+  assert.equal(details(master).at(-1)[12], '要確認（申請 16km・自動計算 10km（高速を使わない道。高速を使う道は 13km））');
+  // 手書きの合計：合計kmの合計・運賃の合計が各行と同じなら OK、違えば申請書全体を要確認
+  g.ai.queue.push(form([{ date: '11/2', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' },
+    { date: '11/3', from: '大宮駅', to: '浦和駅', means: 'train', trip: 'round', fare: '340' }], '2026-11', '340', '10'));
+  photo(g, U(2));
+  const d2 = () => details(master).filter((r) => String(r[1]) === '90002');
+  assert.deepEqual(d2().map((r) => [r[3], r[11]]), [['自宅', 'OK'], ['大宮駅', 'OK']]);
+  g.ai.queue.push(form([{ date: '11/4', from: '自宅', to: '乙山', trip: 'round', one_way_km: '5', total_km: '10' }], '2026-11', '', '12'));
+  photo(g, U(2));
+  assert.equal(d2().at(-1)[3], '（申請書全体）');
+  assert.match(d2().at(-1)[12], /合計と、計算した合計が違います/);
+  // 毎朝：管理本部が「往復・片道」に 往復 と入れて回答 → 合計＝片道×2 で確定。合わない行は確認後の値で確定
+  setD(master, 6, 7, '往復'); setD(master, 6, 14, '本人に確認。往復');
+  setD(master, 1, 14, '写真で確認。合計は16'); setD(master, 1, 15, '16');
+  at(g, '2026-12-03T07:00:00+09:00');
+  g.ctx.travelApplyDaily();
+  const d3 = details(master);
+  assert.deepEqual([d3[6][6], d3[6][7], d3[6][8], d3[6][9]], ['往復', 8, 16, 240]);
+  assert.match(String(d3[6][11]), /^確認済み/);
+  assert.deepEqual([d3[1][8], d3[1][9]], [16, 240]);
+  assert.match(String(d3[1][11]), /^確認済み/);
+  noPersonalLogs(g);
 });
 
 test('交通費申請（毎朝）: TOT の出勤の記録で照合し、要確認は「臨時の依頼」に1件1行（メモに住所・金額を書かない）。回答で確定・回答が空の［完了］は出し直す', () => {
@@ -236,35 +303,35 @@ test('交通費申請（毎朝）: TOT の出勤の記録で照合し、要確�
   const r = g.ctx.travelApplyDaily();
   assert.deepEqual({ tot: r.tot, requests: r.requests }, { tot: 3, requests: 2 });
   const d = details(master);
-  assert.deepEqual(d.map((x) => [x[8], x[9]]), [['あり', 'OK'], ['なし', '要確認'], ['あり', '要確認']]);
+  assert.deepEqual(d.map((x) => [x[10], x[11]]), [['あり', 'OK'], ['なし', '要確認'], ['あり', '要確認']]);
   const q = requests(ot);
   assert.deepEqual(q.map((x) => x[2]), ['交通費の確認：試験さん（11/6 自宅→甲町（車））'.replace('（車））', '）'), '交通費の確認：試験さん（11/9 自宅→乙山）']);
   assert.match(q[0][4], /^何が：11\/6 自宅→甲町（車）\nなぜ：その日の TOT の出勤の記録がありません\nどう直すか：従業員マスタのファイルの「交通費明細」3行目/);
   assert.match(q[1][4], /片道5kmを超えて/);
   q.forEach((x) => assert.ok(!/円|架空県|(?<!片道)\d+(\.\d+)?km/.test(x[4]), x[4]));
   assert.equal(String(q[0][3]), '2026-12-05');   // 期限：締切の日
-  assert.deepEqual(d.map((x) => String(x[13])), ['', '2', '3']);
+  assert.deepEqual(d.map((x) => String(x[15])), ['', '2', '3']);
   assert.equal(apps(master)[0][6], '要確認');
   // 同じ日にもう1回：同じ依頼は重ねない
   assert.equal(g.ctx.travelApplyDaily().requests, 0);
   // 回答：11/6 は出勤を確認・11/9 は回答なしで［完了］
-  setD(master, 1, 12, '本人に確認。11/6 は出勤（打刻漏れ）');
+  setD(master, 1, 14, '本人に確認。11/6 は出勤（打刻漏れ）');
   tab(ot, '臨時の依頼').getRange(3, 6).setValue('完了');
   at(g, '2026-12-04T07:00:00+09:00');
   const r2 = g.ctx.travelApplyDaily();
   assert.deepEqual({ confirmed: r2.confirmed, reissued: r2.reissued, requests: r2.requests }, { confirmed: 1, reissued: 1, requests: 1 });
   const d2 = details(master);
-  assert.match(String(d2[1][9]), /^確認済み（12\/4）$/);
+  assert.match(String(d2[1][11]), /^確認済み（12\/4）$/);
   assert.equal(requests(ot)[0][5], '完了');
-  assert.equal(String(d2[2][13]), '4');                         // 出し直した依頼の行
-  assert.match(d2[2][10], /回答が空のまま［完了］になっていました/);
+  assert.equal(String(d2[2][15]), '4');                         // 出し直した依頼の行
+  assert.match(d2[2][12], /回答が空のまま［完了］になっていました/);
   assert.match(requests(ot)[2][4], /なぜ：回答が空のまま/);
   // 確認後の値（km）を入れて確定 → 申請は確定、合計は直した km で
-  setD(master, 2, 12, '道順を確認。迂回あり'); setD(master, 2, 13, '33');
+  setD(master, 2, 14, '道順を確認。迂回あり'); setD(master, 2, 15, '33');
   at(g, '2026-12-05T07:00:00+09:00');
   g.ctx.travelApplyDaily();
   const d3 = details(master);
-  assert.deepEqual([d3[2][6], d3[2][7]], [33, 495]);
+  assert.deepEqual([d3[2][8], d3[2][9]], [33, 495]);
   assert.deepEqual([apps(master)[0][6], apps(master)[0][7]], ['確定', 795]);   // (10 + 10 + 33) × 15
   noPersonalLogs(g);
 });
@@ -480,6 +547,21 @@ test('交通費申請（純粋関数）: 日付・金額・AI の応答・TOT �
   assert.equal(X.TA_parseYen('12?'), null);
   assert.equal(X.TA_aiParse('{"stop_reason":"refusal","content":[]}').error, 'refusal');
   assert.equal(X.TA_aiParse('x').error, 'parse');
+  // 19f：往復・片道の km
+  assert.deepEqual({ ...X.TA_carKm('往復', 8, 16) }, { one: 8, km: 16, issue: null });
+  assert.deepEqual({ ...X.TA_carKm('往復', 8, 15) }, { one: 8, km: 15, issue: 'roundKm' });
+  assert.deepEqual({ ...X.TA_carKm('往復', 8.25, null) }, { one: 8.25, km: 16.5, issue: null });
+  assert.deepEqual({ ...X.TA_carKm('往復', null, 15) }, { one: 7.5, km: 15, issue: null });
+  assert.deepEqual({ ...X.TA_carKm('片道', 9, null) }, { one: 9, km: 9, issue: null });
+  assert.deepEqual({ ...X.TA_carKm('片道', 9, 18) }, { one: 9, km: 18, issue: 'roundKm' });
+  assert.deepEqual({ ...X.TA_carKm('', 8, 16) }, { one: 8, km: 16, issue: 'trip' });
+  assert.deepEqual({ ...X.TA_carKm('往復', null, null) }, { one: null, km: null, issue: 'km' });
+  assert.deepEqual(['往復', '片道', 'round', '', '往'].map((t) => X.TA_tripOf(t)), ['往復', '片道', '往復', '', '']);
+  assert.equal(X.TA_isExample({ example: false, date: '記入例：4/1' }), true);
+  assert.equal(X.TA_isExample({ example: false, date: '4/1', from: '自宅' }), false);
+  const R = [{ means: '車', km: 16, yen: 240 }, { means: '電車', km: null, yen: 340 }];
+  assert.deepEqual([[16, 340], [16, null], [null, 340], [17, 340], [16, 300], [null, null]].map(([k, y]) => X.TA_totalDiffers(R, k, y)), [false, false, false, true, true, false]);
+  assert.equal(X.TA_totalDiffers([{ means: '車', km: null, yen: null }], 16, null), false);   // 読めない行があれば比べない
   const idx = { worked: { '1:2026-11-05': true }, covered: { '2026-11-05': true, '2026-11-06': true }, first: '2026-11-01' };
   assert.deepEqual(['2026-11-05', '2026-11-06', '2026-10-30', '2026-12-09'].map((d) => X.TA_totCheck(idx, '0001', d)), ['あり', 'なし', '確認できない', '未確認']);
   assert.equal(X.TA_totCheck(idx, '', '2026-11-05'), '確認できない');

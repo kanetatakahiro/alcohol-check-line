@@ -1,5 +1,5 @@
 /**
- * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19g・本番未導入）
+ * 交通費申請の受付・読み取り・照合・締切・給与反映シートへの反映（gas/TravelApply.gs・版 2026-11-19h・本番未導入）
  *
  * 流れ：
  *   1. 本人が紙の申請書の写真（複数枚可）を公式LINEに送る。
@@ -19,6 +19,8 @@
  *      日付が対象月の中か・同じ日の同じ区間の重複・用紙ごとの合計欄（①〜④。書いていない欄は比べない）。
  *      2枚以上：同じ人・同じ対象月の写真は1つの申請にまとめる。全N枚のうち届いていない枚目があれば申請を要確認（届けば自動で確認済み）。
  *      同じ枚目が2回届いたら、あとの写真を使う（前の写真の明細は「差し替え」にして合計に入れない）。枚数が書いていなければ1枚として扱う（差し替えはしない）。
+ *      届いていない枚目の本人への知らせ（版 2026-11-19h）：受付のときの返信には足さない（まとめて送った写真の途中で知らせないため）。
+ *      15分ごと（travelApplyPagesRemind）に、最後の写真から1時間たっても届いていない申請だけ、本人へ個別 LINE（8時〜21時台だけ。同じ枚目は1回）。
  *      TOT の出勤の記録は、毎朝の処理（tot-latest.json の日別勤怠）で照合する。
  *   4. 毎朝7時台（travelApplyDaily）：TOT の照合 → 回答が入った行を照合し直して確定 → 要確認の行を「臨時の依頼」（業務一覧ファイル）へ1件1行で追加
  *      （8時の「今日の業務」に出る）。回答が空のまま［完了］になっていたら、確認事項を出し直す。6日は前月の締め（月のタブ・管理者へ一覧）。
@@ -37,7 +39,7 @@
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-19g';
+var TA_VERSION = '2026-11-19h';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
 var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '枚目', '備考'];
 var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, pages: 9, note: 10 };
@@ -58,12 +60,15 @@ var TA_TOT_WAIT = '未確認', TA_TOT_YES = 'あり', TA_TOT_NO = 'なし', TA_T
 var TA_ST = { recv: '受付', check: '要確認', fixed: '確定', next: '来月反映' };
 var TA_ACCEPT_DAY = 4, TA_ANSWER_DAY = 5, TA_REMIND_DAY = 4, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
 var TA_DEFAULT_YEN_PER_KM = 15, TA_AI_DEFAULT_MAX = 100;
+var TA_PAGES_WAIT_MS = 3600000, TA_PAGES_EVERY_MIN = 15, TA_PAGES_FROM_HOUR = 8, TA_PAGES_TO_HOUR = 21;   // 枚目の知らせ：最後の写真から1時間・15分ごと・8時〜21時台
+var TA_PAGES_WAIT_KEY = 'ta-pages-wait';   // 枚目の知らせを待つ申請（{ 申請ID: 最後の写真の時刻（ミリ秒） }。AC_state_ に置く）
 var TA_TEXT = {
   ack: '交通費申請の写真を受け付けました（{month}分・{n}件）。\n内容を確認して、気になる点があれば管理本部からご連絡します。',
   ackNoMonth: '交通費申請の写真を受け付けました（{n}件）。\n対象の月が読み取れなかったため、管理本部で確認します。',
   ackNoRead: '交通費申請の写真を受け付けました。\n内容は管理本部が写真で確認します。',
   late: '\n受付の締切（{deadline}）を過ぎて届いたため、来月のお給料での反映になります。',
   fail: '写真をうまく受け取れませんでした。お手数ですが、もう一度送ってください。',
+  pages: '{month}交通費申請書の{pages}枚目が届いていません。写真を送ってください。',
   remind: '先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。5日以降に届いた分は、来月のお給料での反映になります。',
 };
 /** 確認事項（detail：シートに書く。数字を含んでよい／memo：グループに出る「臨時の依頼」のメモ。金額・住所は書かない／fix：どう直すか） */
@@ -678,6 +683,7 @@ function TA_receive_(ss, person, blob, ai, today, imageSet) {
   st = TA_load_(ss);
   app = st.apps.filter(function (a) { return a.id === app.id; })[0];
   if (TA_syncPages_(st, app)) st = TA_load_(ss), app = st.apps.filter(function (a) { return a.id === app.id; })[0];
+  TA_pagesWait_(app.id, TA_missingPages(app.pages ? app.pages.split(',') : []).length ? Date.now() : null);
   TA_refreshApp_(st, app, today);
   // 同じ組（imageSet）の写真は、最後の1枚のときだけ返す
   var last = true;
@@ -908,6 +914,56 @@ function travelApplyCloseAgain(month) {
   return r;
 }
 
+// ---------------- 届いていない枚目の知らせ（15分ごと） ----------------
+/** 枚目の知らせを待つ申請の記録（at＝最後の写真の時刻。null で消す）。ロックの中で呼ぶ */
+function TA_pagesWait_(id, at) {
+  var state = AC_state_(), m = TA_pagesWaitMap_(state);
+  if (at === null) { if (!(id in m)) return; delete m[id]; } else m[id] = at;
+  if (Object.keys(m).length) state.setProperty(TA_PAGES_WAIT_KEY, JSON.stringify(m)); else state.deleteProperty(TA_PAGES_WAIT_KEY);
+}
+function TA_pagesWaitMap_(state) { try { return JSON.parse(state.getProperty(TA_PAGES_WAIT_KEY) || '{}') || {}; } catch (e) { return {}; } }
+
+/** 純粋関数：知らせる時刻か（最後の写真から1時間・8時〜21時台）。hour＝日本時間の時 */
+function TA_pagesDue(lastMs, nowMs, hour) { return nowMs - lastMs >= TA_PAGES_WAIT_MS && hour >= TA_PAGES_FROM_HOUR && hour <= TA_PAGES_TO_HOUR; }
+/** 純粋関数：本人への枚目の知らせの文 */
+function TA_pagesText(target, missing) { return TA_fillText(TA_TEXT.pages, { month: target ? TA_monthLabel(target) + '分の' : '', pages: missing.join('・') }); }
+
+/**
+ * 15分ごと（トリガー）：最後の写真から1時間たっても届いていない枚目がある申請の本人へ、個別 LINE で知らせる（record は「交通費の送る予定」へ）。
+ * 待つ申請が無ければシートも開かない。全部届いた・管理本部が確認済みにした・申請が無いときは待つのをやめる。同じ申請の同じ枚目は1回
+ */
+function travelApplyPagesRemind() {
+  var mode = TA_mode_();
+  if (mode === 'off') return { mode: mode };
+  var state = AC_state_(), now = Date.now(), hour = Number(Utilities.formatDate(new Date(now), AC_TZ, 'HH'));
+  var m = TA_pagesWaitMap_(state), due = Object.keys(m).filter(function (id) { return TA_pagesDue(Number(m[id]), now, hour); });
+  var res = { mode: mode, waiting: Object.keys(m).length, sent: 0, failed: 0, dropped: 0 };
+  if (!due.length) return res;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var today = AC_today_(), st = TA_load_(TRV_book_()), uid = {};
+    TA_people_(today).forEach(function (p) { uid[p.code] = p.userId; });
+    m = TA_pagesWaitMap_(state);   // ロックの間に写真が届いていれば、その時刻で
+    due.filter(function (id) { return id in m && TA_pagesDue(Number(m[id]), now, hour); }).forEach(function (id) {
+      var app = st.apps.filter(function (a) { return a.id === id; })[0];
+      var missing = app ? TA_missingPages(app.pages ? app.pages.split(',') : []) : [];
+      var open = app && TA_rowsOf_(st, id).some(function (d) { return d.from === TA_WHOLE && d.result === TA_CHECK && d.issue.indexOf(TA_ISSUE.pages.memo) !== -1; });
+      var key = 'sent:' + today + ':ta-pages:' + id + ':' + missing.join('-');
+      if (!missing.length || !open || state.getProperty(key) || !uid[app.code]) { if (app && missing.length && open && !uid[app.code]) Logger.log(TRV_fmt('交通費申請の枚目の知らせ：社員番号 %s は LINE で送れない（申請ID %s）', app.code, id)); delete m[id]; res.dropped++; return; }
+      var text = TA_pagesText(app.target, missing);
+      try {
+        if (mode === 'on') AC_pushSelf_(uid[app.code], text); else TA_plan_('枚目の知らせ', app.code, text);
+        state.setProperty(key, new Date().toISOString());
+        delete m[id]; res.sent++;
+      } catch (e) { res.failed++; TA_error_(app.code, '枚目の知らせ', LIC_errSummary(e)); }
+    });
+    if (Object.keys(m).length) state.setProperty(TA_PAGES_WAIT_KEY, JSON.stringify(m)); else state.deleteProperty(TA_PAGES_WAIT_KEY);
+  } finally { lock.releaseLock(); }
+  Logger.log(TRV_fmt('交通費申請の枚目の知らせ（版 %s・%s）：送信 %s件・失敗 %s・やめた %s・待っている %s', TA_VERSION, mode, res.sent, res.failed, res.dropped, Object.keys(m).length));
+  return res;
+}
+
 // ---------------- 4日の催促 ----------------
 /** 純粋関数：催促する人（通勤区分が「交通費申請（車・バイク）」の在籍者で、前月分の申請が無く、LINE で送れる人） */
 function TA_remindTargets(people, inputs, apps, month) {
@@ -944,14 +1000,15 @@ function travelApplySetupTriggers() {
   travelApplyRemoveTriggers();
   ScriptApp.newTrigger('travelApplyDaily').timeBased().everyDays(1).atHour(TA_DAILY_HOUR).inTimezone(AC_TZ).create();
   ScriptApp.newTrigger('travelApplyRemind').timeBased().onMonthDay(TA_REMIND_DAY).atHour(TA_REMIND_HOUR).inTimezone(AC_TZ).create();
+  ScriptApp.newTrigger('travelApplyPagesRemind').timeBased().everyMinutes(TA_PAGES_EVERY_MIN).create();
 }
 function travelApplyRemoveTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (['travelApplyDaily', 'travelApplyRemind'].indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
+    if (['travelApplyDaily', 'travelApplyRemind', 'travelApplyPagesRemind'].indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { TA_carKm: TA_carKm, TA_tripOf: TA_tripOf, TA_isExample: TA_isExample, TA_sumIssues: TA_sumIssues, TA_pageOf: TA_pageOf, TA_missingPages: TA_missingPages, TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
+  module.exports = { TA_carKm: TA_carKm, TA_tripOf: TA_tripOf, TA_isExample: TA_isExample, TA_sumIssues: TA_sumIssues, TA_pageOf: TA_pageOf, TA_missingPages: TA_missingPages, TA_pagesDue: TA_pagesDue, TA_pagesText: TA_pagesText, TA_openMonth: TA_openMonth, TA_reflectMonth: TA_reflectMonth, TA_parseDate: TA_parseDate, TA_parseYen: TA_parseYen, TA_aiParse: TA_aiParse,
     TA_fromAi: TA_fromAi, TA_appState: TA_appState, TA_totCheck: TA_totCheck, TA_acceptDeadline: TA_acceptDeadline, TA_answerDay: TA_answerDay, TA_monthRows: TA_monthRows, TA_remindTargets: TA_remindTargets, TA_VERSION: TA_VERSION };
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 交通費申請（gas/TravelApply.gs・版 2026-11-19g）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
+// 交通費申請（gas/TravelApply.gs・版 2026-11-19h）・給与反映シート（gas/PayrollSheet.gs）。すべて架空の社員番号・氏名・住所・店舗・LINE ID。AI・LINE・Maps は模擬（実際には呼ばない）
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'Notices.gs', 'License.gs', 'OfficeTask.gs', 'Travel.gs', 'TravelApply.gs', 'PayrollSheet.gs'];
 // 給与反映シート（社労士共有用【リバースHD】）の本番の形（2026-11-19 に確認した見出しと形。値は架空）：
 // 1行目 B「2026年」・C「11月支給」／2行目 B〜I の見出し／3行目から人の行（I 列 =SUM(D:H)）／すぐ下に合計の行（D〜I =SUM(D3:D…)）／
@@ -364,6 +364,71 @@ test('交通費申請（v3 の申請書・19g）: 合計欄①〜④を用紙ご
   noPersonalLogs(g);
 });
 
+test('交通費申請（枚目の知らせ・19h）: 届いていない枚目は受付の返信には足さず、最後の写真から1時間たっても届かないときだけ本人へ個別 LINE（まとめて送る途中は知らせない・届けば知らせない・8時〜21時台・1回だけ）', () => {
+  const { g, master } = setup();
+  const pg = (rows, month, page, pages) => form(rows, month, '', { page, pages });
+  const car = (date) => ({ date, from: '自宅', to: '甲町', one_way_km: '10' });
+  const toMe = (n, uid) => pushes(g, n).filter((p) => p.to === uid).map((p) => p.text);
+  const remind = (iso) => { at(g, iso); return g.ctx.travelApplyPagesRemind(); };
+  // 1/2 だけ（9:00）→ 受付の返信は今までどおり。30分では知らせない・1時間で知らせる・2回目は送らない
+  const n = g.fetches.length;
+  g.ai.queue.push(pg([car('10/5')], '2026-10', '1', '2'));
+  photo(g, U(1));
+  assert.ok(!replies(g, n).some((x) => /届いていません/.test(x)));
+  assert.equal(remind('2026-12-02T09:30:00+09:00').sent, 0);
+  const r1 = remind('2026-12-02T10:00:00+09:00');
+  assert.deepEqual([r1.sent, toMe(n, U(1)).length], [1, 1]);
+  assert.match(toMe(n, U(1))[0], /^10月分の交通費申請書の2枚目が届いていません。写真を送ってください。/);
+  assert.ok(!/円|km|甲町|試験/.test(toMe(n, U(1))[0]));
+  assert.equal(remind('2026-12-02T10:15:00+09:00').sent, 0);
+  assert.equal(toMe(n, U(1)).length, 1);
+  // まとめて送る途中（1/3 が 10:20・2/3 が 11:00）：最初の写真から1時間でも、最後の写真から1時間たつまでは知らせない
+  const n2 = g.fetches.length;
+  at(g, '2026-12-02T10:20:00+09:00');
+  g.ai.queue.push(pg([car('11/5')], '2026-11', '1', '3'));
+  photo(g, U(2), { imageSet: { id: 'set9', index: 1, total: 3 } });
+  at(g, '2026-12-02T11:00:00+09:00');
+  g.ai.queue.push(pg([car('11/6')], '2026-11', '2', '3'));
+  photo(g, U(2), { imageSet: { id: 'set9', index: 2, total: 3 } });
+  assert.equal(remind('2026-12-02T11:30:00+09:00').sent, 0);
+  assert.deepEqual(toMe(n2, U(2)), []);
+  remind('2026-12-02T12:00:00+09:00');
+  assert.equal(toMe(n2, U(2)).length, 1);
+  assert.match(toMe(n2, U(2))[0], /^11月分の交通費申請書の3枚目が届いていません。/);
+  // 1時間の間に全部届けば知らせない（待つのもやめる）
+  const n3 = g.fetches.length;
+  at(g, '2026-12-02T12:10:00+09:00');
+  g.ai.queue.push(pg([{ date: '11/4', from: '大宮駅', to: '浦和駅', means: 'train', fare: '170' }], '2026-11', '1', '2'));
+  photo(g, U(3));
+  at(g, '2026-12-02T12:40:00+09:00');
+  g.ai.queue.push(pg([{ date: '11/5', from: '大宮駅', to: '浦和駅', means: 'train', fare: '170' }], '2026-11', '2', '2'));
+  photo(g, U(3));
+  const r3 = remind('2026-12-02T13:45:00+09:00');
+  assert.deepEqual([r3.sent, r3.waiting, toMe(n3, U(3)).length], [0, 0, 0]);
+  // 夜（22:30 の写真）：21時台を過ぎたら朝8時台まで待つ
+  const n4 = g.fetches.length;
+  at(g, '2026-12-02T22:30:00+09:00');
+  g.ai.queue.push(pg([car('11/9')], '2026-11', '1', '2'));
+  photo(g, U(1));
+  assert.equal(remind('2026-12-02T23:45:00+09:00').sent, 0);
+  assert.equal(remind('2026-12-03T07:45:00+09:00').sent, 0);
+  assert.equal(remind('2026-12-03T08:00:00+09:00').sent, 1);
+  assert.match(toMe(n4, U(1))[0], /^11月分の交通費申請書の2枚目が届いていません。/);
+  // record：送らずに「交通費の送る予定」へ
+  g.scriptProps.setProperty('TRAVEL_APPLY_MODE', 'record');
+  at(g, '2026-12-03T09:00:00+09:00');
+  g.ai.queue.push(pg([car('10/10')], '2026-10', '1', '2'));
+  photo(g, U(2));   // 90002 の 10月分（新しい申請）
+  const n5 = g.fetches.length;
+  remind('2026-12-03T10:00:00+09:00');
+  assert.equal(pushes(g, n5).length, 0);
+  assert.deepEqual(tab(master, '交通費の送る予定').dump().at(-1).slice(1, 4).map(String), ['枚目の知らせ', '90002', '10月分の交通費申請書の2枚目が届いていません。写真を送ってください。']);
+  // トリガー：15分ごと
+  g.ctx.travelApplySetupTriggers();
+  assert.deepEqual(g.triggers.map((x) => x.fn).sort(), ['travelApplyDaily', 'travelApplyPagesRemind', 'travelApplyRemind']);
+  noPersonalLogs(g);
+});
+
 test('交通費申請（毎朝）: TOT の出勤の記録で照合し、要確認は「臨時の依頼」に1件1行（メモに住所・金額を書かない）。回答で確定・回答が空の［完了］は出し直す', () => {
   const { g, master, ot } = setup();
   g.ai.queue.push(form([
@@ -666,6 +731,11 @@ test('交通費申請（純粋関数）: 日付・金額・AI の応答・TOT �
   assert.deepEqual(miss(['-', '2/2']), []);
   assert.deepEqual(miss(['2/']), [1]);
   assert.deepEqual(miss(['?']), []);
+  // 19h：枚目の知らせ
+  const H = 3600000;
+  assert.deepEqual([[0, H - 1, 10], [0, H, 10], [0, H, 7], [0, H, 8], [0, H, 21], [0, H, 22]].map(([a, b, h]) => X.TA_pagesDue(a, b, h)), [false, true, false, true, true, false]);
+  assert.equal(X.TA_pagesText('2026-10', [2, 3]), '10月分の交通費申請書の2・3枚目が届いていません。写真を送ってください。');
+  assert.equal(X.TA_pagesText('', [2]), '交通費申請書の2枚目が届いていません。写真を送ってください。');
   const idx = { worked: { '1:2026-11-05': true }, covered: { '2026-11-05': true, '2026-11-06': true }, first: '2026-11-01' };
   assert.deepEqual(['2026-11-05', '2026-11-06', '2026-10-30', '2026-12-09'].map((d) => X.TA_totCheck(idx, '0001', d)), ['あり', 'なし', '確認できない', '未確認']);
   assert.equal(X.TA_totCheck(idx, '', '2026-11-05'), '確認できない');

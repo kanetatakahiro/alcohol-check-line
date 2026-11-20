@@ -127,7 +127,7 @@ test('INQ分類: まとめのお知らせはシートの「分類」「要点」
   assert.equal(g.fetches.length, n);
   assert.equal(res.count, 2);
   const log = g.logs.slice(l).join('\n');
-  assert.match(log, /未完了 2件（未対応 2件・対応中 0件）／文字数 \d+/);
+  assert.match(log, /未完了 2件（未対応 2件・対応中 0件）／カード 2枚・1通／文字の版（送れないとき）の文字数 \d+/);   // 版 2026-11-20d：カードの枚数・通数も出す
   assert.ok(!/試験|給与|打刻|ひょうじ/.test(log));
 });
 

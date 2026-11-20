@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
+import { cards, carousels } from './helpers/inquiry-cards.js';
 
 // 「問い合わせ」タブの列を並べ替えても動くこと（gas/Inquiry.gs 版 2026-11-10e）。すべて架空データ・模擬環境（LINEへの送信なし）
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
@@ -132,7 +133,10 @@ test('INQ列: 並べ替えたシートで、受付・追記・ボタン・まと
   g.ctx.INQ_remind();
   p = pushes(g, n);
   assert.equal(p.length, 1);
-  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/13 15:00\n\n① 試験 一郎（部署A）\n状況：対応中（担当：担当A）（今日から）\n要約：勤怠・打刻／11/8／退勤／打刻\n内容：「11/8の退勤の打刻を忘れてしまいました／追加で質問です」\n\n※対応済みのときは、公式LINEをメンションして「1.3対応済み」のように番号を送ってください。');
+  assert.equal(p[0].body.messages[0].altText, '【問い合わせ 未完了1件】11/13 15:00');   // 版 2026-11-20d：カード（カルーセル）
+  const card = cards(p)[0];
+  assert.match(card[1], /^受付：11\/13 \d+:\d\d（今日）$/);
+  assert.deepEqual([card[0], ...card.slice(2)], ['① 試験 一郎（部署A）', '状況：対応中（担当：担当A）', '要約：勤怠・打刻／11/8／退勤／打刻', '内容：「11/8の退勤の打刻を忘れてしまいました／追加で質問です」']);
   // ボタン：対応済みにする（完了者・完了者ID・完了日時）
   post(g, press(data.replace('|take|', '|done|'), ADMIN));
   r = rowsByName(book);

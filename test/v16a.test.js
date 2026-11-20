@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
+import { cards, carousels } from './helpers/inquiry-cards.js';
 
 // 版 2026-11-16a（11/15・11/16 安藤さんの指示）：すべて架空データ・LINEへの送信なし
 //  1. 問い合わせのまとめ：何日前から・受付日
@@ -68,9 +69,10 @@ test('16a-1 まとめ：9:00 のまとめに「（3日前から・11/13受付）
   g.clock.now = new Date('2026-11-16T09:00:00+09:00').getTime();
   const n = g.fetches.length;
   g.ctx.INQ_remind();
-  const t = since(g, n).push[0].body.messages[0].text;
-  assert.match(t, /① 試験 一郎（部署A）\n状況：未対応（3日前から・11\/13受付）\n/);
-  assert.match(t, /② 試験 二郎（部署B）\n状況：未対応（今日から）\n/);
+  // 版 2026-11-20d：まとめはカード。「受付：月/日 時:分（何日前）」の行（文字の版は今までどおり「（3日前から・11/13受付）」）
+  const cs = cards(since(g, n).push);
+  assert.deepEqual(cs.map((c) => c.slice(0, 3)), [['① 試験 一郎（部署A）', '受付：11/13 14:00（3日前）', '状況：未対応'], ['② 試験 二郎（部署B）', '受付：11/16 8:30（今日）', '状況：未対応']]);
+  const t = JSON.stringify(since(g, n).push.map((x) => x.body));
   assert.ok(!t.includes(NOTE));   // まとめ（勤怠管理グループ）にはAIの一文を付けない
 });
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
+import { cards, carousels } from './helpers/inquiry-cards.js';
 
 // 従業員問い合わせ管理：既存の「コード.gs」と Inquiry.gs を同じ模擬環境で動かす結合テスト（すべて架空データ・LINEへの送信なし）
 const U = (n) => 'U' + String(n).repeat(32).slice(0, 32);
@@ -257,7 +258,8 @@ test('INQ結合: リマインド（未完了だけ・前日から継続・0件�
   const p = since(g, n).push;
   assert.equal(p.length, 1);
   assert.equal(p[0].body.to, GROUP);
-  assert.equal(p[0].body.messages[0].text, '【問い合わせ 未完了1件】11/7 9:00\n\n① 試験 一郎（部署A）\n状況：未対応（1日前から・11/6受付）\n要約：その他／金曜の相談\n内容：「金曜の相談」\n\n※対応済みのときは、公式LINEをメンションして「1.3対応済み」のように番号を送ってください。');
+  assert.equal(p[0].body.messages[0].altText, '【問い合わせ 未完了1件】11/7 9:00');   // 版 2026-11-20d：カード（カルーセル）
+  assert.deepEqual(cards(p), [['① 試験 一郎（部署A）', '受付：11/6 16:00（1日前）', '状況：未対応', '要約：その他／金曜の相談', '内容：「金曜の相談」']]);
   g.scriptProps.setProperty('INQ_REMIND_DAYS', 'weekdays');
   const m = g.fetches.length;
   g.ctx.INQ_remind();
@@ -373,7 +375,7 @@ test('INQ結合: 要注意の分類・ハラスメントは、受付時のお知
   g.ctx.INQ_remind();
   const r = since(g, m).push;
   assert.equal(r.length, 1);
-  const text = r[0].body.messages[0].text;
+  const text = cards(r).map((c) => c.join('\n')).join('\n\n');   // 版 2026-11-20d：カード
   assert.match(text, /要約：⚠ハラスメント・人間関係\n内容：（内容はチャットで確認してください）/);
   assert.match(text, /要約：⚠給与・明細\n内容：（内容はチャットで確認してください）/);
   assert.match(text, /要約：⚠健康・体調\n内容：（内容はチャットで確認してください）/);
@@ -469,18 +471,19 @@ test('INQ 17e: 土日祝はまとめを送らない（受付の速報は送る�
   assert.equal(since(g, n).push.length, 0);
   g.clock.now = new Date('2026-11-24T09:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 火曜
   const p = since(g, n).push;
-  assert.equal(p.length, 1); assert.equal(p[0].body.to, GROUP);
-  const texts = p[0].body.messages.map((m) => m.text);
-  assert.equal(texts.length, 2);
-  assert.match(texts[0], /^【問い合わせ 未完了1件】11\/24 9:00[\s\S]*1\.3対応済み/);
-  assert.match(texts[1], /^【管理本部へのお知らせ】11\/24 9:00（2件）\n\n■ 11\/21 [0-9:]+\n【承認待ちの申請】テスト1件\n\n■ 11\/21 [0-9:]+\n【有給の年5日】テスト$/);
+  // 版 2026-11-20d：問い合わせのまとめ（カード）と、管理者へのお知らせ（文字）は別の送信。どちらも勤怠管理グループへ
+  assert.deepEqual(p.map((x) => x.body.to), [GROUP, GROUP]);
+  assert.equal(p[0].body.messages[0].altText, '【問い合わせ 未完了1件】11/24 9:00');
+  const texts = p[1].body.messages.map((m) => m.text);
+  assert.equal(texts.length, 1);
+  assert.match(texts[0], /^【管理本部へのお知らせ】11\/24 9:00（2件）\n\n■ 11\/21 [0-9:]+\n【承認待ちの申請】テスト1件\n\n■ 11\/21 [0-9:]+\n【有給の年5日】テスト$/);
   n = g.fetches.length;
   g.clock.now = new Date('2026-11-24T15:00:00+09:00').getTime(); g.ctx.INQ_remind();   // 15時の回：お知らせは出さない（もう送った）
   assert.ok(!since(g, n).push.some((x) => x.body.messages.some((m) => /管理本部へのお知らせ/.test(m.text))));
   g.ctx.AC_pushLine_('【36協定の見守り】テスト');                                       // 15時より後に来たもの → 翌朝
   n = g.fetches.length;
   g.clock.now = new Date('2026-11-25T09:00:00+09:00').getTime(); g.ctx.INQ_remind();
-  assert.match(since(g, n).push[0].body.messages.at(-1).text, /36協定の見守り/);
+  assert.ok(since(g, n).push.some((x) => x.body.messages.some((m) => /36協定の見守り/.test(m.text || ''))));
 });
 
 test('INQ 17e: ADMIN_NOTIFY が未設定なら今までどおり管理者へすぐ・飲酒検知の宛先は変わらない', () => {

@@ -44,11 +44,17 @@
  * 内容の表示（版 2026-11-20b）：受付のお知らせは200文字まで（超えたら「…（続きはチャットで）」）、まとめは1件50文字まで。
  *  写真・動画・スタンプ・ファイルは「［写真1枚］」「［スタンプ］」「［ファイル（名前）］」の形。30分以内に続けて届いた分は「／」でつないで「内容（冒頭）」へ（200文字まで）。
  *
+ * まとめのカード（版 2026-11-20d）：9:00／15:00 のまとめは、未完了の案件を1件1枚のカード（番号・名前（所属）・受付日時と何日前・状況・要約・内容200文字・
+ *  ［対応します］［対応済みにする］）にしたカルーセル（1通10枚・1回の送信で5通＝50件まで。入りきらない分は最後のカードに「ほか○件は…」）。
+ *  ボタンは受付のお知らせと同じ postback（INQ_button_）。カルーセルを送れなければ、今までの文字のまとめ（INQ_remindText）を送る。
+ *  TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は、いつも別の送信で、文字のまま勤怠管理グループへ。
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-20b';   // 版 2026-11-20b：通知の内容を200文字（まとめは50文字）・写真・スタンプ・ファイルの表示・30分以内の続きの内容をつなぐ・送り先を「従業員連絡」グループへ
+var INQ_VERSION = '2026-11-20d';   // 版 2026-11-20d：9:00／15:00 のまとめを、1件1枚のカード（ボタン付き）のカルーセルで送る（送れなければ今までの文字のまとめ）
+var INQ_VERSION_20B = '2026-11-20b';   // 版 2026-11-20b：通知の内容を200文字（まとめは50文字）・写真・スタンプ・ファイルの表示・30分以内の続きの内容をつなぐ・送り先を「従業員連絡」グループへ
 var INQ_VERSION_17E = '2026-11-17e';   // 版 2026-11-17e：まとめの番号で「1.3対応済み」、土日祝はまとめを送らない（INQ_REMIND_DAYS=weekdays）、管理者へのお知らせを朝のまとめに
 var INQ_VERSION_16A = '2026-11-16a';   // 版 2026-11-16a：まとめの「何日前から」、返信が要らないLINEの自動の対応済み、本人への案内の最後のAIの一文
 
@@ -501,10 +507,16 @@ function INQ_daysBetween(fromYmd, toYmd) {
 }
 
 /** 純粋関数：1件分の行（名前・状況・要約・内容） */
-function INQ_caseLines(c, now) {
-  // 版 2026-11-20b：シートの分類が要注意でなくても、出す内容そのものが要注意の分類に当たるときは内容を出さない（続けて届いた分をつないだため）
-  var sensitive = INQ_isSensitiveCategory(INQ_summaryParts_(c).category)
+/**
+ * 純粋関数：内容を出さない要注意の案件か。版 2026-11-20b：シートの分類が要注意でなくても、
+ * 出す内容そのものが要注意の分類に当たるときは内容を出さない（続けて届いた分をつないだため）
+ */
+function INQ_caseSensitive(c) {
+  return INQ_isSensitiveCategory(INQ_summaryParts_(c).category)
     || (!!String(c.head || '').trim() && INQ_isSensitiveCategory(INQ_classify(String(c.head).replace(/…$/, '')).category));
+}
+function INQ_caseLines(c, now) {
+  var sensitive = INQ_caseSensitive(c);
   return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c, sensitive, !!now)];
 }
 
@@ -549,11 +561,71 @@ function INQ_remindList(cases) {
   });
   return list;
 }
+/** 純粋関数：まとめの番号の印（①〜⑳、21件目からは (21)） */
+function INQ_mark(i) { return i < 20 ? String.fromCharCode(0x2460 + i) : '(' + (i + 1) + ')'; }
+
+// ---- 版 2026-11-20d：まとめのカルーセル ----
+var INQ_CAROUSEL_CARDS = 10;      // 1通のカルーセルのカードの数（LINE の上限）
+var INQ_CAROUSEL_MESSAGES = 5;    // 1回の送信の通数（LINE の上限）
+var INQ_MORE_CASES_TEXT = 'ほか{n}件は問い合わせ管理のシートで確認してください';
+
+/** 純粋関数：受付からの日数の表示（「今日」「1日前」…。日本時間の日付の差） */
+function INQ_daysAgoLabel(at, now) {
+  var days = INQ_daysBetween(INQ_ymd_(at), INQ_ymd_(now));
+  return days <= 0 ? '今日' : days + '日前';
+}
+
+/**
+ * 純粋関数：まとめの1件のカード（bubble）。i は0始まりの番号、more は入りきらなかった件数（最後のカードにだけ渡す）。
+ * 本文：番号 名前（所属）／受付：月/日 時:分（何日前）／状況（未対応・対応中（担当：○○））／要約／内容（200文字。機密・要注意は出さない）
+ * ボタン：受付のお知らせと同じ postback（合言葉が無い行はボタンなし）
+ */
+function INQ_remindBubble(c, i, now, more) {
+  var who = INQ_whoShort(c);
+  var state = c.state === INQ_STATE.doing ? INQ_STATE.doing + '（担当：' + (c.staff || '未設定') + '）' : c.state;
+  var body = [
+    { type: 'text', text: INQ_mark(i) + ' ' + who, weight: 'bold', wrap: true },
+    { type: 'text', text: '受付：' + (c.at ? INQ_mdhm_(c.at) + '（' + INQ_daysAgoLabel(c.at, now) + '）' : '不明'), size: 'xs', color: '#888888', wrap: true },
+    { type: 'text', text: '状況：' + state, size: 'sm', color: c.state === INQ_STATE.doing ? '#1a73e8' : '#cc0000', wrap: true },
+    { type: 'text', text: '要約：' + INQ_summary(c), size: 'sm', wrap: true },
+    { type: 'separator' },
+    { type: 'text', text: '内容：' + INQ_shownHead(c, INQ_caseSensitive(c), false), size: 'sm', wrap: true },
+  ];
+  if (more > 0) body.push({ type: 'separator' }, { type: 'text', text: INQ_MORE_CASES_TEXT.replace('{n}', more), size: 'xs', color: '#cc0000', wrap: true });
+  var bubble = { type: 'bubble', size: 'mega', body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: body } };
+  if (c.id && c.token) {
+    var btn = function (label, action, shown, style) {
+      return { type: 'button', style: style, height: 'sm',
+        action: { type: 'postback', label: label, data: INQ_postbackData(action, c.id, c.token), displayText: (shown + '（' + who + '）').slice(0, 300) } };
+    };
+    bubble.footer = { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('対応します', 'take', '対応します', 'primary'), btn('対応済みにする', 'done', '対応済みにします', 'secondary')] };
+  }
+  return bubble;
+}
+
+/**
+ * 純粋関数：まとめのカルーセル。0件なら null。
+ * 戻り値 { messages（Flex のカルーセル。最大5通）, ids（カードにした案件番号。カードの番号の順）, total, shown, more }
+ * 並びは文字のまとめと同じ（INQ_remindList）。1通10枚・5通＝50件まで。入りきらない分は最後のカードに「ほか○件は…」
+ */
+function INQ_remindCarousels(cases, now) {
+  var list = INQ_remindList(cases);
+  if (!list.length) return null;
+  var max = INQ_CAROUSEL_CARDS * INQ_CAROUSEL_MESSAGES, shown = list.slice(0, max), more = list.length - shown.length;
+  var alt = '【問い合わせ 未完了' + list.length + '件】' + INQ_mdhm_(now);
+  var bubbles = shown.map(function (c, i) { return INQ_remindBubble(c, i, now, i === shown.length - 1 ? more : 0); });
+  var messages = [];
+  for (var k = 0; k < bubbles.length; k += INQ_CAROUSEL_CARDS) {
+    messages.push({ type: 'flex', altText: alt, contents: { type: 'carousel', contents: bubbles.slice(k, k + INQ_CAROUSEL_CARDS) } });
+  }
+  return { messages: messages, ids: shown.map(function (c) { return c.id; }), total: list.length, shown: shown.length, more: more };
+}
+
 var INQ_DONE_HINT = '※対応済みのときは、公式LINEをメンションして「1.3対応済み」のように番号を送ってください。';
 function INQ_remindText(cases, now) {
   var list = INQ_remindList(cases);
   if (!list.length) return null;
-  var mark = function (i) { return i < 20 ? String.fromCharCode(0x2460 + i) : '(' + (i + 1) + ')'; };
+  var mark = INQ_mark;
   var head = '【問い合わせ 未完了' + list.length + '件】' + INQ_mdhm_(now);
   var body = list.map(function (c, i) { var l = INQ_caseLines(c, now); l[0] = mark(i) + ' ' + l[0]; return l.join('\n'); });
   var text = [head].concat(body).concat([INQ_DONE_HINT]).join('\n\n');
@@ -804,7 +876,7 @@ function INQ_pushMessages_(to, messages) {
  * 送り先へ送る。kind は INQ_targetPlan（省略時 'inquiry'）。従業員連絡グループに1つも届かなければ勤怠管理グループへ、
  * それも届かなければ、管理者の個別LINEへ文字だけで送る（予備の文は「勤怠管理グループへ送れなかった」を含むので朝のまとめに回らない）。届いた数を返す
  */
-function INQ_send_(messages, fallbackText, kind) {
+function INQ_send_(messages, fallbackText, kind, noAdminFallback) {
   var t = INQ_targets_(kind || 'inquiry'), sent = 0;
   var push = function (to) { try { if (INQ_pushMessages_(to, messages)) sent++; } catch (e) { Logger.log('問い合わせの通知の送信に失敗'); } };
   if (t.admin) { t.adminList.forEach(push); return sent; }
@@ -812,7 +884,7 @@ function INQ_send_(messages, fallbackText, kind) {
     if (i > 0) Logger.log('問い合わせの通知：%sグループへ送れなかったため、%sグループへ送ります', t.tiers[i - 1].dept, t.tiers[i].dept);
     t.tiers[i].list.forEach(push);
   }
-  if (!sent) {
+  if (!sent && !noAdminFallback) {   // 版 2026-11-20d：noAdminFallback（まとめのカルーセル）は、管理者へ送らず呼び出し側で文字の版を送る
     try { AC_pushLine_(fallbackText + '\n（' + (t.tiers.some(function (x) { return x.dept === INQ_NOTICE_DEPT; }) ? INQ_NOTICE_DEPT + 'グループ・' : '') + '勤怠管理グループへ送れなかったため、こちらへお知らせしました）'); sent++; } catch (e2) { Logger.log('管理者への送信にも失敗'); }
   }
   return sent;
@@ -1112,7 +1184,7 @@ function INQ_remind() {
   if (!remindDay) { Logger.log('問い合わせのまとめ：土日・祝日のため送らない（受付の速報はそのまま）'); return; }
   // 版 2026-11-13d：TOT反映の承認待ち（gas/TotSync.gs）。問い合わせとは別に、TOT_WRITE が record・on のときだけ
   try { if (typeof SCH_remindPart_ === 'function') sch = SCH_remindPart_(now); } catch (es) { INQ_fail_('リマインド（TOT反映）', es); }
-  var text = null, ids = null;
+  var text = null, ids = null, car = null;
   try {
     var mode = INQ_mode_();
     if (mode !== 'off') {
@@ -1121,28 +1193,33 @@ function INQ_remind() {
         .map(function (c) { c.who = INQ_caseWho(c); return c; });
       text = INQ_remindText(cases, now);
       ids = INQ_remindList(cases).map(function (c) { return c.id; });
-      if (text && mode !== 'on') { Logger.log('問い合わせのまとめ（記録のみのため送らない）：%s文字', text.length); text = null; }
+      car = INQ_remindCarousels(cases, now);   // 版 2026-11-20d
+      if (text && mode !== 'on') { Logger.log('問い合わせのまとめ（記録のみのため送らない）：%s件・カード %s枚・%s通', ids.length, car ? car.shown : 0, car ? car.messages.length : 0); text = null; car = null; }
     }
   } catch (err) { INQ_fail_('リマインド', err); }
   try {
-    // 版 2026-11-20b：従業員連絡グループがあれば、問い合わせのまとめはそちらへ、TOT反映の承認待ち・管理者へのお知らせは今までどおり勤怠管理グループへ分けて送る。
-    // 無ければ今までどおり1回の送信で勤怠管理グループへ
-    var split = INQ_targets_('inquiry').tiers.some(function (x) { return x.dept === INQ_NOTICE_DEPT; });
-    var inqText = text, admText = sch && sch.text ? sch.text : null;
-    if (!split && admText) { inqText = inqText ? (inqText + '\n\n' + admText).slice(0, 5000) : admText; admText = null; }
+    // 版 2026-11-20d：問い合わせのまとめはカルーセルで従業員連絡グループ（無ければ勤怠管理グループ）へ。送れなければ文字のまとめ。
+    // TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は、いつも別の送信で、文字のまま勤怠管理グループへ（版 2026-11-20b の分け方を、従業員連絡が無いときにも使う）
+    var admText = sch && sch.text ? sch.text : null;
     var digest = { texts: [], used: [] };
     if (Number(INQ_hm_(now).slice(0, 2)) < 12 && typeof AC_digestItems_ === 'function') {
       var items = AC_digestItems_().map(function (x) { x.label = INQ_mdhm_(x.at); return x; });
-      if (items.length) digest = AC_digestText(items, INQ_mdhm_(now), (split ? admText : inqText) ? 4 : 5);
+      if (items.length) digest = AC_digestText(items, INQ_mdhm_(now), admText ? 4 : 5);
     }
     var toMsgs = function (list) { return list.filter(Boolean).map(function (t) { return { type: 'text', text: t }; }); };
     var join = function (ms) { return ms.map(function (m) { return m.text; }).join('\n\n').slice(0, 4800); };
-    var inqMsgs = toMsgs([inqText].concat(split ? [] : digest.texts));
-    var admMsgs = split ? toMsgs([admText].concat(digest.texts)) : [];
-    var inqSent = inqMsgs.length ? INQ_send_(inqMsgs, join(inqMsgs), 'inquiry') : 0;
+    var inqSent = 0, savedIds = null;
+    if (car && car.messages.length) {
+      inqSent = INQ_send_(car.messages, '', 'inquiry', true);
+      if (inqSent) savedIds = car.ids;
+      else Logger.log('問い合わせのまとめ：カードを送れなかったため、文字のまとめを送ります（%s件）', car.total);
+      if (car.more) Logger.log('問い合わせのまとめ：%s件のうち %s件をカードにしました（ほか %s件はシートで確認）', car.total, car.shown, car.more);
+    }
+    if (!inqSent && text) { inqSent = INQ_send_([{ type: 'text', text: text }], text, 'inquiry'); if (inqSent) savedIds = ids; }
+    var admMsgs = toMsgs([admText].concat(digest.texts));
     var admSent = admMsgs.length ? INQ_send_(admMsgs, join(admMsgs), 'admin') : 0;
-    if (digest.used.length && (!digest.texts.length || (split ? admSent : inqSent))) AC_digestRemove_(digest.used);
-    if (inqSent && text && ids && ids.length) PropertiesService.getUserProperties().setProperty(INQ_LAST_REMIND_KEY, JSON.stringify({ at: now.toISOString(), label: INQ_mdhm_(now), ids: ids }));
+    if (digest.used.length && (!digest.texts.length || admSent)) AC_digestRemove_(digest.used);
+    if (inqSent && savedIds && savedIds.length) PropertiesService.getUserProperties().setProperty(INQ_LAST_REMIND_KEY, JSON.stringify({ at: now.toISOString(), label: INQ_mdhm_(now), ids: savedIds }));
     if (sch && sch.after) sch.after();
   } catch (err2) { INQ_fail_('リマインド', err2); }
 }
@@ -1369,9 +1446,10 @@ function INQ_remindPreview() {
   var cases = INQ_cases_(INQ_sheet_(INQ_book_(), INQ_SHEET_CASE, INQ_CASE_HEADER));
   var open = cases.filter(function (c) { return c.state === INQ_STATE.open; }).length;
   var doing = cases.filter(function (c) { return c.state === INQ_STATE.doing; }).length;
-  var text = INQ_remindText(cases, new Date());
+  var text = INQ_remindText(cases, new Date()), car = INQ_remindCarousels(cases, new Date());
   Logger.log('問い合わせのまとめ（確認だけ・送信なし。版 ' + INQ_VERSION + '・INQ_MODE=' + INQ_mode_() + '）：未完了 ' + (open + doing) + '件（未対応 ' + open
-    + '件・対応中 ' + doing + '件）／文字数 ' + (text ? text.length : 0) + '（上限 ' + INQ_TEXT_MAX + '）' + (text && /…ほか\d+件はシートで確認$/.test(text) ? '／途中で切ります' : ''));
+    + '件・対応中 ' + doing + '件）／カード ' + (car ? car.shown : 0) + '枚・' + (car ? car.messages.length : 0) + '通' + (car && car.more ? '（ほか ' + car.more + '件はシートで確認）' : '')
+    + '／文字の版（送れないとき）の文字数 ' + (text ? text.length : 0) + '（上限 ' + INQ_TEXT_MAX + '）' + (text && /…ほか\d+件はシートで確認$/.test(text) ? '／途中で切ります' : ''));
   return { count: open + doing, length: text ? text.length : 0 };
 }
 
@@ -1399,5 +1477,5 @@ if (typeof module !== 'undefined') {
     INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho,
     INQ_C: INQ_C, INQ_caseCols: INQ_caseCols, INQ_colsMessage: INQ_colsMessage, INQ_newCaseRow: INQ_newCaseRow, INQ_rowToCase: INQ_rowToCase,
     INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows,
-    INQ_joinHead: INQ_joinHead, INQ_isContinuation: INQ_isContinuation, INQ_targetPlan: INQ_targetPlan, INQ_staffGroups: INQ_staffGroups, INQ_NOTICE_DEPT: INQ_NOTICE_DEPT });
+    INQ_joinHead: INQ_joinHead, INQ_isContinuation: INQ_isContinuation, INQ_targetPlan: INQ_targetPlan, INQ_remindCarousels: INQ_remindCarousels, INQ_remindBubble: INQ_remindBubble, INQ_daysAgoLabel: INQ_daysAgoLabel, INQ_mark: INQ_mark, INQ_caseSensitive: INQ_caseSensitive, INQ_staffGroups: INQ_staffGroups, INQ_NOTICE_DEPT: INQ_NOTICE_DEPT });
 }

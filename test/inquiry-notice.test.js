@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
+import { cards, carousels } from './helpers/inquiry-cards.js';
 
 // 版 2026-11-20b：問い合わせのお知らせの内容（200文字・まとめは50文字・写真・スタンプ・ファイル・30分以内の続き）と、
 // 送り先「従業員連絡」グループ（未登録・退出なら勤怠管理グループ）。すべて架空データ・LINEへの送信なし
@@ -141,7 +142,12 @@ test('20b結合: 写真・ファイルの表示、30分以内の続きは1件に
   g.ctx.INQ_remind();
   p = since(g, n).push;
   assert.deepEqual(p.map((x) => x.body.to), [EMP]);
-  const text = p[0].body.messages[0].text;
+  // 版 2026-11-20d：まとめはカード（内容は200文字まで）。文字の版（送れないとき）は今までどおり50文字まで
+  const cs = cards(p);
+  assert.equal(cs[0].at(-1), '内容：「［写真2枚］／車のキズの件です。どうしたらよいですか」');
+  assert.equal(cs[1].at(-1), '内容：「［ファイル（架空の申請書.pdf）］／' + 'お'.repeat(60) + '」');
+  const cases = g.ctx.INQ_cases_(book.getSheetByName('問い合わせ'));
+  const text = g.ctx.INQ_remindText(cases, new Date(g.clock.now));
   assert.match(text, /内容：「［写真2枚］／車のキズの件です。どうしたらよいですか」/);
   const fileLine = text.split('\n').find((l) => l.startsWith('内容：「［ファイル'));
   assert.equal(fileLine, '内容：「' + [...('［ファイル（架空の申請書.pdf）］／' + 'お'.repeat(60))].slice(0, 50).join('') + '…」');
@@ -177,11 +183,12 @@ test('20b結合: 機密・要注意は内容を出さない（続きで要注意
   g.clock.now = new Date('2026-11-24T15:00:00+09:00').getTime();
   n = g.fetches.length;
   g.ctx.INQ_remind();
-  const text = since(g, n).push[0].body.messages[0].text;
+  const text = JSON.stringify(since(g, n).push.map((x) => x.body));
   assert.ok(!text.includes('病院'), text);
   assert.ok(!text.includes('パワハラ'));
   assert.ok(!text.includes('暗証番号'));
-  assert.match(text, /氏名不明（ごろう）\n状況：[^\n]+\n要約：⚠健康・体調\n内容：（内容はチャットで確認してください）/);
+  const card = cards(since(g, n).push).find((c) => c[0].includes('氏名不明（ごろう）'));
+  assert.deepEqual(card.slice(3), ['要約：⚠健康・体調', '内容：（内容はチャットで確認してください）']);
 });
 
 test('20b結合: 従業員連絡が未登録・退出なら勤怠管理グループへ（受付・まとめ）', () => {
@@ -262,7 +269,7 @@ test('20b結合: 管理者へのお知らせ（朝のまとめ）・飲酒検知
   g.ctx.INQ_remind();
   const p = since(g, n).push;
   assert.deepEqual(p.map((x) => x.body.to), [EMP, KANRI]);                   // 問い合わせのまとめ → 従業員連絡、管理者へのお知らせ → 勤怠管理
-  assert.match(p[0].body.messages[0].text, /^【問い合わせ 未完了1件】/);
+  assert.equal(p[0].body.messages[0].altText, '【問い合わせ 未完了1件】11/24 9:00');   // 版 2026-11-20d：カルーセル
   assert.equal(p[0].body.messages.length, 1);
   assert.match(p[1].body.messages[0].text, /^【管理本部へのお知らせ】[\s\S]*有給の年5日/);
   const dest = JSON.parse(JSON.stringify(g.ctx.AC_alertDestinations_(g.scriptProps)));

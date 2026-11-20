@@ -97,7 +97,7 @@ test('事務の業務一覧: 毎朝の送信（事務業務のグループ・ボ
   const car = p[0].body.messages[0].contents;
   assert.match(car.contents[0].body.contents.map((c) => c.text || '').join('\n'), /管理本部のみなさん、今日のお仕事です[\s\S]*対応します[\s\S]*残りの業務[\s\S]*12時/);
   assert.equal(car.contents[1].body.contents[0].text, '1. 朝の確認');
-  assert.deepEqual(car.contents[1].footer.contents.map((b) => b.action.label), ['完了', '対応します', 'わからない', '今日はできない']);
+  assert.deepEqual(car.contents[1].footer.contents.map((b) => b.action.label), ['完了', '対応します', '詳細を確認', '今日はできない']);
   assert.match(book.getSheetByName('送る予定の内容').dump()[1][5], /朝の確認/);
   const r = setup({ OFFICE_TASK_MODE: 'record' });
   n = r.g.fetches.length; r.g.ctx.OT_morning();
@@ -150,22 +150,31 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));
   const rp = replies(g, n)[0].body.messages;
-  assert.match(rp[0].text, /試験さん、ありがとうございます！「朝の確認」を完了にしました/);
-  assert.ok(!/次は「社労士へ送る」/.test(rp[0].text));                                       // 見本さんが担当の仕事は次に勧めない
-  const undo = rp[1].contents.body.contents[0].action.data;
+  assert.match(rp[0].text, /試験さん、ありがとうございます！「朝の確認」を完了にしました[\s\S]*「取り消し 朝の確認」と送って/);
+  assert.ok(!/次は/.test(rp[0].text));                                                     // 版 20a：次の仕事は勧めない
+  assert.match(rp[1].text, /【まだ終わっていないお仕事】/); assert.equal(rp[2].type, 'flex');   // 「残りの業務」と同じ一覧
+  assert.ok(!JSON.stringify(rp).includes('取り消す'));                                       // 取り消しのボタンは出さない
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));                                      // 同じイベントは1回だけ
   n = g.fetches.length;
   post(g, pb(OTHER, btnData(first, '完了'), 'e4'));                                      // 2回目の完了
   assert.match(replies(g, n)[0].body.messages[0].text, /試験さんが完了にしています/);
   n = g.fetches.length;
-  post(g, pb(OTHER, undo, 'e5'));                                                        // 取り消しは完了にした人か管理者だけ
+  post(g, msg(OTHER, '取り消し', 'e5a'));                                                  // 言葉なし → 今日の完了の一覧と使い方
+  assert.match(replies(g, n)[0].body.messages[0].text, /今日完了にしたお仕事：\n・朝の確認（試験さん）[\s\S]*「取り消し 領収書」のように/);
+  n = g.fetches.length;
+  post(g, msg(OTHER, '取り消し 朝の確認', 'e5'));                                          // 取り消しは完了にした人か管理者だけ
   assert.match(replies(g, n)[0].body.messages[0].text, /取り消せるのは、完了にした試験さんと管理者だけ/);
   n = g.fetches.length;
-  post(g, pb(ADMIN, undo, 'e6'));
-  assert.match(replies(g, n)[0].body.messages[0].text, /完了を取り消しました/);
+  post(g, msg(STAFF, '取り消し 社労士', 'e5b'));                                          // 完了していないもの
+  assert.match(replies(g, n)[0].body.messages[0].text, /見つかりませんでした/);
   n = g.fetches.length;
-  post(g, pb(STAFF, btnData(car[3], 'わからない'), 'e7'));
-  assert.match(replies(g, n)[0].body.messages[0].text, /困ったとき：安藤さんへ[\s\S]*安藤さん、確認をお願いします/);
+  post(g, msg(ADMIN, '取り消し「朝の確認」', 'e6'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /「朝の確認」の完了を取り消しました/);
+  n = g.fetches.length;
+  post(g, pb(STAFF, btnData(car[3], '詳細を確認'), 'e7'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /の詳細[\s\S]*困ったとき・判断が必要なとき\n安藤さんへ/);
+  assert.ok(!JSON.stringify(car[3].body).includes('困ったら：'));                            // 吹き出しには出さない
+  post(g, pb(STAFF, btnData(car[3], '詳細を確認').replace('|detail|', '|ask|'), 'e7b'));   // 前のボタン（わからない）も動く
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(car[3], '今日はできない'), 'e8'));
   assert.match(replies(g, n)[0].body.messages[0].text, /明日に回します/);

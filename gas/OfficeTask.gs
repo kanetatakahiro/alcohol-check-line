@@ -1,5 +1,5 @@
 /**
- * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-19a：［手が空きました］で今日の残りと前倒しをまとめて送る）
+ * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-20a：ボタンは完了・対応します・詳細を確認・今日はできない／完了のあとは残りの一覧／取り消しは文で）
  *
  * 平日（土日祝・休みの日を除く）の毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、
  * 管理本部みんなの「今日のお仕事」をボタン付きで送る。特定の人に固定しない（だれが担当してもよい）。
@@ -19,7 +19,7 @@
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
  * 毎朝・10分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-19a';
+var OT_VERSION = '2026-11-20a';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
 var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
 var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
@@ -41,7 +41,7 @@ var OT_EARLY_DAYS = 7;             // 期間の始まる何日前から前倒し
 var OT_OVERDUE_DAYS = 7;           // 期限を過ぎて何日まで残りとして出すか
 var OT_REMIND_MIN = 12 * 60;        // 残りのお仕事のお知らせ（12:00）
 var OT_MAX_BUBBLES = 11;           // カルーセルは12枚まで（1枚目はまとめ）
-var OT_ACTIONS = { done: '完了', claim: '対応します', ask: 'わからない', skip: '今日はできない', free: '手が空きました', undo: '取り消し' };
+var OT_ACTIONS = { done: '完了', claim: '対応します', ask: 'わからない', skip: '今日はできない', free: '手が空きました', undo: '取り消し', detail: '詳細を確認' };
 
 // ======================================================================
 // 純粋関数（テストで確かめる）
@@ -231,14 +231,11 @@ function OT_bubble(it, no, date, token, owner) {
   if (it.memo) body.push({ type: 'text', text: '📝 ' + it.memo, size: 'sm', wrap: true });
   body.push({ type: 'separator' });
   body = body.concat(OT_textParts('', it.steps, 'sm'))
-    .concat(OT_textParts('持ち物・使うもの：', it.items, 'xs', '#555555'))
-    .concat(OT_textParts('💡 ', it.tips, 'xs', '#555555'))
-    .concat(OT_textParts('困ったら：', it.help, 'xs', '#555555'))
-    .concat(OT_textParts('終わったら：', it.report, 'xs', '#555555'));
+    .concat(OT_textParts('持ち物・使うもの：', it.items, 'xs', '#555555'));   // 版 2026-11-20a：コツ・困ったとき・終わったらは［詳細を確認］で返す（縦に長くなりすぎるため）
   return { type: 'bubble', size: 'mega',
     body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: body },
     footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('完了', 'done', 'primary'), btn('対応します', 'claim', 'secondary'),
-      btn('わからない', 'ask', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
+      btn('詳細を確認', 'detail', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
 }
 
 /**
@@ -339,6 +336,27 @@ function OT_checkSetting(setting, props) {
 function OT_cell(v) {
   if (v instanceof Date || (v && typeof v.getTime === 'function' && typeof v.toISOString === 'function')) return new Date(v.getTime() + 9 * 3600000).toISOString().slice(0, 10);
   return String(v == null ? '' : v).replace(/^'/, '').trim();
+}
+
+/** 純粋関数（版 2026-11-20a）：［詳細を確認］の返信の文（コツ・困ったとき・終わったら・メモ） */
+function OT_detailText(name, t, memo) {
+  t = t || {};
+  var parts = ['【' + name + '】の詳細'];
+  if (memo) parts.push('📝 メモ\n' + memo);
+  if (t.tips) parts.push('💡 コツ・注意\n' + t.tips);
+  if (t.help) parts.push('🙋 困ったとき・判断が必要なとき\n' + t.help);
+  if (t.report) parts.push('✅ 終わったら\n' + t.report);
+  if (parts.length === 1) parts.push('このお仕事には、コツ・困ったときの書き込みがまだありません。');
+  parts.push('それでも分からないときは、手を止めてこのグループで聞いてください。');
+  return parts.join('\n\n');
+}
+
+/** 純粋関数（版 2026-11-20a）：「取り消し 領収書」のような文か。探す言葉（空＝一覧を返す）か、当てはまらなければ null */
+function OT_parseUndo(text) {
+  var t = String(text || '').trim();
+  if (t.length > 40) return null;
+  var m = /^(?:完了の)?取り?消し(?:て|たい|します|お願いします)?[\s　:：]*(.*)$/.exec(t);
+  return m ? m[1].replace(/^[「『]|[」』]$/g, '').replace(/(を|の完了を?)?(取り?消し.*)?$/, '').trim() : null;
 }
 
 /** 純粋関数：未完了の一覧の文 */
@@ -563,7 +581,10 @@ function OT_onGroupMessage_(ev) {
   try {
     if (OT_mode_() !== 'on' || !ev || ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return false;
     var gid = ev.source && ev.source.groupId;
-    if (!gid || OT_groups_().indexOf(gid) === -1 || !OT_isRemainingQuery(ev.message.text)) return false;
+    if (!gid || OT_groups_().indexOf(gid) === -1) return false;
+    var undoWord = OT_parseUndo(ev.message.text);
+    if (undoWord !== null) { OT_undoByText_(ev, gid, undoWord); return true; }
+    if (!OT_isRemainingQuery(ev.message.text)) return false;
     var today = AC_today_(), ss = OT_book_(), info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues());
     var left = OT_remaining_(ss, today, info);
     if (left === null) {   // 土日祝・朝のお知らせの前：今日の一覧をその場で作って返信する
@@ -571,15 +592,46 @@ function OT_onGroupMessage_(ev) {
       OT_reply_(ev.replyToken, b.plan.today.length ? b.msgs : [OT_text_('今日のお仕事はありません😊')]);
       return true;
     }
-    var msgs = [OT_text_(OT_remainingText(left, info.owner, today))];
-    if (left.length) {
-      var token = OT_dayToken_(today, false);
-      msgs.push({ type: 'flex', altText: 'まだ終わっていないお仕事 ' + left.length + '件',
-        contents: { type: 'carousel', contents: left.slice(0, 12).map(function (it, i) { return OT_bubble(it, i + 1, today, token, info.owner[it.id + '|' + it.period]); }) } });
-    }
-    OT_reply_(ev.replyToken, msgs);
+    OT_reply_(ev.replyToken, OT_remainingMessages_(left, info, today));
     return true;
   } catch (e) { Logger.log('事務の業務一覧（残りの業務）の処理エラー：%s', e && e.message); return false; }
+}
+
+/** 未完了の一覧の返信（文＋ボタン付きの吹き出し）。「残りの業務」と［完了］のあとで同じ形 */
+function OT_remainingMessages_(left, info, today) {
+  var msgs = [OT_text_(OT_remainingText(left, info.owner, today))];
+  if (left.length) {
+    var token = OT_dayToken_(today, false);
+    msgs.push({ type: 'flex', altText: 'まだ終わっていないお仕事 ' + left.length + '件',
+      contents: { type: 'carousel', contents: left.slice(0, 12).map(function (it, i) { return OT_bubble(it, i + 1, today, token, info.owner[it.id + '|' + it.period]); }) } });
+  }
+  return msgs;
+}
+
+/** 版 2026-11-20a：「取り消し 領収書」で今日の完了を取り消す（ボタンをやめた代わり。完了にした人と管理者だけ） */
+function OT_undoByText_(ev, gid, word) {
+  var uid = ev.source && ev.source.userId, who = OT_who_(gid, uid, OT_master_()), admin = OT_props_().getProperty('LINE_ADMIN_USER_ID');
+  if (!who) { OT_reply_(ev.replyToken, [OT_text_('送った方を確認できなかったため、受け付けできませんでした。')]); return; }
+  var today = AC_today_(), ss = OT_book_(), logSh = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER), rows = logSh.getDataRange().getValues(), info = OT_doneFromLog(rows);
+  var seen = {}, list = [];
+  rows.slice(1).forEach(function (r) {
+    var key = OT_cell(r[3]) + '|' + OT_cell(r[2]);
+    if (OT_cell(r[1]) === today && OT_cell(r[5]) === OT_ACTIONS.done && info.done[key] && !seen[key]) { seen[key] = true; list.push({ key: key, id: OT_cell(r[3]), period: OT_cell(r[2]), name: OT_cell(r[4]) }); }
+  });
+  var hit = word ? list.filter(function (x) { return x.name.indexOf(word) !== -1 || x.id === word; }) : [];
+  var usage = '取り消すときは「取り消し 領収書」のように、お仕事の名前（一部でよい）をつけて送ってください。';
+  if (!word || hit.length !== 1) {
+    var names = list.map(function (x) { return '・' + x.name + '（' + info.doneBy[x.key].name + 'さん）'; }).join('\n');
+    OT_reply_(ev.replyToken, [OT_text_((word ? (hit.length ? '「' + word + '」に当てはまるお仕事が' + hit.length + '件あります。もう少しくわしく書いてください。' : '「' + word + '」に当てはまる今日の完了は見つかりませんでした。') + '\n\n' : '')
+      + (list.length ? '今日完了にしたお仕事：\n' + names + '\n\n' + usage : '今日完了にしたお仕事はありません。'))]);
+    return;
+  }
+  var x = hit[0], by = info.doneBy[x.key];
+  if (by.uid !== uid && uid !== admin) { OT_reply_(ev.replyToken, [OT_text_('取り消せるのは、完了にした' + by.name + 'さんと管理者だけです。')]); return; }
+  logSh.appendRow([new Date(), "'" + today, "'" + x.period, "'" + x.id, x.name, OT_ACTIONS.undo, who, '文で取り消し', uid]);
+  var req = /^R\d+$/.test(x.period) ? Number(x.period.slice(1)) : 0;
+  if (req) OT_sheet_(ss, OT_REQUEST_SHEET, OT_REQUEST_HEADER).getRange(req, 6).setValue('');
+  OT_reply_(ev.replyToken, [OT_text_('「' + x.name + '」の完了を取り消しました。まだ終わっていないお仕事に戻しています。')]);
 }
 
 /** ボタン（事務業務のグループ）。コード.gs の AC_handleGroupEvent_ から呼ぶ */
@@ -595,15 +647,13 @@ function OT_onGroupPostback_(ev) {
     var master = OT_master_(), who = OT_who_(gid, uid, master), admin = OT_props_().getProperty('LINE_ADMIN_USER_ID');
     if (!who) { OT_reply_(ev.replyToken, [OT_text_('押した方を確認できなかったため、受け付けできませんでした。スマートフォンのLINEから押してください。')]); return; }
     if (!p.token || p.token !== OT_dayToken_(p.date, false)) { OT_reply_(ev.replyToken, [OT_text_('このボタンは使えません。今日のお知らせのボタン（または「残りの業務」と送って出るボタン）を押してください。')]); return; }
-    if (p.date !== AC_today_() && p.action !== 'undo') { OT_reply_(ev.replyToken, [OT_text_('このボタンは前の日のものです。「残りの業務」と送って、今日のボタンから押してください。')]); return; }
+    if (p.date !== AC_today_() && p.action !== 'undo' && p.action !== 'detail') { OT_reply_(ev.replyToken, [OT_text_('このボタンは前の日のものです。「残りの業務」と送って、今日のボタンから押してください。')]); return; }
     var ss = OT_book_(), tasks = OT_tasks_(ss), task = tasks.filter(function (t) { return t.id === p.id; })[0];
     var reqs = OT_requests_(ss), req = /^R\d+$/.test(p.period) ? reqs.filter(function (q) { return 'R' + q.row === p.period; })[0] : null;
     var name = req && req.name ? req.name : task ? task.name : p.id;
     var logSh = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER), now = new Date(), key = p.id + '|' + p.period;
     var log = function (op, memo) { logSh.appendRow([now, "'" + p.date, "'" + p.period, "'" + p.id, name, op, who, memo || '', uid]); };
     var plan = OT_planOf_(p.date) || { ids: [], extra: [] }, info = OT_doneFromLog(logSh.getDataRange().getValues());
-    var undoBtn = { type: 'flex', altText: '取り消す', contents: { type: 'bubble', size: 'micro', body: { type: 'box', layout: 'vertical', contents: [
-      { type: 'button', style: 'secondary', height: 'sm', action: { type: 'postback', label: '間違えたので取り消す', data: ['ot', '1', 'undo', p.date, p.id, p.period, p.token].join('|'), displayText: '取り消す：' + name } }] } } };
     if (p.action === 'free') {   // 版 2026-11-19a：今日まだ担当がいないお仕事と、前倒しできるお仕事をまとめて送る（押した人を担当にはしない。やるものの［対応します］を押してもらう）
       var free = OT_freeItems(OT_remaining_(ss, p.date, info) || [], info.owner, plan, info.done, tasks, p.date);
       log(OT_ACTIONS.free, '今日の残り ' + free.today.length + '件・前倒し ' + free.early.length + '件');
@@ -614,14 +664,20 @@ function OT_onGroupPostback_(ev) {
       OT_reply_(ev.replyToken, OT_freeMessages(free, who, p.date, p.token));
       return;
     }
+    if (p.action === 'detail') {   // 版 2026-11-20a：コツ・困ったとき・終わったらを返す（記録はしない）
+      OT_reply_(ev.replyToken, [OT_text_(OT_detailText(name, task, req ? req.memo : ''))]);
+      return;
+    }
     if (p.action === 'done') {
       if (info.done[key]) { OT_reply_(ev.replyToken, [OT_text_('「' + name + '」は' + info.doneBy[key].name + 'さんが完了にしています。')]); return; }
       log(OT_ACTIONS.done);
       if (req) OT_sheet_(ss, OT_REQUEST_SHEET, OT_REQUEST_HEADER).getRange(req.row, 6).setValue('完了');
       info.done[key] = true;
-      var rest = (OT_remaining_(ss, p.date, info) || []).filter(function (it) { var o = info.owner[it.id + '|' + it.period]; return !o || o === who; });
+      info.doneBy[key] = { name: who, uid: uid };
+      var rest = OT_remaining_(ss, p.date, info) || [];   // 版 2026-11-20a：「次は〜」はやめ、「残りの業務」と同じ一覧を返す。取り消しのボタンもやめた（文で取り消す）
       OT_reply_(ev.replyToken, [OT_text_(who + 'さん、ありがとうございます！「' + name + '」を完了にしました✨'
-        + (rest.length ? '\n次は「' + rest[0].name + '」をお願いします。' : '\n今日のお仕事はすべて完了です。手が空いたら［手が空きました］を押してください。')), undoBtn]);
+        + (rest.length ? '' : '\n今日のお仕事はすべて完了です。手が空いたら［手が空きました］を押してください。')
+        + '\n（間違えて押したときは「取り消し ' + name.slice(0, 10) + '」と送ってください）')].concat(rest.length ? OT_remainingMessages_(rest, info, p.date) : []));
       return;
     }
     if (p.action === 'undo') {

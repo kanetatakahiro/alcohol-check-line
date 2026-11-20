@@ -1,5 +1,16 @@
 # 変更履歴
 
+## 2026-11-20 版 2026-11-20e：まとめの時刻 9時・12時（本番の変更の取り込み）と、朝のまとめの判定（gas/Inquiry.gs・ブランチ feature/inquiry-carousel・**本番未導入**）
+- 本番で INQ_REMIND_HOURS を [9, 15] → [9, 12] に変更（11/20 14:39 に INQ_setupRemindTriggers を実行済み・安藤さん）。同じ1行（コメントつき）を入れ、指紋が本番と同じ `b253c944da497fa9` になることを確かめてからコミットした（dfafb27）
+- 12時の回の確認：管理者へのお知らせ（ADMIN_NOTIFY=digest の朝のまとめ）を付ける判定は「時が12より前」だった。トリガーの nearMinute(0) は前後15分ずれるため、12時の回が 11:45〜11:59 に動くと付いてしまう → 「10:30 より前」に直した（INQ_isDigestRun・INQ_DIGEST_BEFORE。9時の回は 8:45〜9:15、12時の回は 11:45〜12:15 で、どちらにもかからない）
+- コメントの「9:00・15:00」「15時台」を「9:00・12:00」「12時台」に。SPEC.md・docs/inquiry/SPEC.md・docs/MESSAGES_INVENTORY.md・docs/ATTENDANCE_NOTICE_RULES.md の問い合わせのまとめの時刻も直した
+- **見つかったこと（このブランチでは変えていない）**：
+  - TOT反映の前日の再通知（A-50）は gas/TotSync.gs の SCH_RESEND_HOUR=15（まとめの15時台の回だけ）で送るため、11/20 14:39 から本番で送られていない。直すには SCH_RESEND_HOUR を 12 にする（TotSync.gs の変更）などが要る
+  - 「部門登録 従業員連絡」の返信（A-29）の文が「9時・15時の未対応のまとめ」のまま（コード.gs の中の文。直すにはコード.gs の変更と Webアプリの再公開が要る）
+- gas/Inquiry.gs（本番 `b253c944da497fa9` → `fa34e7d25fd986c3`・INQ_VERSION 2026-11-20e）。コード.gs（`6642b4a35669bf2f`）・TotSync.gs は変わらず
+- Webアプリの再公開は要らない（まとめは時刻のトリガーで動く）。トリガーは本番で 9時台・12時台に作り直し済みのため、INQ_setupRemindTriggers をもう一度実行する必要もない
+- テスト：まとめのトリガーのテストの時刻を 9・12 に直した。12時の回（11:50 に動いた場合も）に管理者へのお知らせを付けず、翌朝の9時の回（8:50）で送るテストを足した（test/inquiry-carousel.test.js 7件）。全422件成功
+
 ## 2026-11-20 版 2026-11-20d：問い合わせのまとめを1件1枚のカード（カルーセル）に（gas/Inquiry.gs・ブランチ feature/inquiry-carousel・**本番未導入**）
 - 作業の前に、コード.gs `6642b4a35669bf2f`・Inquiry.gs `d45ed35d823e5b68` が本番（fix/alerts-lock a05fe4a）と同じであることを確かめた
 - 9:00／15:00 のまとめ（A-36・INQ_remind）を、未完了（未対応・対応中）の案件の1件1枚のカードにしたカルーセル（Flex Message）で送る（INQ_remindCarousels・INQ_remindBubble）。並びは今の文字のまとめと同じ（未対応が先・受付の古い順）。見た目は事務の業務一覧のカード（bubble の mega・本文の下にボタン）に合わせた

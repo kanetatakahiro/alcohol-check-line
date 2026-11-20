@@ -213,3 +213,27 @@ test('20d結合: カルーセルを送れないときは文字のまとめ（「
   assert.deepEqual(q.map((x) => x.body.to), [EMP, KANRI, EMP, KANRI, ADMIN]);   // カード → 文字 → 管理者
   assert.match(q[4].body.messages[0].text, /^【問い合わせ 未完了1件】[\s\S]*（従業員連絡グループ・勤怠管理グループへ送れなかったため、こちらへお知らせしました）$/);
 });
+
+test('20e: まとめは9時・12時。管理者へのお知らせ（朝のまとめ）は9時の回だけ（12時の回がトリガーのずれで 11:45〜11:59 に動いても付けない）', () => {
+  const { g } = setup({ props: { ADMIN_NOTIFY: 'digest' }, now: '2026-11-20T08:00:00+09:00' });
+  const X = g.ctx;
+  assert.deepEqual([...X.INQ_REMIND_HOURS], [9, 12]);
+  // 判定：9時の回（8:45〜9:15）は付ける、12時の回（11:45〜12:15）は付けない
+  for (const hm of ['08:45', '09:00', '09:15', '10:29']) assert.equal(X.INQ_isDigestRun(hm), true, hm);
+  for (const hm of ['10:30', '11:45', '11:59', '12:00', '12:15', '15:00']) assert.equal(X.INQ_isDigestRun(hm), false, hm);
+  // 結合：12時の回がずれて 11:50 に動いても、管理者へのお知らせは送らず翌朝に回す
+  post(g, userMsg(U(1), '相談です'));
+  X.AC_pushLine_('【有給の年5日】テスト');                                     // 朝のまとめにためる（digest）
+  g.clock.now = at('2026-11-20T11:50:00+09:00').getTime();
+  let n = g.fetches.length;
+  X.INQ_remind();
+  let p = since(g, n).push;
+  assert.deepEqual(p.map((x) => x.body.to), [EMP]);                        // 問い合わせのカードだけ
+  assert.ok(!JSON.stringify(p).includes('管理本部へのお知らせ'));
+  g.clock.now = at('2026-11-21T08:50:00+09:00').getTime();                  // 翌朝（9時の回が 8:50 に動いた）
+  n = g.fetches.length;
+  X.INQ_remind();
+  p = since(g, n).push;
+  assert.deepEqual(p.map((x) => x.body.to), [EMP, KANRI]);
+  assert.match(p[1].body.messages[0].text, /^【管理本部へのお知らせ】[\s\S]*有給の年5日/);
+});

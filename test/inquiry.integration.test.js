@@ -311,12 +311,12 @@ test('INQ結合: グループの部門登録・普段の会話・社員管理AI�
   assert.equal(book.getSheetByName('問い合わせ'), null);
 });
 
-test('INQ結合: まとめのトリガーは9時台・15時台の2つ（何度作っても増えない・既存のトリガーには触れない）', () => {
+test('INQ結合: まとめのトリガーは9時台・12時台の2つ（2026-11-20 に 15時台 → 12時台）（何度作っても増えない・既存のトリガーには触れない）', () => {
   const { g } = setup();
   g.ctx.ScriptApp.newTrigger('alcoholCheckMorning').timeBased().atHour(8).create();
   g.ctx.ScriptApp.newTrigger('INQ_remind').timeBased().atHour(17).create();                   // 以前の17時のトリガーがあっても
   g.ctx.INQ_setupRemindTriggers(); g.ctx.INQ_setupRemindTriggers(); g.ctx.INQ_setupTriggers();
-  assert.deepEqual(g.triggers.map((t) => [t.fn, t.at]), [['alcoholCheckMorning', 8], ['INQ_remind', 9], ['INQ_remind', 15]]);
+  assert.deepEqual(g.triggers.map((t) => [t.fn, t.at]), [['alcoholCheckMorning', 8], ['INQ_remind', 9], ['INQ_remind', 12]]);
   g.ctx.INQ_removeRemindTriggers();
   assert.deepEqual(g.triggers.map((t) => t.fn), ['alcoholCheckMorning']);
 });

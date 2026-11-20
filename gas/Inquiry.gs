@@ -3,7 +3,7 @@
  *
  * 従業員が公式LINEに1対1で送った「社員番号以外」のメッセージを、問い合わせとして受け付け、
  * 問い合わせ専用のスプレッドシートに記録し、従業員連絡グループ（未登録なら勤怠管理グループ）へ知らせる（ボタン：対応します／対応済みにする）。
- * 9:00・15:00 に未対応・対応中の案件をまとめて知らせる（INQ_remind・時刻指定のトリガー。INQ_setupRemindTriggers で登録）。
+ * 9:00・12:00（2026-11-20 から。前は 9:00・15:00）に未対応・対応中の案件をまとめて知らせる（INQ_remind・時刻指定のトリガー。INQ_setupRemindTriggers で登録）。
  * 勤怠管理グループへのお知らせには案件番号を出さない（名前・所属・状況・要約・内容）。ボタンの中身には案件番号と合言葉が入る（表示されない）。
  *
  * 既存の「コード.gs」からの呼び出しは3か所だけ：
@@ -37,14 +37,14 @@
  *  新しい受付と、対応中の案件への追記が対象。未対応の案件への追記（質問のあとの「よろしくお願いします」など）と、要注意（⚠）の分類は閉じない。
  *  案件の無い人のスタンプは今までどおり定型連絡（案件にしない）。
  *
- * 送り先（版 2026-11-20b）：受付のお知らせ・追記のお知らせ・9:00／15:00 のまとめは「従業員連絡」グループ（「LINEグループ」タブで部門「従業員連絡」・状態「有効」。
+ * 送り先（版 2026-11-20b）：受付のお知らせ・追記のお知らせ・9:00／12:00 のまとめは「従業員連絡」グループ（「LINEグループ」タブで部門「従業員連絡」・状態「有効」。
  *  グループで「部門登録 従業員連絡」）へ。未登録・退出・送信失敗なら勤怠管理グループ、それも無理なら管理者の個別LINE。
  *  TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は今までどおり勤怠管理グループ。ボタン・「1.3対応済み」はどちらのグループでも使える。
  *
  * 内容の表示（版 2026-11-20b）：受付のお知らせは200文字まで（超えたら「…（続きはチャットで）」）、まとめは1件50文字まで。
  *  写真・動画・スタンプ・ファイルは「［写真1枚］」「［スタンプ］」「［ファイル（名前）］」の形。30分以内に続けて届いた分は「／」でつないで「内容（冒頭）」へ（200文字まで）。
  *
- * まとめのカード（版 2026-11-20d）：9:00／15:00 のまとめは、未完了の案件を1件1枚のカード（番号・名前（所属）・受付日時と何日前・状況・要約・内容200文字・
+ * まとめのカード（版 2026-11-20d）：9:00／12:00 のまとめは、未完了の案件を1件1枚のカード（番号・名前（所属）・受付日時と何日前・状況・要約・内容200文字・
  *  ［対応します］［対応済みにする］）にしたカルーセル（1通10枚・1回の送信で5通＝50件まで。入りきらない分は最後のカードに「ほか○件は…」）。
  *  ボタンは受付のお知らせと同じ postback（INQ_button_）。カルーセルを送れなければ、今までの文字のまとめ（INQ_remindText）を送る。
  *  TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は、いつも別の送信で、文字のまま勤怠管理グループへ。
@@ -53,7 +53,8 @@
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-20d';   // 版 2026-11-20d：9:00／15:00 のまとめを、1件1枚のカード（ボタン付き）のカルーセルで送る（送れなければ今までの文字のまとめ）
+var INQ_VERSION = '2026-11-20e';   // 版 2026-11-20e：まとめは 9:00／12:00（本番 11/20 14:39 から）。管理者へのお知らせを付けるのは 10:30 より前の回（9時の回）だけ
+var INQ_VERSION_20D = '2026-11-20d';   // 版 2026-11-20d：9:00／12:00 のまとめを、1件1枚のカード（ボタン付き）のカルーセルで送る（送れなければ今までの文字のまとめ）
 var INQ_VERSION_20B = '2026-11-20b';   // 版 2026-11-20b：通知の内容を200文字（まとめは50文字）・写真・スタンプ・ファイルの表示・30分以内の続きの内容をつなぐ・送り先を「従業員連絡」グループへ
 var INQ_VERSION_17E = '2026-11-17e';   // 版 2026-11-17e：まとめの番号で「1.3対応済み」、土日祝はまとめを送らない（INQ_REMIND_DAYS=weekdays）、管理者へのお知らせを朝のまとめに
 var INQ_VERSION_16A = '2026-11-16a';   // 版 2026-11-16a：まとめの「何日前から」、返信が要らないLINEの自動の対応済み、本人への案内の最後のAIの一文
@@ -1169,8 +1170,13 @@ function INQ_button_(ev, p, uid, name) {
   if (reply) AC_reply_(ev.replyToken, reply);
 }
 
-// ---- 時刻指定：まとめのお知らせ（9:00・15:00・土日も。INQ_REMIND_DAYS=weekdays なら土日・祝日は送らない） ----
-// 版 2026-11-17e：平日の朝（12時より前）の回に、管理者へのお知らせ（ADMIN_NOTIFY=digest でためた分）を同じ送信でまとめて送る
+// ---- 時刻指定：まとめのお知らせ（9:00・12:00・土日も。INQ_REMIND_DAYS=weekdays なら土日・祝日は送らない） ----
+// 版 2026-11-17e：平日の朝の回に、管理者へのお知らせ（ADMIN_NOTIFY=digest でためた分）をまとめて送る。
+// 版 2026-11-20e：まとめが 9時・12時になったため、朝の回の判定を「12時より前」→「10:30 より前」に（INQ_isDigestRun）。
+//  トリガーの nearMinute(0) は前後15分ずれる（9時の回は 8:45〜9:15、12時の回は 11:45〜12:15）ので、どちらにもかからないまん中で分ける
+var INQ_DIGEST_BEFORE = '10:30';
+/** 純粋関数（版 2026-11-20e）：管理者へのお知らせ（朝のまとめ）を付ける回か（日本時間の「時:分」が 10:30 より前） */
+function INQ_isDigestRun(hm) { return String(hm || '') < INQ_DIGEST_BEFORE; }
 function INQ_isRemindDay_(now) {
   if (String(INQ_props_().getProperty('INQ_REMIND_DAYS') || 'all').trim() !== 'weekdays') return true;
   var ymd = INQ_ymd_(now);
@@ -1202,7 +1208,7 @@ function INQ_remind() {
     // TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は、いつも別の送信で、文字のまま勤怠管理グループへ（版 2026-11-20b の分け方を、従業員連絡が無いときにも使う）
     var admText = sch && sch.text ? sch.text : null;
     var digest = { texts: [], used: [] };
-    if (Number(INQ_hm_(now).slice(0, 2)) < 12 && typeof AC_digestItems_ === 'function') {
+    if (INQ_isDigestRun(INQ_hm_(now)) && typeof AC_digestItems_ === 'function') {
       var items = AC_digestItems_().map(function (x) { x.label = INQ_mdhm_(x.at); return x; });
       if (items.length) digest = AC_digestText(items, INQ_mdhm_(now), admText ? 4 : 5);
     }
@@ -1427,7 +1433,7 @@ function INQ_setupFaq() {
   return { created: true, rows: made.rows, active: made.active };
 }
 
-/** まとめのお知らせのトリガーを 9時台・15時台の2本だけにする（既存のほかのトリガーには触れない。何度実行しても増えない） */
+/** まとめのお知らせのトリガーを 9時台・12時台の2本だけにする（既存のほかのトリガーには触れない。何度実行しても増えない） */
 function INQ_setupRemindTriggers() {
   INQ_removeRemindTriggers();
   INQ_REMIND_HOURS.forEach(function (h) { ScriptApp.newTrigger('INQ_remind').timeBased().atHour(h).nearMinute(0).everyDays(1).inTimezone(AC_TZ).create(); });
@@ -1477,5 +1483,5 @@ if (typeof module !== 'undefined') {
     INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho,
     INQ_C: INQ_C, INQ_caseCols: INQ_caseCols, INQ_colsMessage: INQ_colsMessage, INQ_newCaseRow: INQ_newCaseRow, INQ_rowToCase: INQ_rowToCase,
     INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows,
-    INQ_joinHead: INQ_joinHead, INQ_isContinuation: INQ_isContinuation, INQ_targetPlan: INQ_targetPlan, INQ_remindCarousels: INQ_remindCarousels, INQ_remindBubble: INQ_remindBubble, INQ_daysAgoLabel: INQ_daysAgoLabel, INQ_mark: INQ_mark, INQ_caseSensitive: INQ_caseSensitive, INQ_staffGroups: INQ_staffGroups, INQ_NOTICE_DEPT: INQ_NOTICE_DEPT });
+    INQ_joinHead: INQ_joinHead, INQ_isContinuation: INQ_isContinuation, INQ_targetPlan: INQ_targetPlan, INQ_isDigestRun: INQ_isDigestRun, INQ_REMIND_HOURS: INQ_REMIND_HOURS, INQ_remindCarousels: INQ_remindCarousels, INQ_remindBubble: INQ_remindBubble, INQ_daysAgoLabel: INQ_daysAgoLabel, INQ_mark: INQ_mark, INQ_caseSensitive: INQ_caseSensitive, INQ_staffGroups: INQ_staffGroups, INQ_NOTICE_DEPT: INQ_NOTICE_DEPT });
 }

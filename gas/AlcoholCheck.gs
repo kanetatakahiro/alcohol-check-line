@@ -41,7 +41,7 @@ var AC_SHEET_DEVICES = 'アルコールチェッカー在庫';
 var AC_TZ = 'Asia/Tokyo';
 var AC_CHECK_LABELS = { beforeWork: '出勤前', afterWork: '退勤前' };
 // コードの版（コードを変更したら必ず更新する。alcoholCheckShowSettings で表示し、GitHubの版と照らし合わせる）
-var AC_CODE_VERSION = '2026-11-17e';
+var AC_CODE_VERSION = '2026-11-20c';   // 版 2026-11-20c：飲酒検知の確認（alcoholCheckAlerts）の読み込み・判定をロックの外に、回答が増えていなければ読まない、所要時間をログに
 
 /** 手動確認用：送信も記録もせず、当日の結果をログに表示する（実行ログは所有者のみ閲覧可） */
 function alcoholCheckPreview() {
@@ -2566,17 +2566,84 @@ function AC_namesForCode(masterValues, code) {
   return [];
 }
 
-/** 10分ごと：当日の回答に要確認の測定結果がないかを見て、管理者へ知らせる */
+// 版 2026-11-20c：飲酒検知の確認（10分ごと）の速さとロック
+var AC_ALERT_ROWS_KEY = 'alerts:formRows';    // 前に読み込んだときの「フォームの回答 1」の行数と時刻 {rows, at}（ユーザーのプロパティ）
+var AC_ALERT_RETRY_KEY = 'alerts:retry';      // 送れなかった送信先のやり直しが残っている日（AC_checkAlerts_ が書く・消す）
+var AC_ALERT_FULL_EVERY_MS = 60 * 60 * 1000;  // 行数が同じでも、前の読み込みから1時間たったら読む（回答の編集に気づくための予備）
+
+/**
+ * 純粋関数（版 2026-11-20c）：今回、回答を読み込むか。読むときは理由、読まないときは null。
+ * prev：前に読み込んだときの { rows, at }（無ければ null）／rows：今の「フォームの回答 1」の最後の行／retryDay：やり直しが残っている日
+ */
+function AC_alertsNeedRead(prev, rows, retryDay, today, nowMs) {
+  if (retryDay && retryDay === today) return 'やり直しあり';
+  if (!prev || typeof prev.rows !== 'number') return '初回';
+  if (rows !== prev.rows) return '回答の行数が変わった';
+  if (!(prev.at > 0) || nowMs - prev.at >= AC_ALERT_FULL_EVERY_MS) return '1時間ごとの確認';
+  return null;
+}
+
+/** 秒（小数1桁）の文字 */
+function AC_sec_(ms) { return (Math.round(ms / 100) / 10).toFixed(1); }
+
+/**
+ * 10分ごと：当日の回答に要確認の測定結果がないかを見て、管理者へ知らせる。
+ * 版 2026-11-20c：
+ *  - 「フォームの回答 1」の最後の行が前の読み込みと同じで、やり直しも残っていなければ、読み込まずに終える（1時間に1回は読む）
+ *  - 読み込み・判定はロックの外。要確認が0件（または全部送信済み）ならロックを取らずに終える
+ *  - 送る検知があるときだけスクリプトのロックを取り、AC_checkAlerts_ で「送ったか」を確かめて、送って、記録する（二重送信の防ぎ方は今までと同じ）
+ *  - 各段階の所要時間を実行ログに出す（秒数・行数・列数・件数だけ。氏名・測定結果は出さない）
+ */
 function alcoholCheckAlerts() {
   var props = PropertiesService.getScriptProperties();
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return;
+  var dryRun = props.getProperty('DRY_RUN') !== 'false';
+  var t0 = Date.now();
   try {
-    AC_checkAlerts_(props, AC_loadDay_(AC_today_()), props.getProperty('DRY_RUN') !== 'false');
+    var today = AC_today_(), state = AC_state_();
+    var form = SpreadsheetApp.openById(AC_SPREADSHEET_ID).getSheetByName(AC_SHEET_FORM);
+    var rows = form ? form.getLastRow() : -1;
+    var prev = null;
+    try { prev = JSON.parse(state.getProperty(AC_ALERT_ROWS_KEY) || 'null'); } catch (e0) { prev = null; }
+    var why = form ? AC_alertsNeedRead(prev, rows, state.getProperty(AC_ALERT_RETRY_KEY), today, t0) : 'シートが見つからない';
+    if (!why) { Logger.log('検知の確認：回答が増えていないため読み込みなし（回答 %s行・%s秒）', rows, AC_sec_(Date.now() - t0)); return; }
+    var t1 = Date.now();
+    var d = AC_loadDay_(today);
+    var t2 = Date.now();
+    var p = AC_alertParams_(props);
+    var hits = AC_findAlerts(d, p.normal, p.th);
+    var fresh = hits.filter(function (h) { return !state.getProperty('sent:' + d.today + ':alert:' + h.row); });
+    var t3 = Date.now(), lockWait = '', sendMs = 0;
+    if (fresh.length && !dryRun) {
+      var lock = LockService.getScriptLock();
+      if (!lock.tryLock(5000)) {   // ほかの処理が動いている：行数は覚えず、次の回にもう一度読む
+        Logger.log('検知の確認：送る検知 %s件。ほかの処理が動いているため、次の回に送ります（読み込み %s秒）', fresh.length, AC_sec_(t2 - t1));
+        return;
+      }
+      lockWait = AC_sec_(Date.now() - t3);
+      try { AC_checkAlerts_(props, d, dryRun); } finally { lock.releaseLock(); }
+      sendMs = Date.now() - t3;
+    } else if (fresh.length) {
+      AC_checkAlerts_(props, d, dryRun);   // DRY_RUN：送らずログだけ（ロックは要らない）
+    } else if (state.getProperty(AC_ALERT_RETRY_KEY)) {
+      state.deleteProperty(AC_ALERT_RETRY_KEY);   // やり直しが全部終わっている
+    }
+    state.setProperty(AC_ALERT_ROWS_KEY, JSON.stringify({ rows: rows, at: t1 }));
+    Logger.log('検知の確認（%s）：読み込み %s秒（シフト表 %s行×%s列・回答 %s行）／判定 %s秒（要確認 %s件・うち未送信 %s件）／送信 %s／合計 %s秒',
+      why, AC_sec_(t2 - t1), d.sv.length, (d.sv[0] || []).length, d.fv.length, AC_sec_(t3 - t2), hits.length, fresh.length,
+      fresh.length && !dryRun ? AC_sec_(sendMs) + '秒（ロック待ち ' + lockWait + '秒）' : 'なし（ロックを取らない）', AC_sec_(Date.now() - t0));
   } catch (e) {
     Logger.log('検知確認の失敗：%s', e && e.message ? e.message : e);
     AC_adminNotice_('alerts', '【エラー】飲酒検知の確認がうまくできませんでした🙇‍♀️\n管理シートが開けるか、見出しが変わっていないかを確認してください。\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
-  } finally { lock.releaseLock(); }
+  }
+}
+
+/** 正常として扱う回答（NORMAL_RESULTS）としきい値（ALERT_THRESHOLD・既定 0.14） */
+function AC_alertParams_(props) {
+  var normal = String(props.getProperty('NORMAL_RESULTS') || '').split(',')
+    .map(function (s) { return s.trim(); }).filter(Boolean);
+  var th = parseFloat(props.getProperty('ALERT_THRESHOLD') || '0.14');
+  if (isNaN(th)) th = 0.14;
+  return { normal: normal, th: th };
 }
 
 /**
@@ -2585,12 +2652,9 @@ function alcoholCheckAlerts() {
  * NORMAL_RESULTS（カンマ区切り）に書いた値は、そのまま正常として扱う。
  */
 function AC_checkAlerts_(props, d, dryRun) {
-  var normal = String(props.getProperty('NORMAL_RESULTS') || '').split(',')
-    .map(function (s) { return s.trim(); }).filter(Boolean);
+  var p = AC_alertParams_(props);
   var state = AC_state_();
-  var th = parseFloat(props.getProperty('ALERT_THRESHOLD') || '0.14');
-  if (isNaN(th)) th = 0.14;
-  var hits = AC_findAlerts(d, normal, th);
+  var hits = AC_findAlerts(d, p.normal, p.th);
   hits.forEach(function (h) {
     var key = 'sent:' + d.today + ':alert:' + h.row;
     if (state.getProperty(key)) return;
@@ -2603,6 +2667,11 @@ function AC_checkAlerts_(props, d, dryRun) {
     AC_pushLine_(text);
     state.setProperty(key, new Date().toISOString());
   });
+  // 版 2026-11-20c：送れなかった送信先のやり直しが残っているか（alcoholCheckAlerts が、回答が増えていなくても読み込むため）
+  if (dryRun) return;
+  var pending = hits.some(function (h) { return !state.getProperty('sent:' + d.today + ':alert:' + h.row); });
+  if (pending) state.setProperty(AC_ALERT_RETRY_KEY, d.today);
+  else if (state.getProperty(AC_ALERT_RETRY_KEY)) state.deleteProperty(AC_ALERT_RETRY_KEY);
 }
 
 /**
@@ -4255,5 +4324,5 @@ if (typeof module !== 'undefined') {
     AC_filterRegistryByCodes: AC_filterRegistryByCodes, AC_parseTotCsv: AC_parseTotCsv, AC_totPatternToShift: AC_totPatternToShift, AC_buildTotCompare: AC_buildTotCompare, AC_totScheduleItems: AC_totScheduleItems, AC_attendanceFindings: AC_attendanceFindings, AC_lineByTotCode: AC_lineByTotCode, AC_attendanceReport: AC_attendanceReport, AC_punchMessage: AC_punchMessage, AC_overtimeMessage: AC_overtimeMessage, AC_careLine: AC_careLine, AC_composeMessage: AC_composeMessage, AC_render: AC_render, AC_todayStatus: AC_todayStatus, AC_quotaLevel: AC_quotaLevel, AC_nextMonth: AC_nextMonth, AC_addMonths: AC_addMonths, AC_agreementCheck: AC_agreementCheck, AC_agreementFigures: AC_agreementFigures, AC_monthlyByTot: AC_monthlyByTot, AC_pendingRequests: AC_pendingRequests, AC_selfRequestNotices: AC_selfRequestNotices, AC_selfNoticeTargets: AC_selfNoticeTargets, AC_unrequestedPunchErrors: AC_unrequestedPunchErrors, AC_requestedDays: AC_requestedDays, AC_weeklyPunchItems: AC_weeklyPunchItems, AC_weeklyPunchMessage: AC_weeklyPunchMessage, AC_weekMonday: AC_weekMonday, AC_punchKindIndex: AC_punchKindIndex, AC_punchKindClass: AC_punchKindClass, AC_punchLine: AC_punchLine, AC_isFullHoliday: AC_isFullHoliday, AC_formEntriesFromValues: AC_formEntriesFromValues, AC_formSplit: AC_formSplit, AC_formChangeLines: AC_formChangeLines, AC_isPausedForPunch: AC_isPausedForPunch, AC_punchKindLabel: AC_punchKindLabel, AC_nightSelfItems: AC_nightSelfItems, AC_punchSelfNotices: AC_punchSelfNotices, AC_punchSelfMessage: AC_punchSelfMessage, AC_paidLeaveStatus: AC_paidLeaveStatus, AC_pauseIndex: AC_pauseIndex, AC_isPaused: AC_isPaused, AC_pausedNames: AC_pausedNames, AC_formChoices: AC_formChoices, AC_codeFromChoice: AC_codeFromChoice, AC_formPlan: AC_formPlan, AC_parseDeptRegistration: AC_parseDeptRegistration, AC_deptNames: AC_deptNames, AC_groupsByDept: AC_groupsByDept, AC_paidLeavePeriod: AC_paidLeavePeriod, AC_paidLeaveCheck: AC_paidLeaveCheck, AC_monthlyApplyPlan: AC_monthlyApplyPlan, AC_todayStatusMessage: AC_todayStatusMessage,
     AC_monthShiftRows: AC_monthShiftRows, AC_manualShiftSource: AC_manualShiftSource, AC_manualShiftPlan: AC_manualShiftPlan, AC_fingerprint: AC_fingerprint,
     AC_manualShiftFingerprint: AC_manualShiftFingerprint, AC_manualRunCheck: AC_manualRunCheck, AC_monthShiftSheetDone: AC_monthShiftSheetDone, AC_settingsReport: AC_settingsReport,
-    AC_CODE_VERSION: AC_CODE_VERSION, AC_withAiNote: AC_withAiNote, AC_AI_NOTE: AC_AI_NOTE, AC_weeklyPunchGuides: AC_weeklyPunchGuides, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle, AC_digestText: AC_digestText };
+    AC_CODE_VERSION: AC_CODE_VERSION, AC_withAiNote: AC_withAiNote, AC_AI_NOTE: AC_AI_NOTE, AC_weeklyPunchGuides: AC_weeklyPunchGuides, AC_formChoicesByDept: AC_formChoicesByDept, AC_whoFromResponses: AC_whoFromResponses, AC_isWhoTitle: AC_isWhoTitle, AC_digestText: AC_digestText, AC_alertsNeedRead: AC_alertsNeedRead };
 }

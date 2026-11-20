@@ -332,6 +332,102 @@ test('飲酒検知：以前のコードで送った記録（sent:日付:alert:�
   assert.equal(pushes(g).length, 0);
 });
 
+// ---------- 9-1b 飲酒検知の確認の速さとロック（版 2026-11-20c） ----------
+// ロックを取った回数・回答を読み込んだ回数を数える（模擬のロックは差し替え。読み込みは AC_loadDay_ を包む）
+function spy(g) {
+  const s = { locks: 0, loads: 0, logs: [] };
+  g.ctx.Logger = { log: (f, ...a) => s.logs.push(a.reduce((t, v) => t.replace('%s', String(v)), String(f))) };   // 本番と同じく %s を差し込む
+  g.ctx.LockService = { getScriptLock: () => ({ tryLock: () => { s.locks++; return !s.busy; }, waitLock: () => { s.locks++; }, releaseLock() {} }) };
+  const orig = g.ctx.AC_loadDay_;
+  g.ctx.AC_loadDay_ = (today) => { s.loads++; return orig(today); };
+  return s;
+}
+const later = (g, min = 10) => { g.clock.now += min * 60 * 1000; };
+
+test('20c 飲酒検知の確認：要確認が0件ならロックを取らない（読み込み・判定はロックの外）', () => {
+  const { g, fv } = setup({ now: '2026-11-10T08:40:00+09:00' });
+  answer(g, fv, '試験 一郎', '出勤前', '0.00', '08:35');
+  const s = spy(g);
+  g.ctx.alcoholCheckAlerts();
+  assert.equal(s.loads, 1);
+  assert.equal(s.locks, 0);
+  assert.equal(pushes(g).length, 0);
+  // 送信済みの検知だけのときも、ロックを取らない
+  answer(g, fv, '試験 二郎', '出勤前', '0.25', '08:45');
+  later(g); g.ctx.alcoholCheckAlerts();
+  assert.equal(s.locks, 1);
+  assert.deepEqual(tos(pushes(g)), [ADMIN, GROUP]);
+  answer(g, fv, '試験 三郎', '出勤前', '0.00', '08:50');                  // 行は増えたが新しい検知は無い
+  later(g); g.ctx.alcoholCheckAlerts();
+  assert.equal(s.loads, 3);
+  assert.equal(s.locks, 1);
+  assert.equal(pushes(g).length, 2);
+});
+
+test('20c 飲酒検知の確認：1件以上ならロックを取って1回だけ送る。ロックが取れなければ送らず、次の回に読み直して送る', () => {
+  const { g } = alertSetup();
+  const s = spy(g);
+  s.busy = true;                                                            // ほかの処理がロックを持っている
+  g.ctx.alcoholCheckAlerts();
+  assert.equal(s.locks, 1);
+  assert.equal(pushes(g).length, 0);
+  s.busy = false;
+  later(g); g.ctx.alcoholCheckAlerts();                                    // 回答は増えていないが、前の回は送れていないので読む
+  assert.equal(s.loads, 2);
+  assert.equal(s.locks, 2);
+  assert.deepEqual(tos(pushes(g)), [ADMIN, GROUP]);                        // 管理者・グループへ1回ずつ
+  later(g); g.ctx.alcoholCheckAlerts();
+  later(g); g.ctx.alcoholCheckAlerts();
+  assert.deepEqual(tos(pushes(g)), [ADMIN, GROUP]);                        // 二度送らない
+  assert.equal(s.locks, 2);
+});
+
+test('20c 飲酒検知の確認：回答が増えていなければ読まない（1時間たったら念のため読む）', () => {
+  const { g, fv } = setup({ now: '2026-11-10T08:40:00+09:00' });
+  answer(g, fv, '試験 一郎', '出勤前', '0.00', '08:35');
+  const s = spy(g);
+  g.ctx.alcoholCheckAlerts();                                               // 初回は読む
+  for (let i = 0; i < 4; i++) { later(g); g.ctx.alcoholCheckAlerts(); }    // 10〜40分後：増えていない
+  assert.equal(s.loads, 1);
+  answer(g, fv, '試験 二郎', '出勤前', '0.30', '09:20');
+  later(g); g.ctx.alcoholCheckAlerts();                                    // 増えた → 読んで送る
+  assert.equal(s.loads, 2);
+  assert.deepEqual(tos(pushes(g)), [ADMIN, GROUP]);
+  later(g, 61); g.ctx.alcoholCheckAlerts();                                // 前の読み込みから1時間 → 読む
+  assert.equal(s.loads, 3);
+  assert.equal(pushes(g).length, 2);
+  const log = s.logs.join('\n');
+  assert.match(log, /回答が増えていないため読み込みなし（回答 2行/);
+  assert.match(log, /検知の確認（初回）：読み込み [\d.]+秒（シフト表 5行×4列・回答 2行）／判定 [\d.]+秒（要確認 0件・うち未送信 0件）／送信 なし（ロックを取らない）/);
+  assert.match(log, /検知の確認（回答の行数が変わった）：.*要確認 1件・うち未送信 1件）／送信 [\d.]+秒（ロック待ち [\d.]+秒）/);
+  assert.match(log, /検知の確認（1時間ごとの確認）/);
+  assert.ok(!/試験|0\.30|0\.25|U[0-9a-f]{32}|C[0-9a-f]{32}/.test(log), '氏名・測定結果・LINE ID をログに出さない');
+});
+
+test('20c 飲酒検知の確認：送信に失敗したやり直しが残っていれば、回答が増えていなくても読む', () => {
+  const { g } = alertSetup();
+  const s = spy(g);
+  g.line.pushFail.add(GROUP);
+  g.ctx.alcoholCheckAlerts();
+  assert.equal(g.userProps.getProperty('alerts:retry'), '2026-11-10');
+  g.line.pushFail.clear();
+  later(g); g.ctx.alcoholCheckAlerts();                                    // 回答は同じだが、やり直しがあるので読む
+  assert.equal(s.loads, 2);
+  assert.deepEqual(tos(pushes(g)), [ADMIN, GROUP, GROUP]);                 // グループだけやり直し
+  assert.equal(g.userProps.getProperty('alerts:retry'), null);            // やり直しが終わったら消す
+  later(g); g.ctx.alcoholCheckAlerts();
+  assert.equal(s.loads, 2);                                                // もう読まない
+  // 純粋関数
+  const X = g.ctx, T = Date.parse('2026-11-10T09:00:00+09:00');
+  assert.equal(X.AC_alertsNeedRead(null, 5, null, '2026-11-10', T), '初回');
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 5, null, '2026-11-10', T + 600000), null);
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 6, null, '2026-11-10', T + 600000), '回答の行数が変わった');
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 4, null, '2026-11-10', T + 600000), '回答の行数が変わった');   // 行を消したときも読む
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 5, '2026-11-10', '2026-11-10', T + 600000), 'やり直しあり');
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 5, '2026-11-09', '2026-11-10', T + 600000), null);   // 前の日のやり直しは対象外（当日の回答だけを見るため）
+  assert.equal(X.AC_alertsNeedRead({ rows: 5, at: T }, 5, null, '2026-11-10', T + 3600000), '1時間ごとの確認');
+});
+
 // ---------- 9-2 未実施の催促 ----------
 test('未実施の催促：本人だけに届き、管理者・勤怠管理グループには一覧を送らない（NOTIFY_ADMIN=false のまま）', () => {
   const { g, fv } = setup({ now: '2026-11-10T10:00:00+09:00' });

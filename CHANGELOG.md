@@ -1,5 +1,11 @@
 # 変更履歴
 
+## 2026-11-20 版 2026-11-20f：月末の勤怠の締め（業務マニュアル M02 の AI 化・新しいファイル gas/MonthClose.gs・ブランチ feature/month-close）
+- 毎朝8時台（monthCloseDaily）：月末の前日は、今月の申請していない打刻漏れがある本人へ「締め前の最後のお願い」（AC_weeklyPunchRun_ を使う・同じ月は1人1通）。月末・翌月1〜2日は【月末の締め】のまとめ（①申請していない打刻漏れ（人ごと・日付）②承認待ちの申請（人ごと・種類）③前日から）、3日は最終の一覧と上長への連絡のお願い、4日は0件なら「締め完了」。まとめは AC_pushLine_（平日9時の勤怠管理グループのまとめ）。土日祝はまとめを作らない
+- 設定 MONTH_CLOSE_NOTIFY（off／record／on）。トリガーは monthCloseSetupTrigger
+- コード.gs：AC_weeklyPunchRun_ に period・tag・label・head の指定を足した（毎週月曜の催促は変わらない）
+- gas/AlcoholCheck.gs（`dbe1f737a7e14fed`）・gas/MonthClose.gs（`74c1ad033af2a0b7`）。テスト test/month-close.test.js 4件（全429件成功）。Webアプリの再公開は要らない
+
 ## 2026-11-20 版 2026-11-20a（gas/TotSync.gs）：TOT反映の前日の再通知を、まとめの12時の回で送る（ブランチ fix/resend-hour・**本番未導入**）
 - まとめ（INQ_remind）が 9時・12時になり（本番 11/20 14:39 から）、15時台の回が無くなったため、前日の再通知（A-50・SCH_RESEND_HOUR=15）が送られなくなっていた
 - SCH_RESEND_HOUR を 15 → 12 に。あわせて判定を「時」から「時:分」に変えた：トリガーの nearMinute(0) は前後15分ずれ、12時の回が 11:45〜11:59 に動くと「11時」になって送られないため、12時の30分前（11:30）から送る（SCH_RESEND_EARLY_MIN=30。9時の回は 9:15 までなので重ならない）

@@ -3173,7 +3173,7 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     if (typeof AC_noticeEffective !== 'function' || typeof AC_noticeIndex_ !== 'function') return true;   // Notices.gs が無いとき
     try { return !!AC_noticeEffective(AC_noticeIndex_(), 'ATT-02', code); } catch (e) { Logger.log('お知らせ設定を読めませんでした（この人には送りません）'); return false; }
   };
-  var nname = ((typeof AC_NOTICE_BY_ID !== 'undefined' && AC_NOTICE_BY_ID['ATT-02'] && AC_NOTICE_BY_ID['ATT-02'].name) || '打刻漏れ') + '（毎週月曜の催促）';
+  var nname = ((typeof AC_NOTICE_BY_ID !== 'undefined' && AC_NOTICE_BY_ID['ATT-02'] && AC_NOTICE_BY_ID['ATT-02'].name) || '打刻漏れ') + (o.label || '（毎週月曜の催促）');   // 版 2026-11-20f：月末の締め（gas/MonthClose.gs）でも使う
   var row = function (key, code, result, text) { return [now, 'ATT-02', nname, '本人', code ? "'" + code : '', key, result, '', text || '']; };
   var exclude = function (key, code, why) {
     if (preview || state.getProperty(key + ':ex')) return;   // 除外の記録は1人1週1回
@@ -3181,7 +3181,7 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     logs.push(row(key, code, '除外（' + why + '）'));
   };
   plan.order.forEach(function (t) {
-    var key = 'att:' + week + ':weeklypunch:' + t, code = codeOfTot[t] || '';
+    var key = 'att:' + (o.period || week) + ':' + (o.tag || 'weeklypunch') + ':' + t, code = codeOfTot[t] || '';
     if (state.getProperty(key) || (!sendLive && !preview && state.getProperty(key + ':rec'))) { counts.already++; return; }   // 同じ週は1通だけ
     if (!code) { counts.noMaster++; exclude(key, code, '従業員マスタに無い'); return; }
     var isP = function (d) { return AC_isPausedForPunch(pauseIdx, code, d, formsOk); };   // フォームから入った停止（全部）は打刻の項目では数えない
@@ -3198,7 +3198,7 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
     var dk = {};
     dates.forEach(function (d) { if (plan.kinds[t + ':' + d]) dk[d] = plan.kinds[t + ':' + d]; });
-    var text = AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
+    var text = (o.head || '') + AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
     counts.changes += changes.length;
     if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }
     counts.people++; counts.dates += dates.length;

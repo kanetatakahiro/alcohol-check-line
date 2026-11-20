@@ -1,5 +1,5 @@
 /**
- * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-19a：［手が空きました］で今日の残りと前倒しをまとめて送る）
+ * 事務の業務一覧LINE（AI上司）（gas/OfficeTask.gs・版 2026-11-20b：番号は頻度の記号（D・W・M・Y・H・E・A）／グループの「依頼 …」を臨時の依頼に登録／担当者・開始日）
  *
  * 平日（土日祝・休みの日を除く）の毎朝8時台、事務業務のグループ（「部門登録 事務業務」で登録したグループ）に、
  * 管理本部みんなの「今日のお仕事」をボタン付きで送る。特定の人に固定しない（だれが担当してもよい）。
@@ -19,7 +19,7 @@
  * 受け口（ボタン・グループの文）はコード.gs の AC_handleGroupEvent_ から呼ぶ（Webアプリの再公開が必要）。
  * 毎朝・10分ごとの処理は OT_setupTriggers で作るトリガー（OT_morning・OT_tick）で動く。
  */
-var OT_VERSION = '2026-11-19a';
+var OT_VERSION = '2026-11-20b';
 var OT_GROUP_DEPT = '事務業務';   // 「部門登録 事務業務」で登録したグループへ送る
 var OT_AI_HEADER = 'AI化の状況';    // 人の手／一部AI／AI化済み（AI化済みは指示しない）。列名は「AI化の状況」で始まればよい
 var OT_ORDER_SHEET = 'AI化の順番（まゆさん用）';   // 状況（まゆさん）と稼働の確認（設定・結果）。業務マニュアルの「AI化の状況」はこのタブから式で決まる
@@ -27,21 +27,20 @@ var OT_MANUAL_SHEET = '業務マニュアル';
 var OT_REQUEST_SHEET = '臨時の依頼';
 var OT_LOG_SHEET = '今日の仕事の記録';
 var OT_PLAN_SHEET = '送る予定の内容';
-var OT_REQUEST_HEADER = ['依頼日', '業務ID（業務マニュアル）', '業務名（自由に書いてよい）', '期限', 'メモ（AIが本人に伝えること）', '状態'];
+var OT_REQUEST_HEADER = ['依頼日', '業務ID（業務マニュアル）', '業務名（自由に書いてよい）', '期限', 'メモ（AIが本人に伝えること）', '状態', '担当者（任意）', '開始日（任意）', '依頼した人'];   // 版 2026-11-20b：担当者・開始日・依頼した人を足した
 var OT_LOG_HEADER = ['日時', '日付', '期間', '業務ID', '業務名', '操作', '押した人', 'メモ', 'LINEユーザーID'];
 var OT_PLAN_HEADER = ['日時', '日付', '種類', '件数', '合計（分）', '内容'];
 var OT_RULE_HEADER = 'AI用の予定ルール';
-var OT_DEFAULT_RULES = { M01: 'daily', M02: 'daily', M03: 'weekly:5', M04: 'monthly:1~3', M05: 'monthly:-2~3', M06: 'monthly:5~10',
-  M07: 'monthly:13~20', M08: 'monthly:-2~5', M09: 'monthly:23~25', M10: 'daily', M11: 'monthly:1~5', M12: 'request', M13: 'request',
-  M14: 'request', M15: 'request', M16: 'request', M17: 'request', M18: 'yearly:11/1~12/20', M19: 'request', M20: 'request',
-  M21: 'reserve', M22: 'spare', M23: 'yearly:6/1~6/20', M24: 'yearly:11/1~11/20' };
+var OT_DEFAULT_RULES = { W01: 'weekly:5', D01: 'daily', D02: 'daily', D03: 'daily', D04: 'daily', D05: 'reserve', M01: 'monthly:1~3', M02: 'monthly:-2~3', M03: 'monthly:5~10',
+  M04: 'monthly:13~20', M05: 'monthly:-2~5', M06: 'monthly:23~25', M07: 'monthly:1~5', M08: 'monthly:5~10', Y01: 'yearly:11/1~12/20', Y02: 'yearly:6/1~6/20',
+  Y03: 'yearly:11/1~11/20', Y04: 'yearly:12/1~12/20', Y05: 'yearly:12/1~12/20', Y06: 'yearly:12/1~12/20', H01: 'yearly:6/1~6/20', A01: 'spare' };
 var OT_FILL_RATE = 0.8;            // 勤務時間のうち、仕事を入れる割合（残りは電話・来客などの予備）
 var OT_DEFAULT_MINUTES = 360;      // 勤務時間が読めなかったときの目安
 var OT_EARLY_DAYS = 7;             // 期間の始まる何日前から前倒しの候補にするか
 var OT_OVERDUE_DAYS = 7;           // 期限を過ぎて何日まで残りとして出すか
 var OT_REMIND_MIN = 12 * 60;        // 残りのお仕事のお知らせ（12:00）
 var OT_MAX_BUBBLES = 11;           // カルーセルは12枚まで（1枚目はまとめ）
-var OT_ACTIONS = { done: '完了', claim: '対応します', ask: 'わからない', skip: '今日はできない', free: '手が空きました', undo: '取り消し' };
+var OT_ACTIONS = { done: '完了', claim: '対応します', ask: 'わからない', skip: '今日はできない', free: '手が空きました', undo: '取り消し', detail: '詳細を確認' };
 
 // ======================================================================
 // 純粋関数（テストで確かめる）
@@ -159,15 +158,18 @@ function OT_plan(tasks, today, minutes, done, requests) {
     });
   });
   (requests || []).forEach(function (q) {
+    if (q.start && q.start > today) return;                                  // 開始日の前は出さない
     var base = byId[q.id] || { id: q.id || ('R' + q.row), name: q.name || '臨時の依頼', minutes: 30, early: false };
     var key = 'R' + q.row;
     if (done[base.id + '|' + key]) return;
-    var item = Object.assign({}, base, { name: q.name || base.name, period: key, deadline: q.due || today, req: true, memo: q.memo || '' });
+    var item = Object.assign({}, base, { name: q.name || base.name, period: key, deadline: q.due || today, req: true, memo: q.memo || '', assignee: q.assignee || '' });
     if (q.due && q.due < today) item.overdue = true;
     due.push(item);
   });
   var order = function (a, b) {
-    if (a.id === 'M01' || b.id === 'M01') return a.id === 'M01' ? -1 : 1;     // 朝の確認はいつも最初
+    var da = /^D\d/.test(a.id) && !a.req, db = /^D\d/.test(b.id) && !b.req;     // 版 2026-11-20b：毎日の仕事（D01〜）はいつも最初・番号順
+    if (da !== db) return da ? -1 : 1;
+    if (da && db) return a.id < b.id ? -1 : 1;
     if (!!a.overdue !== !!b.overdue) return a.overdue ? -1 : 1;
     if (a.deadline !== b.deadline) return a.deadline < b.deadline ? -1 : 1;
     return String(a.id) < String(b.id) ? -1 : 1;
@@ -227,18 +229,16 @@ function OT_bubble(it, no, date, token, owner) {
     : it.deadline === date ? '期限 今日' : '期限 ' + OT_md(it.deadline));
   var body = [{ type: 'text', text: (no ? no + '. ' : '') + it.name, weight: 'bold', wrap: true },
     { type: 'text', text: [deadline, it.minutes ? '目安' + it.minutes + '分' : '', it.early ? '前倒し' : ''].filter(String).join('・'), size: 'xs', color: it.overdue ? '#cc0000' : '#888888', wrap: true }];
+  owner = owner || it.assignee;
   if (owner) body.push({ type: 'text', text: '担当：' + owner + 'さん', size: 'xs', color: '#1a73e8', wrap: true });
   if (it.memo) body.push({ type: 'text', text: '📝 ' + it.memo, size: 'sm', wrap: true });
   body.push({ type: 'separator' });
   body = body.concat(OT_textParts('', it.steps, 'sm'))
-    .concat(OT_textParts('持ち物・使うもの：', it.items, 'xs', '#555555'))
-    .concat(OT_textParts('💡 ', it.tips, 'xs', '#555555'))
-    .concat(OT_textParts('困ったら：', it.help, 'xs', '#555555'))
-    .concat(OT_textParts('終わったら：', it.report, 'xs', '#555555'));
+    .concat(OT_textParts('持ち物・使うもの：', it.items, 'xs', '#555555'));   // 版 2026-11-20a：コツ・困ったとき・終わったらは［詳細を確認］で返す（縦に長くなりすぎるため）
   return { type: 'bubble', size: 'mega',
     body: { type: 'box', layout: 'vertical', spacing: 'sm', contents: body },
     footer: { type: 'box', layout: 'vertical', spacing: 'sm', contents: [btn('完了', 'done', 'primary'), btn('対応します', 'claim', 'secondary'),
-      btn('わからない', 'ask', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
+      btn('詳細を確認', 'detail', 'secondary'), btn('今日はできない', 'skip', 'secondary')] } };
 }
 
 /**
@@ -247,7 +247,7 @@ function OT_bubble(it, no, date, token, owner) {
  */
 function OT_freeItems(left, owners, plan, done, tasks, date) {
   owners = owners || {}; done = done || {};
-  var today = (left || []).filter(function (it) { return !owners[it.id + '|' + it.period]; });
+  var today = (left || []).filter(function (it) { return !owners[it.id + '|' + it.period] && !it.assignee; });
   var ids = (plan && plan.ids) || [], early = [];
   ((plan && plan.extra) || []).forEach(function (k) {
     if (done[k] || ids.indexOf(k) !== -1 || owners[k]) return;
@@ -341,11 +341,62 @@ function OT_cell(v) {
   return String(v == null ? '' : v).replace(/^'/, '').trim();
 }
 
+/**
+ * 純粋関数（版 2026-11-20b）：グループの「依頼 11/25 宮部さん ○○」を読む。当てはまらなければ null。
+ * { name: 内容, due: 'YYYY-MM-DD'|'', who: 'さん'を外した名前|''（自分＝'@self'）, help: true（「依頼」だけ） }
+ */
+function OT_parseRequest(text, today) {
+  var t = String(text || '').replace(/　/g, ' ').trim();
+  var m = /^(?:依頼|お願い|臨時の依頼)[\s:：]*([\s\S]*)$/.exec(t);
+  if (!m) return null;
+  var rest = m[1].trim();
+  if (!rest) return { help: true };
+  if (/^(します|したい|してもいい|です|ありがとう)/.test(rest)) return null;   // 「依頼します」などの会話は拾わない
+  var due = '', who = '', y = Number(today.slice(0, 4)), words = rest.split(/\s+/), keep = [];
+  words.forEach(function (w, i) {
+    var d = null, mm;
+    if (!due && (mm = /^(\d{1,2})[\/月](\d{1,2})日?(?:まで|に)?$/.exec(OT_toHalf_(w)))) {
+      var mo = Number(mm[1]), da = Number(mm[2]);
+      if (mo >= 1 && mo <= 12 && da >= 1 && da <= 31) { var yy = (mo < Number(today.slice(5, 7)) - 6) ? y + 1 : y; d = yy + '-' + ('0' + mo).slice(-2) + '-' + ('0' + da).slice(-2); }
+    } else if (!due && /^(今日|本日)(中|まで)?$/.test(w)) d = today;
+    else if (!due && /^明日(中|まで)?$/.test(w)) d = OT_addDays(today, 1);
+    else if (!due && /^明後日(中|まで)?$/.test(w)) d = OT_addDays(today, 2);
+    if (d) { due = d; return; }
+    if (!who && i < 3 && /^(自分|じぶん|私|わたし)(へ|に|で)?$/.test(w)) { who = '@self'; return; }
+    if (!who && i < 3 && /^@?[^\s@]{1,10}さん(へ|に|で)?$/.test(w)) { who = w.replace(/^@/, '').replace(/さん(へ|に|で)?$/, ''); return; }
+    keep.push(w);
+  });
+  var name = keep.join(' ').trim();
+  return name ? { name: name.slice(0, 100), due: due, who: who } : { help: true };
+}
+function OT_toHalf_(s) { return String(s).replace(/[０-９／]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }); }
+
+/** 純粋関数（版 2026-11-20a）：［詳細を確認］の返信の文（コツ・困ったとき・終わったら・メモ） */
+function OT_detailText(name, t, memo) {
+  t = t || {};
+  var parts = ['【' + name + '】の詳細'];
+  if (memo) parts.push('📝 メモ\n' + memo);
+  if (t.tips) parts.push('💡 コツ・注意\n' + t.tips);
+  if (t.help) parts.push('🙋 困ったとき・判断が必要なとき\n' + t.help);
+  if (t.report) parts.push('✅ 終わったら\n' + t.report);
+  if (parts.length === 1) parts.push('このお仕事には、コツ・困ったときの書き込みがまだありません。');
+  parts.push('それでも分からないときは、手を止めてこのグループで聞いてください。');
+  return parts.join('\n\n');
+}
+
+/** 純粋関数（版 2026-11-20a）：「取り消し 領収書」のような文か。探す言葉（空＝一覧を返す）か、当てはまらなければ null */
+function OT_parseUndo(text) {
+  var t = String(text || '').trim();
+  if (t.length > 40) return null;
+  var m = /^(?:完了の)?取り?消し(?:て|たい|します|お願いします)?[\s　:：]*(.*)$/.exec(t);
+  return m ? m[1].replace(/^[「『]|[」』]$/g, '').replace(/(を|の完了を?)?(取り?消し.*)?$/, '').trim() : null;
+}
+
 /** 純粋関数：未完了の一覧の文 */
 function OT_remainingText(items, owner, date) {
   if (!items.length) return '【まだ終わっていないお仕事】' + OT_md(date) + '\n今日のお仕事はすべて完了しています✨';
   return '【まだ終わっていないお仕事】' + OT_md(date) + '（' + items.length + '件）\n'
-    + items.map(function (it, i) { var o = owner[it.id + '|' + it.period]; return (i + 1) + '. ' + it.name + (it.overdue ? '（期限を過ぎています）' : '') + '　担当：' + (o ? o + 'さん' : '未定'); }).join('\n');
+    + items.map(function (it, i) { var o = owner[it.id + '|' + it.period] || it.assignee; return (i + 1) + '. ' + it.name + (it.overdue ? '（期限を過ぎています）' : '') + '　担当：' + (o ? o + 'さん' : '未定'); }).join('\n');
 }
 
 /** 純粋関数：先週（月曜〜日曜）のまとめの文 */
@@ -418,7 +469,9 @@ function OT_requests_(ss) {
     var r = v[i], st = String(r[5] || '').trim();
     if (st === '完了' || st === '取り消し' || (!r[1] && !r[2])) continue;
     var due = r[3] instanceof Date ? Utilities.formatDate(r[3], AC_TZ, 'yyyy-MM-dd') : String(r[3] || '').replace(/\//g, '-').slice(0, 10);
-    out.push({ row: i + 1, id: String(r[1] || '').trim(), name: String(r[2] || '').trim(), due: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : '', memo: String(r[4] || '') });
+    var start = OT_cell(r[7]).replace(/\//g, '-').slice(0, 10);   // 日付のセル・文字のどちらでも
+    out.push({ row: i + 1, id: String(r[1] || '').trim(), name: String(r[2] || '').trim(), due: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : '', memo: String(r[4] || ''),
+      assignee: String(r[6] || '').trim().replace(/さん$/, ''), start: /^\d{4}-\d{2}-\d{2}$/.test(start) ? start : '', by: String(r[8] || '').trim() });
   }
   return out;
 }
@@ -475,7 +528,7 @@ function OT_remaining_(ss, date, info) {
     var base = t || { id: id, name: (q && q.name) || id, minutes: 30 };
     var rule = OT_parseRule(base.rule), pr = rule ? OT_periods(rule, date).filter(function (x) { return x.key === per; })[0] : null;
     out.push(Object.assign({}, base, { name: (q && q.name) || base.name, period: per, deadline: q ? q.due || date : pr ? pr.end : date,
-      overdue: q ? !!(q.due && q.due < date) : !!(pr && pr.end < date), req: !!q, memo: q ? q.memo : '' }));
+      overdue: q ? !!(q.due && q.due < date) : !!(pr && pr.end < date), req: !!q, memo: q ? q.memo : '', assignee: q ? q.assignee : '' }));
   });
   return out;
 }
@@ -515,6 +568,7 @@ function OT_morning() {
     var today = AC_today_(), off = OT_offDates_();
     if (!OT_isBusinessDay(today, off)) { Logger.log('事務の業務一覧：土日祝・休みの日のため送らない（%s）', today); return; }
     var ss = OT_book_();
+    try { OT_syncOrderRows_(ss); } catch (e1) { Logger.log('AI化の順番への行の追加に失敗（人への指示はそのまま続けます）'); }
     try { if (OT_syncAiStatus_(ss, today)) SpreadsheetApp.flush(); } catch (e0) { Logger.log('AI化の状況の確認に失敗（人への指示はそのまま続けます）'); }
     var b = OT_buildToday_(ss, today, false), plan = b.plan;
     var weekly = OT_isFirstBusinessDayOfWeek(today, off) ? OT_weeklyText(b.log, OT_addDays(today, -((OT_date(today).getUTCDay() + 6) % 7))) : '';
@@ -563,7 +617,13 @@ function OT_onGroupMessage_(ev) {
   try {
     if (OT_mode_() !== 'on' || !ev || ev.type !== 'message' || !ev.message || ev.message.type !== 'text') return false;
     var gid = ev.source && ev.source.groupId;
-    if (!gid || OT_groups_().indexOf(gid) === -1 || !OT_isRemainingQuery(ev.message.text)) return false;
+    if (!gid || OT_groups_().indexOf(gid) === -1) return false;
+    var undoWord = OT_parseUndo(ev.message.text);
+    if (undoWord !== null) { OT_undoByText_(ev, gid, undoWord); return true; }
+    var reqText = OT_mentionText_(ev.message);
+    var rq = OT_parseRequest(reqText.text, AC_today_());
+    if (rq) { OT_requestByText_(ev, gid, rq, reqText.mentioned); return true; }
+    if (!OT_isRemainingQuery(ev.message.text)) return false;
     var today = AC_today_(), ss = OT_book_(), info = OT_doneFromLog(OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER).getDataRange().getValues());
     var left = OT_remaining_(ss, today, info);
     if (left === null) {   // 土日祝・朝のお知らせの前：今日の一覧をその場で作って返信する
@@ -571,15 +631,112 @@ function OT_onGroupMessage_(ev) {
       OT_reply_(ev.replyToken, b.plan.today.length ? b.msgs : [OT_text_('今日のお仕事はありません😊')]);
       return true;
     }
-    var msgs = [OT_text_(OT_remainingText(left, info.owner, today))];
-    if (left.length) {
-      var token = OT_dayToken_(today, false);
-      msgs.push({ type: 'flex', altText: 'まだ終わっていないお仕事 ' + left.length + '件',
-        contents: { type: 'carousel', contents: left.slice(0, 12).map(function (it, i) { return OT_bubble(it, i + 1, today, token, info.owner[it.id + '|' + it.period]); }) } });
-    }
-    OT_reply_(ev.replyToken, msgs);
+    OT_reply_(ev.replyToken, OT_remainingMessages_(left, info, today));
     return true;
   } catch (e) { Logger.log('事務の業務一覧（残りの業務）の処理エラー：%s', e && e.message); return false; }
+}
+
+/** 未完了の一覧の返信（文＋ボタン付きの吹き出し）。「残りの業務」と［完了］のあとで同じ形 */
+function OT_remainingMessages_(left, info, today) {
+  var msgs = [OT_text_(OT_remainingText(left, info.owner, today))];
+  if (left.length) {
+    var token = OT_dayToken_(today, false);
+    msgs.push({ type: 'flex', altText: 'まだ終わっていないお仕事 ' + left.length + '件',
+      contents: { type: 'carousel', contents: left.slice(0, 12).map(function (it, i) { return OT_bubble(it, i + 1, today, token, info.owner[it.id + '|' + it.period]); }) } });
+  }
+  return msgs;
+}
+
+/** 版 2026-11-20a：「取り消し 領収書」で今日の完了を取り消す（ボタンをやめた代わり。完了にした人と管理者だけ） */
+function OT_undoByText_(ev, gid, word) {
+  var uid = ev.source && ev.source.userId, who = OT_who_(gid, uid, OT_master_()), admin = OT_props_().getProperty('LINE_ADMIN_USER_ID');
+  if (!who) { OT_reply_(ev.replyToken, [OT_text_('送った方を確認できなかったため、受け付けできませんでした。')]); return; }
+  var today = AC_today_(), ss = OT_book_(), logSh = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER), rows = logSh.getDataRange().getValues(), info = OT_doneFromLog(rows);
+  var seen = {}, list = [];
+  rows.slice(1).forEach(function (r) {
+    var key = OT_cell(r[3]) + '|' + OT_cell(r[2]);
+    if (OT_cell(r[1]) === today && OT_cell(r[5]) === OT_ACTIONS.done && info.done[key] && !seen[key]) { seen[key] = true; list.push({ key: key, id: OT_cell(r[3]), period: OT_cell(r[2]), name: OT_cell(r[4]) }); }
+  });
+  var hit = word ? list.filter(function (x) { return x.name.indexOf(word) !== -1 || x.id === word; }) : [];
+  var usage = '取り消すときは「取り消し 領収書」のように、お仕事の名前（一部でよい）をつけて送ってください。';
+  if (!word || hit.length !== 1) {
+    var names = list.map(function (x) { return '・' + x.name + '（' + info.doneBy[x.key].name + 'さん）'; }).join('\n');
+    OT_reply_(ev.replyToken, [OT_text_((word ? (hit.length ? '「' + word + '」に当てはまるお仕事が' + hit.length + '件あります。もう少しくわしく書いてください。' : '「' + word + '」に当てはまる今日の完了は見つかりませんでした。') + '\n\n' : '')
+      + (list.length ? '今日完了にしたお仕事：\n' + names + '\n\n' + usage : '今日完了にしたお仕事はありません。'))]);
+    return;
+  }
+  var x = hit[0], by = info.doneBy[x.key];
+  if (by.uid !== uid && uid !== admin) { OT_reply_(ev.replyToken, [OT_text_('取り消せるのは、完了にした' + by.name + 'さんと管理者だけです。')]); return; }
+  logSh.appendRow([new Date(), "'" + today, "'" + x.period, "'" + x.id, x.name, OT_ACTIONS.undo, who, '文で取り消し', uid]);
+  var req = /^R\d+$/.test(x.period) ? Number(x.period.slice(1)) : 0;
+  if (req) OT_sheet_(ss, OT_REQUEST_SHEET, OT_REQUEST_HEADER).getRange(req, 6).setValue('');
+  OT_reply_(ev.replyToken, [OT_text_('「' + x.name + '」の完了を取り消しました。まだ終わっていないお仕事に戻しています。')]);
+}
+
+/** 文からメンション（@名前）を外し、メンションされた人の LINE ID を返す（公式LINE自身は除く） */
+function OT_mentionText_(message) {
+  var t = String(message.text || ''), ids = [], list = (message.mention && message.mention.mentionees) || [];
+  list.slice().sort(function (a, b) { return b.index - a.index; }).forEach(function (x) {
+    if (typeof x.index !== 'number' || typeof x.length !== 'number') return;
+    if (!x.isSelf && x.userId) ids.unshift(x.userId);
+    t = t.slice(0, x.index) + (x.isSelf ? '' : ' @' + (x.userId ? 'MENTION' : '') + ' ') + t.slice(x.index + x.length);
+  });
+  return { text: t.replace(/\s*@MENTION\s*/g, ' ').replace(/\s+/g, ' ').trim(), mentioned: ids };
+}
+
+/** 版 2026-11-20b：グループの「依頼 11/25 宮部さん ○○」を「臨時の依頼」に登録する（グループのメンバーならだれでも・自分あても可） */
+function OT_requestByText_(ev, gid, rq, mentioned) {
+  var uid = ev.source && ev.source.userId, master = OT_master_(), who = OT_who_(gid, uid, master);
+  var usage = '臨時の依頼は、このグループで次のように送ってください。\n「依頼 11/25 宮部さん ○○社へ請求書を郵送」\n・日付（期限）と担当者は省いてもかまいません（「今日」「明日」も使えます）\n・自分あては「依頼 自分 ○○」\n・担当者は「○○さん」か @メンション で';
+  if (!who) { OT_reply_(ev.replyToken, [OT_text_('送った方を確認できなかったため、受け付けできませんでした。')]); return; }
+  if (rq.help) { OT_reply_(ev.replyToken, [OT_text_(usage)]); return; }
+  var assignee = rq.who === '@self' ? who : rq.who;
+  if (!assignee && mentioned && mentioned.length) { var p = master.byUid[mentioned[0]]; assignee = p ? p.name : (typeof INQ_memberName_ === 'function' ? INQ_memberName_(gid, mentioned[0]) || '' : ''); }
+  var today = AC_today_(), ss = OT_book_(), sh = OT_sheet_(ss, OT_REQUEST_SHEET, OT_REQUEST_HEADER);
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  var row;
+  try {
+    sh.appendRow(["'" + today, '', rq.name, rq.due ? "'" + rq.due : '', '', '', assignee, '', who]);
+    row = sh.getLastRow();
+  } finally { lock.releaseLock(); }
+  var key = 'R' + row + '|R' + row, plan = OT_planOf_(today), lines = ['臨時の依頼に登録しました👍', '・内容：' + rq.name, '・担当：' + (assignee ? assignee + 'さん' : '未定（だれでも）'),
+    '・期限：' + (rq.due ? OT_md(rq.due) : '今日'), '・依頼：' + who + 'さん'];
+  var msgs = [];
+  if (plan) {
+    plan.ids = (plan.ids || []).concat([key]); OT_savePlan_(today, plan);
+    lines.push('', '今日のお仕事に入れました。終わったら［完了］を押してください。');
+    var item = { id: 'R' + row, name: rq.name, minutes: 30, period: 'R' + row, deadline: rq.due || today, req: true, memo: '', assignee: assignee };
+    msgs.push({ type: 'flex', altText: '臨時の依頼：' + rq.name, contents: OT_bubble(item, 0, today, OT_dayToken_(today, true), assignee) });
+  } else lines.push('', '次の朝8時の「今日のお仕事」に載ります（終わるまで毎朝載ります）。');
+  lines.push('', '取り消すときは「臨時の依頼」タブの状態を「取り消し」にしてください。');
+  OT_reply_(ev.replyToken, [OT_text_(lines.join('\n'))].concat(msgs));
+}
+
+/** 版 2026-11-20b：「業務マニュアル」にあって「AI化の順番」に無い業務を、AI化の順番の下に足す（毎朝。手で足さなくてよいように） */
+function OT_syncOrderRows_(ss) {
+  var sh = ss.getSheetByName(OT_ORDER_SHEET), man = ss.getSheetByName(OT_MANUAL_SHEET);
+  if (!sh || !man) return 0;
+  var v = sh.getDataRange().getValues(), h = v[0].map(String), mv = man.getDataRange().getValues(), mh = mv[0].map(String);
+  var ci = h.indexOf('ID'), cn = h.indexOf('業務名'), co = h.indexOf('順番'), cs = h.indexOf('状況'), mi = mh.indexOf('ID'), mn = mh.indexOf('業務名');
+  if (ci < 0 || mi < 0) return 0;
+  var have = {}, maxNo = 0, n = 0;
+  v.slice(1).forEach(function (r) { have[String(r[ci]).trim()] = true; if (co >= 0) maxNo = Math.max(maxNo, Number(r[co]) || 0); });
+  mv.slice(1).forEach(function (r) {
+    var id = String(r[mi] || '').trim();
+    if (!id || have[id]) return;
+    var last = sh.getLastRow(), cols = sh.getLastColumn(), prev = sh.getRange(last, 1, 1, cols);
+    var fx = typeof prev.getFormulasR1C1 === 'function' ? prev.getFormulasR1C1()[0] : [];
+    var row = new Array(cols).fill('');
+    if (co >= 0) row[co] = ++maxNo;
+    row[ci] = id;
+    if (cn >= 0 && mn >= 0) row[cn] = String(r[mn] || '');
+    if (cs >= 0) row[cs] = '人の手';
+    sh.getRange(last + 1, 1, 1, cols).setValues([row]);
+    fx.forEach(function (f, j) { if (f) sh.getRange(last + 1, j + 1).setFormulaR1C1(f); });   // 「人への指示」などの式を写す
+    if (cs >= 0 && typeof prev.getDataValidations === 'function') { var dv = sh.getRange(last, cs + 1).getDataValidation(); if (dv) sh.getRange(last + 1, cs + 1).setDataValidation(dv); }
+    have[id] = true; n++;
+  });
+  return n;
 }
 
 /** ボタン（事務業務のグループ）。コード.gs の AC_handleGroupEvent_ から呼ぶ */
@@ -595,15 +752,13 @@ function OT_onGroupPostback_(ev) {
     var master = OT_master_(), who = OT_who_(gid, uid, master), admin = OT_props_().getProperty('LINE_ADMIN_USER_ID');
     if (!who) { OT_reply_(ev.replyToken, [OT_text_('押した方を確認できなかったため、受け付けできませんでした。スマートフォンのLINEから押してください。')]); return; }
     if (!p.token || p.token !== OT_dayToken_(p.date, false)) { OT_reply_(ev.replyToken, [OT_text_('このボタンは使えません。今日のお知らせのボタン（または「残りの業務」と送って出るボタン）を押してください。')]); return; }
-    if (p.date !== AC_today_() && p.action !== 'undo') { OT_reply_(ev.replyToken, [OT_text_('このボタンは前の日のものです。「残りの業務」と送って、今日のボタンから押してください。')]); return; }
+    if (p.date !== AC_today_() && p.action !== 'undo' && p.action !== 'detail') { OT_reply_(ev.replyToken, [OT_text_('このボタンは前の日のものです。「残りの業務」と送って、今日のボタンから押してください。')]); return; }
     var ss = OT_book_(), tasks = OT_tasks_(ss), task = tasks.filter(function (t) { return t.id === p.id; })[0];
     var reqs = OT_requests_(ss), req = /^R\d+$/.test(p.period) ? reqs.filter(function (q) { return 'R' + q.row === p.period; })[0] : null;
     var name = req && req.name ? req.name : task ? task.name : p.id;
     var logSh = OT_sheet_(ss, OT_LOG_SHEET, OT_LOG_HEADER), now = new Date(), key = p.id + '|' + p.period;
     var log = function (op, memo) { logSh.appendRow([now, "'" + p.date, "'" + p.period, "'" + p.id, name, op, who, memo || '', uid]); };
     var plan = OT_planOf_(p.date) || { ids: [], extra: [] }, info = OT_doneFromLog(logSh.getDataRange().getValues());
-    var undoBtn = { type: 'flex', altText: '取り消す', contents: { type: 'bubble', size: 'micro', body: { type: 'box', layout: 'vertical', contents: [
-      { type: 'button', style: 'secondary', height: 'sm', action: { type: 'postback', label: '間違えたので取り消す', data: ['ot', '1', 'undo', p.date, p.id, p.period, p.token].join('|'), displayText: '取り消す：' + name } }] } } };
     if (p.action === 'free') {   // 版 2026-11-19a：今日まだ担当がいないお仕事と、前倒しできるお仕事をまとめて送る（押した人を担当にはしない。やるものの［対応します］を押してもらう）
       var free = OT_freeItems(OT_remaining_(ss, p.date, info) || [], info.owner, plan, info.done, tasks, p.date);
       log(OT_ACTIONS.free, '今日の残り ' + free.today.length + '件・前倒し ' + free.early.length + '件');
@@ -614,14 +769,20 @@ function OT_onGroupPostback_(ev) {
       OT_reply_(ev.replyToken, OT_freeMessages(free, who, p.date, p.token));
       return;
     }
+    if (p.action === 'detail') {   // 版 2026-11-20a：コツ・困ったとき・終わったらを返す（記録はしない）
+      OT_reply_(ev.replyToken, [OT_text_(OT_detailText(name, task, req ? req.memo : ''))]);
+      return;
+    }
     if (p.action === 'done') {
       if (info.done[key]) { OT_reply_(ev.replyToken, [OT_text_('「' + name + '」は' + info.doneBy[key].name + 'さんが完了にしています。')]); return; }
       log(OT_ACTIONS.done);
       if (req) OT_sheet_(ss, OT_REQUEST_SHEET, OT_REQUEST_HEADER).getRange(req.row, 6).setValue('完了');
       info.done[key] = true;
-      var rest = (OT_remaining_(ss, p.date, info) || []).filter(function (it) { var o = info.owner[it.id + '|' + it.period]; return !o || o === who; });
+      info.doneBy[key] = { name: who, uid: uid };
+      var rest = OT_remaining_(ss, p.date, info) || [];   // 版 2026-11-20a：「次は〜」はやめ、「残りの業務」と同じ一覧を返す。取り消しのボタンもやめた（文で取り消す）
       OT_reply_(ev.replyToken, [OT_text_(who + 'さん、ありがとうございます！「' + name + '」を完了にしました✨'
-        + (rest.length ? '\n次は「' + rest[0].name + '」をお願いします。' : '\n今日のお仕事はすべて完了です。手が空いたら［手が空きました］を押してください。')), undoBtn]);
+        + (rest.length ? '' : '\n今日のお仕事はすべて完了です。手が空いたら［手が空きました］を押してください。')
+        + '\n（間違えて押したときは「取り消し ' + name.slice(0, 10) + '」と送ってください）')].concat(rest.length ? OT_remainingMessages_(rest, info, p.date) : []));
       return;
     }
     if (p.action === 'undo') {

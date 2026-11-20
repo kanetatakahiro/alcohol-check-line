@@ -24,9 +24,9 @@ function setup(props = { OFFICE_TASK_MODE: 'on' }, now = '2026-11-17T08:00:00+09
   g.line.members[OFFICE] = { [STAFF]: 'はなこ', [OTHER]: 'じろう', [ADMIN]: 'まゆ' };
   const book = g.newSpreadsheet('【テスト】業務一覧（架空）');
   const s = book.insertSheet('業務マニュアル');
-  [MH, task('M01', '朝の確認', 15, false), task('M02', 'スキャン', 20, true), task('M03', '領収書', 30, true), task('M04', '交通費の確認', 60, false),
-    task('M05', '勤怠締め', 60, false), task('M06', '社労士へ送る', 30, false), task('M11', '在庫確認', 30, true), task('M12', '印鑑証明書', 120, false),
-    task('M21', '電話・来客', 20, false), task('M22', '前倒し', 30, true), task('M09', '支払予定', 40, false, '×')].forEach((r) => s.appendRow(r));
+  [MH, task('D01', '朝の確認', 15, false), task('D03', 'スキャン', 20, true), task('W01', '領収書', 30, true), task('M01', '交通費の確認', 60, false),
+    task('M02', '勤怠締め', 60, false), task('M03', '社労士へ送る', 30, false), task('M07', '在庫確認', 30, true), task('E01', '印鑑証明書', 120, false),
+    task('D05', '電話・来客', 20, false), task('A01', '前倒し', 30, true), task('M06', '支払予定', 40, false, '×')].forEach((r) => s.appendRow(r));
   g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: master.getId(), INQ_MODE: 'off', LINE_CHANNEL_ACCESS_TOKEN: 'fake', LINE_ADMIN_USER_ID: ADMIN, DRY_RUN: 'false',
     OFFICE_TASK_BOOK_ID: book.getId(), ...props });
   const today = now.slice(0, 10);
@@ -65,26 +65,27 @@ test('事務の業務一覧: 予定ルールと期間（月末から翌月にま
 test('事務の業務一覧: 予定づくり（任せる○だけ・AI化済みは出さない・期限順・勤務時間の8割・入りきらない分は手が空いたとき）', () => {
   const { g, book } = setup();
   const X = g.ctx;
-  // M11 を AI化済みにすると出ない
-  const ms = book.getSheetByName('業務マニュアル'), h = ms.dump()[0], r11 = ms.dump().findIndex((r) => r[0] === 'M11') + 1;
+  // M07 を AI化済みにすると出ない
+  const ms = book.getSheetByName('業務マニュアル'), h = ms.dump()[0], r11 = ms.dump().findIndex((r) => r[0] === 'M07') + 1;
   const tasks0 = X.OT_tasks_(X.OT_book_());
-  assert.ok(!tasks0.some((t) => t.id === 'M09'));                                      // 任せる×は出さない
+  assert.ok(!tasks0.some((t) => t.id === 'M06'));                                      // 任せる×は出さない
   const p = X.OT_plan(tasks0, '2026-12-01', 360, {}, []);
   assert.equal(p.reserve, 20);
-  assert.equal(p.today[0].id, 'M01');                                                   // 朝の確認が最初
-  assert.deepEqual(JSON.parse(JSON.stringify(p.today.map((t) => t.id).sort())), ['M01', 'M02', 'M03', 'M04', 'M05', 'M11']);   // M03 は先週金曜の分（記録なし＝過ぎた扱い）
+  assert.equal(p.today[0].id, 'D01');                                                   // 朝の確認が最初
+  assert.deepEqual(JSON.parse(JSON.stringify(p.today.map((t) => t.id).sort())), ['D01', 'D03', 'M01', 'M02', 'M07', 'W01']);   // W01 は先週金曜の分（記録なし＝過ぎた扱い）
   assert.ok(p.total <= p.budget);
-  assert.ok(p.extra.some((t) => t.id === 'M03' && t.early));
+  assert.ok(p.extra.some((t) => t.id === 'W01' && t.early));
   ms.getRange(r11, h.indexOf('AI化の状況') + 1).setValue('AI化済み');
-  assert.ok(!X.OT_tasks_(X.OT_book_()).some((t) => t.id === 'M11'));
+  assert.ok(!X.OT_tasks_(X.OT_book_()).some((t) => t.id === 'M07'));
   const tasks = X.OT_tasks_(X.OT_book_());
   const short = X.OT_plan(tasks, '2026-12-03', 120, {}, []);
-  assert.ok(short.today.some((t) => t.id === 'M04') && short.today.some((t) => t.id === 'M05'));
-  const late = X.OT_plan(tasks, '2026-12-07', 360, { 'M04|M2026-12': true }, []);
-  assert.ok(!late.today.some((t) => t.id === 'M04'));
-  assert.equal(late.today[1].id, 'M05'); assert.ok(late.today[1].overdue);
-  const r = X.OT_plan(tasks, '2026-12-07', 360, {}, [{ row: 2, id: 'M12', name: '', due: '2026-12-08', memo: '2通' }]);
-  const it = r.today.find((t) => t.id === 'M12');
+  assert.ok(short.today.some((t) => t.id === 'M01') && short.today.some((t) => t.id === 'M02'));
+  const late = X.OT_plan(tasks, '2026-12-07', 360, { 'M01|M2026-12': true }, []);
+  assert.ok(!late.today.some((t) => t.id === 'M01'));
+  assert.deepEqual([late.today[0].id, late.today[1].id], ['D01', 'D03']);                // 毎日の仕事（D）が先・番号順
+  assert.equal(late.today[2].id, 'M02'); assert.ok(late.today[2].overdue);              // その次に期限を過ぎたもの
+  const r = X.OT_plan(tasks, '2026-12-07', 360, {}, [{ row: 2, id: 'E01', name: '', due: '2026-12-08', memo: '2通' }]);
+  const it = r.today.find((t) => t.id === 'E01');
   assert.equal(it.period, 'R2'); assert.equal(it.memo, '2通');                         // 臨時の依頼は必ず入る
 });
 
@@ -97,7 +98,7 @@ test('事務の業務一覧: 毎朝の送信（事務業務のグループ・ボ
   const car = p[0].body.messages[0].contents;
   assert.match(car.contents[0].body.contents.map((c) => c.text || '').join('\n'), /管理本部のみなさん、今日のお仕事です[\s\S]*対応します[\s\S]*残りの業務[\s\S]*12時/);
   assert.equal(car.contents[1].body.contents[0].text, '1. 朝の確認');
-  assert.deepEqual(car.contents[1].footer.contents.map((b) => b.action.label), ['完了', '対応します', 'わからない', '今日はできない']);
+  assert.deepEqual(car.contents[1].footer.contents.map((b) => b.action.label), ['完了', '対応します', '詳細を確認', '今日はできない']);
   assert.match(book.getSheetByName('送る予定の内容').dump()[1][5], /朝の確認/);
   const r = setup({ OFFICE_TASK_MODE: 'record' });
   n = r.g.fetches.length; r.g.ctx.OT_morning();
@@ -140,7 +141,8 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   const { g, book } = setup();
   g.ctx.OT_morning();
   const car = pushes(g, 0)[0].body.messages[0].contents.contents;
-  const first = car[1], second = car[2];
+  const byName = (n) => car.find((b) => b.body && b.body.contents[0].text.includes(n));
+  const first = byName('朝の確認'), second = byName('社労士へ送る');
   let n = g.fetches.length;
   post(g, pb(STRANGER, btnData(first, '完了'), 'e1'));                                   // グループのメンバーでない
   assert.match(replies(g, n)[0].body.messages[0].text, /押した方を確認できなかった/);
@@ -150,22 +152,31 @@ test('事務の業務一覧: ボタン（誰でも押せる・押した人を記
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));
   const rp = replies(g, n)[0].body.messages;
-  assert.match(rp[0].text, /試験さん、ありがとうございます！「朝の確認」を完了にしました/);
-  assert.ok(!/次は「社労士へ送る」/.test(rp[0].text));                                       // 見本さんが担当の仕事は次に勧めない
-  const undo = rp[1].contents.body.contents[0].action.data;
+  assert.match(rp[0].text, /試験さん、ありがとうございます！「朝の確認」を完了にしました[\s\S]*「取り消し 朝の確認」と送って/);
+  assert.ok(!/次は/.test(rp[0].text));                                                     // 版 20a：次の仕事は勧めない
+  assert.match(rp[1].text, /【まだ終わっていないお仕事】/); assert.equal(rp[2].type, 'flex');   // 「残りの業務」と同じ一覧
+  assert.ok(!JSON.stringify(rp).includes('取り消す'));                                       // 取り消しのボタンは出さない
   post(g, pb(STAFF, btnData(first, '完了'), 'e3'));                                      // 同じイベントは1回だけ
   n = g.fetches.length;
   post(g, pb(OTHER, btnData(first, '完了'), 'e4'));                                      // 2回目の完了
   assert.match(replies(g, n)[0].body.messages[0].text, /試験さんが完了にしています/);
   n = g.fetches.length;
-  post(g, pb(OTHER, undo, 'e5'));                                                        // 取り消しは完了にした人か管理者だけ
+  post(g, msg(OTHER, '取り消し', 'e5a'));                                                  // 言葉なし → 今日の完了の一覧と使い方
+  assert.match(replies(g, n)[0].body.messages[0].text, /今日完了にしたお仕事：\n・朝の確認（試験さん）[\s\S]*「取り消し 領収書」のように/);
+  n = g.fetches.length;
+  post(g, msg(OTHER, '取り消し 朝の確認', 'e5'));                                          // 取り消しは完了にした人か管理者だけ
   assert.match(replies(g, n)[0].body.messages[0].text, /取り消せるのは、完了にした試験さんと管理者だけ/);
   n = g.fetches.length;
-  post(g, pb(ADMIN, undo, 'e6'));
-  assert.match(replies(g, n)[0].body.messages[0].text, /完了を取り消しました/);
+  post(g, msg(STAFF, '取り消し 社労士', 'e5b'));                                          // 完了していないもの
+  assert.match(replies(g, n)[0].body.messages[0].text, /見つかりませんでした/);
   n = g.fetches.length;
-  post(g, pb(STAFF, btnData(car[3], 'わからない'), 'e7'));
-  assert.match(replies(g, n)[0].body.messages[0].text, /困ったとき：安藤さんへ[\s\S]*安藤さん、確認をお願いします/);
+  post(g, msg(ADMIN, '取り消し「朝の確認」', 'e6'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /「朝の確認」の完了を取り消しました/);
+  n = g.fetches.length;
+  post(g, pb(STAFF, btnData(car[3], '詳細を確認'), 'e7'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /の詳細[\s\S]*困ったとき・判断が必要なとき\n安藤さんへ/);
+  assert.ok(!JSON.stringify(car[3].body).includes('困ったら：'));                            // 吹き出しには出さない
+  post(g, pb(STAFF, btnData(car[3], '詳細を確認').replace('|detail|', '|ask|'), 'e7b'));   // 前のボタン（わからない）も動く
   n = g.fetches.length;
   post(g, pb(STAFF, btnData(car[3], '今日はできない'), 'e8'));
   assert.match(replies(g, n)[0].body.messages[0].text, /明日に回します/);
@@ -198,8 +209,9 @@ test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当
   let n = g.fetches.length;
   g.ctx.OT_morning();
   const car = pushes(g, 0)[0].body.messages[0].contents.contents;
-  post(g, pb(OTHER, btnData(car[2], '対応します'), 'q1'));
-  post(g, pb(STAFF, btnData(car[1], '完了'), 'q2'));
+  const byName = (n) => car.find((b) => b.body && b.body.contents[0].text.includes(n));
+  post(g, pb(OTHER, btnData(byName('社労士へ送る'), '対応します'), 'q1'));
+  post(g, pb(STAFF, btnData(byName('朝の確認'), '完了'), 'q2'));
   n = g.fetches.length;
   post(g, msg(OTHER, '未完了の業務を教えて', 'q3'));
   const r = replies(g, n)[0].body.messages;
@@ -220,8 +232,8 @@ test('事務の業務一覧: 「残りの業務」で未完了の一覧（担当
   assert.match(p[0].body.messages[0].text, /【まだ終わっていないお仕事】[\s\S]*12時のお知らせです/);
   n = g.fetches.length; g.ctx.OT_tick();
   assert.equal(pushes(g, n).length, 0);
-  const text = g.ctx.OT_weeklyText([['h'], [new Date(), '2026-11-17', '2026-11-17', 'M01', '朝の確認', '完了', '試験', ''],
-    [new Date(), '2026-11-18', 'x', 'M04', '交通費の確認', 'わからない', '試験', '']], '2026-11-23');
+  const text = g.ctx.OT_weeklyText([['h'], [new Date(), '2026-11-17', '2026-11-17', 'D01', '朝の確認', '完了', '試験', ''],
+    [new Date(), '2026-11-18', 'x', 'M01', '交通費の確認', 'わからない', '試験', '']], '2026-11-23');
   assert.match(text, /完了：1件／わからない：1件／できなかった：0件[\s\S]*完了した人：試験さん 1件[\s\S]*交通費の確認/);
 });
 
@@ -243,7 +255,7 @@ test('事務の業務一覧: AI化の順番の「稼働の確認」を毎朝ス�
   assert.equal(X.OT_checkSetting('こわれた設定', {}), false);
   const o = book.insertSheet('AI化の順番（まゆさん用）');
   [['順番（入れ替えOK）', 'ID', '業務名', '状況', '稼働の確認（設定・Claudeが入れる）', '稼働の確認（結果・毎朝自動）'],
-    [2, 'M05', '勤怠締め', '一部AI', 'WEEKLY_PUNCH_NOTIFY=on', ''], [1, 'M04', '交通費の確認', 'AI化済み', 'X_MODE=on', ''], [3, 'M01', '朝の確認', 'やらない（人の手）', '', '']].forEach((r) => o.appendRow(r));
+    [2, 'M02', '勤怠締め', '一部AI', 'WEEKLY_PUNCH_NOTIFY=on', ''], [1, 'M01', '交通費の確認', 'AI化済み', 'X_MODE=on', ''], [3, 'D01', '朝の確認', 'やらない（人の手）', '', '']].forEach((r) => o.appendRow(r));
   g.ctx.OT_morning();
   const v = o.dump();
   assert.match(String(v[1][5]), /^確認済み/);
@@ -259,4 +271,52 @@ test('事務の業務一覧 18a: 手順・持ち物の URL は「タップで開
   assert.equal(parts[0].action.type, 'uri'); assert.equal(parts[3].action, undefined);
   const b = X.OT_bubble({ id: 'M24', period: 'Y2026', name: 'お歳暮', steps: '1. 開く https://example.com/list', items: '', minutes: 10, deadline: '2026-11-18' }, 1, '2026-11-18', 'tok');
   assert.ok(b.body.contents.some((c) => c.action && c.action.uri === 'https://example.com/list'));
+});
+
+test('事務の業務一覧 20b: グループの「依頼 …」で臨時の依頼に登録（担当・期限・自分あて・メンション）・開始日の前は出さない・担当は吹き出しに出る', () => {
+  const { g, book } = setup();
+  const X = g.ctx;
+  const P = (t) => { const r = X.OT_parseRequest(t, '2026-11-20'); return r && JSON.parse(JSON.stringify(r)); };
+  assert.deepEqual(P('依頼 11/25 宮部さん ○○社へ請求書を郵送'), { name: '○○社へ請求書を郵送', due: '2026-11-25', who: '宮部' });
+  assert.deepEqual(P('依頼　自分　明日まで 名刺の発注'), { name: '名刺の発注', due: '2026-11-21', who: '@self' });
+  assert.deepEqual(P('依頼 1/10 年賀状の整理'), { name: '年賀状の整理', due: '2027-01-10', who: '' });
+  assert.deepEqual(P('依頼'), { help: true });
+  assert.equal(P('依頼します、よろしく'), null); assert.equal(P('ありがとうございます'), null);
+  g.ctx.OT_morning();
+  let n = g.fetches.length;
+  post(g, msg(OTHER, '依頼 11/25 試験さん ○○社へ請求書を郵送', 'r1'));
+  const r = replies(g, n)[0].body.messages;
+  assert.match(r[0].text, /臨時の依頼に登録しました[\s\S]*担当：試験さん[\s\S]*期限：11\/25[\s\S]*依頼：見本さん[\s\S]*今日のお仕事に入れました/);
+  assert.equal(r[1].type, 'flex'); assert.ok(JSON.stringify(r[1]).includes('担当：試験さん'));
+  const rq = book.getSheetByName('臨時の依頼').dump().at(-1);
+  assert.deepEqual([rq[2], String(rq[3]).replace(/^'/, ''), rq[6], rq[8]], ['○○社へ請求書を郵送', '2026-11-25', '試験', '見本']);
+  n = g.fetches.length;
+  post(g, msg(STAFF, '残りの業務', 'r2'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /○○社へ請求書を郵送　担当：試験さん/);
+  n = g.fetches.length;
+  post(g, { ...msg(STAFF, '@見本 依頼 名刺の発注', 'r3'), message: { id: 'mr3', type: 'text', text: '依頼 @見本 名刺の発注', mention: { mentionees: [{ index: 3, length: 3, userId: OTHER, type: 'user' }] } } });
+  assert.match(replies(g, n)[0].body.messages[0].text, /内容：名刺の発注\n・担当：見本さん/);
+  n = g.fetches.length;
+  post(g, msg(STAFF, '依頼', 'r4'));
+  assert.match(replies(g, n)[0].body.messages[0].text, /「依頼 11\/25 宮部さん ○○社へ請求書を郵送」/);
+  // 開始日：その日までは出さない
+  book.getSheetByName('臨時の依頼').appendRow(['2026-11-17', '', '通勤区分の入力', '2026-11-25', '', '', '緒方', '2026-11-25', 'まゆ']);
+  const reqs = X.OT_requests_(X.OT_book_());
+  assert.ok(!X.OT_plan([], '2026-11-24', 360, {}, reqs).today.some((t) => t.name === '通勤区分の入力'));
+  const p25 = X.OT_plan([], '2026-11-25', 360, {}, reqs).today.find((t) => t.name === '通勤区分の入力');
+  assert.equal(p25.assignee, '緒方');
+  assert.ok(JSON.stringify(X.OT_bubble(p25, 1, '2026-11-25', 'tok', null)).includes('担当：緒方さん'));
+});
+
+test('事務の業務一覧 20b: 業務マニュアルに足した業務は、毎朝 AI化の順番の下にも足す', () => {
+  const { g, book } = setup({ OFFICE_TASK_MODE: 'record' });
+  const o = book.insertSheet('AI化の順番（まゆさん用）');
+  [['順番', 'ID', '業務名', '状況', '稼働の確認（設定・Claudeが入れる）', '稼働の確認（結果・毎朝自動）'], [1, 'D01', '朝の確認', '人の手', '', '']].forEach((r) => o.appendRow(r));
+  g.ctx.OT_morning();
+  const v = o.dump();
+  assert.ok(v.length > 3);
+  assert.deepEqual(v.slice(1).map((r) => r[1]).filter((x) => x === 'D01').length, 1);
+  const added = v.find((r) => r[1] === 'M01');
+  assert.deepEqual([added[0] > 1, added[2], added[3]], [true, '交通費の確認', '人の手']);
+  const before = o.dump().length; g.ctx.OT_morning(); assert.equal(o.dump().length, before);   // 2回目は足さない
 });

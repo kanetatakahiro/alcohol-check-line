@@ -1,5 +1,11 @@
 # 変更履歴
 
+## 2026-11-20 版 2026-11-20g：月末の締めの日程を、本人の申請の締め日（翌月3日）に合わせた（gas/MonthClose.gs）
+- 本人へ（新しいトリガー monthClosePersonal・毎朝9時台）：月末の前日に「締め前の最後のお願い」、翌月3日に前月分でまだ申請していない本人へ「最終のお願い（今日が締め日）」（MC_deadlineMessage・前月1日〜月末の分）
+- 勤怠管理グループへ（monthCloseDaily・毎朝8時台に作り平日9時のまとめへ）：月末・翌月1〜3日はまとめ、翌月4日（土日祝なら次の平日・10日まで）に「最終の一覧」＝締め日を過ぎて残っている人（上長へ連絡する人）。0件なら「締め完了」
+- コード.gs：AC_weeklyPunchItems に期間（range）、AC_weeklyPunchRun_ に range・message の指定を足した（毎週月曜の催促は変わらない）
+- gas/AlcoholCheck.gs（`b4f2d66018647008`）・gas/MonthClose.gs（`0c853b06768bf834`）。テスト test/month-close.test.js 5件（全430件成功）
+
 ## 2026-11-20 版 2026-11-20f：月末の勤怠の締め（業務マニュアル M02 の AI 化・新しいファイル gas/MonthClose.gs・ブランチ feature/month-close）
 - 毎朝8時台（monthCloseDaily）：月末の前日は、今月の申請していない打刻漏れがある本人へ「締め前の最後のお願い」（AC_weeklyPunchRun_ を使う・同じ月は1人1通）。月末・翌月1〜2日は【月末の締め】のまとめ（①申請していない打刻漏れ（人ごと・日付）②承認待ちの申請（人ごと・種類）③前日から）、3日は最終の一覧と上長への連絡のお願い、4日は0件なら「締め完了」。まとめは AC_pushLine_（平日9時の勤怠管理グループのまとめ）。土日祝はまとめを作らない
 - 設定 MONTH_CLOSE_NOTIFY（off／record／on）。トリガーは monthCloseSetupTrigger

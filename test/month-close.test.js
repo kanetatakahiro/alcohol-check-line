@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20f）。すべて架空データ・模擬環境（LINEには送らない）
+// 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20g）。すべて架空データ・模擬環境（LINEには送らない）
 const U = (c) => 'U' + String(c).repeat(32).slice(0, 32);
 const ADMIN = 'U' + 'a'.repeat(32);
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'LeaveRequest.gs', 'Notices.gs', 'OfficeTask.gs', 'MonthClose.gs'];
@@ -67,15 +67,16 @@ const toSelf = (list) => list.filter((f) => f.body.to !== ADMIN);
 const NOTE = '\n\n※このメッセージはAIによる自動送信です。';   // 版 2026-11-16a：本人へ送る文の最後（記録の文面には入らない）
 const text = (f) => f.body.messages[0].text;
 
-test('月末の締め: 日にちの判定（前日・月末・1〜2日・3日・4日）', () => {
+test('月末の締め: 日にちの判定（前日・月末・1〜2日・3日・4〜10日）', () => {
   const { g } = setup();
   const P = (d) => { const p = g.ctx.MC_phase(d); return [p.kind, p.month]; };
   assert.deepEqual(P('2026-11-29'), ['eve', '2026-11']);
   assert.deepEqual(P('2026-11-30'), ['daily', '2026-11']);
   assert.deepEqual(P('2026-12-01'), ['daily', '2026-11']);
   assert.deepEqual(P('2026-12-02'), ['daily', '2026-11']);
-  assert.deepEqual(P('2026-12-03'), ['final', '2026-11']);
-  assert.deepEqual(P('2026-12-04'), ['done', '2026-11']);
+  assert.deepEqual(P('2026-12-03'), ['deadline', '2026-11']);
+  assert.deepEqual(P('2026-12-04'), ['final', '2026-11']);
+  assert.deepEqual(P('2026-12-10'), ['final', '2026-11']);
   assert.deepEqual(P('2026-12-15'), [null, '']);
   assert.deepEqual(P('2027-02-27'), ['eve', '2027-02']);
   assert.deepEqual(P('2027-01-02'), ['daily', '2026-12']);
@@ -85,19 +86,20 @@ test('月末の締め: 前日は本人へ「締め前の最後のお願い」（
   const { g } = setup({ MONTH_CLOSE_NOTIFY: 'on' }, '2026-11-29T08:30:00+09:00');
   save(g, '2026-11-29');
   let n = g.fetches.length;
-  g.ctx.monthCloseDaily();
+  assert.equal(g.ctx.monthCloseDaily(), null);                                                   // 前日はまとめを作らない
+  g.ctx.monthClosePersonal();
   const p = toSelf(g.fetches.slice(n).filter((f) => f.url.endsWith('/push')));
   assert.deepEqual(p.map((f) => f.body.to).sort(), [U(1), U(4)]);                            // 四郎はお知らせ停止（〜11/20）が終わっている
   assert.match(text(p.find((f) => f.body.to === U(1))), /^【今月の締め前の最後のお願いです】\n[\s\S]*11\/2[\s\S]*11\/10/);
   n = g.fetches.length;
-  g.ctx.AC_state_().deleteProperty('mclose:2026-11-29');
-  g.ctx.monthCloseDaily();                                                                       // 同じ月の2回目は送らない
+  g.ctx.monthClosePersonal();                                                                       // 同じ月の2回目は送らない
   assert.equal(toSelf(g.fetches.slice(n).filter((f) => f.url.endsWith('/push'))).length, 0);
 });
 
-test('月末の締め: 月末〜2日はまとめ（打刻漏れ・承認待ち・前日から）、3日は最終と上長への連絡、4日は0件なら完了。平日9時のまとめへ', () => {
+test('月末の締め: 月末〜3日はまとめ（打刻漏れ・承認待ち・前日から）、3日は本人へ最終のお願い、4日は残っている人の最終の一覧。平日9時のまとめへ', () => {
   const { g } = setup({ MONTH_CLOSE_NOTIFY: 'on', ADMIN_NOTIFY: 'digest' }, '2026-12-01T08:30:00+09:00');
   save(g, '2026-12-01');
+  assert.equal(g.ctx.monthClosePersonal(), null);                                                // 1日は本人へ送らない
   const t1 = g.ctx.monthCloseDaily();
   assert.match(t1, /^【月末の締め】11月分\n\n① 申請していない打刻漏れ：\d+件[\s\S]*試験 一郎：11\/2、11\/9、11\/10、11\/16[\s\S]*② 承認待ちの申請：2件[\s\S]*試験 一郎：打刻申請 1件[\s\S]*試験 二郎：スケジュール（休暇など）申請 1件/);
   assert.ok(!/10\/30/.test(t1));                                                                  // 前の月は入らない
@@ -110,21 +112,48 @@ test('月末の締め: 月末〜2日はまとめ（打刻漏れ・承認待ち�
   save(g, '2026-12-02', r2);
   const t2 = g.ctx.monthCloseDaily();
   assert.match(t2, /③ 前日から：打刻漏れ \d+件 → \d+件／承認待ち 2件 → 3件/);
+  // 3日：まとめ（締め日）と、本人へ前月分の最終のお願い（12月の分は入らない）
   g.clock.now = new Date('2026-12-03T08:30:00+09:00').getTime();
-  save(g, '2026-12-03', r2);
-  assert.match(g.ctx.monthCloseDaily(), /最終の確認[\s\S]*上長から本人へ申請するよう連絡を/);
+  const r3 = results(); r3.requests = r2.requests; r3.workings[0].dailyWorkings.push(E('k001', '2026-12-01'));
+  save(g, '2026-12-03', r3);
+  assert.match(g.ctx.monthCloseDaily(), /11月分（今日が本人の申請の締め日です）/);
+  let n = g.fetches.length;
+  g.ctx.monthClosePersonal();
+  const p3 = toSelf(g.fetches.slice(n).filter((f) => f.url.endsWith('/push')));
+  assert.deepEqual(p3.map((f) => f.body.to).sort(), [U(1), U(4)]);
+  const m1 = text(p3.find((f) => f.body.to === U(1)));
+  assert.match(m1, /^お疲れ様です😊\n【11月分の打刻の最終のお願いです】[\s\S]*11\/9（月）[\s\S]*11\/10[\s\S]*本日（12\/3（木））が11月分の申請の締め日です/);
+  assert.ok(!/11\/2（/.test(m1) && !/12\/1（/.test(m1));                                         // 申請済みの日・今月の日は入らない
+  n = g.fetches.length;
+  g.ctx.monthClosePersonal();                                                                    // 2回目は送らない
+  assert.equal(toSelf(g.fetches.slice(n).filter((f) => f.url.endsWith('/push'))).length, 0);
+  // 4日：最終の一覧（上長へ連絡）。1回だけ
   g.clock.now = new Date('2026-12-04T08:30:00+09:00').getTime();
-  save(g, '2026-12-04', r2);
-  assert.equal(g.ctx.monthCloseDaily(), '');                                                     // 残っていれば完了は出さない
+  save(g, '2026-12-04', r3);
+  const t4 = g.ctx.monthCloseDaily();
+  assert.match(t4, /11月分・最終の一覧[\s\S]*試験 一郎：11\/9、11\/10、11\/16[\s\S]*上長へのご連絡をお願いします/);
+  assert.ok(!/12\/1/.test(t4));
   g.clock.now = new Date('2026-12-07T08:30:00+09:00').getTime();
-  save(g, '2026-12-07', r2);
+  save(g, '2026-12-07', r3);
+  assert.equal(g.ctx.monthCloseDaily(), null);                                                   // 最終の一覧は済み
+  g.clock.now = new Date('2026-12-15T08:30:00+09:00').getTime();
+  save(g, '2026-12-15', r3);
   assert.equal(g.ctx.monthCloseDaily(), null);                                                   // 対象外の日
+});
+
+test('月末の締め: 4日が土日なら次の平日に最終の一覧', () => {
+  const { g } = setup({ MONTH_CLOSE_NOTIFY: 'on', ADMIN_NOTIFY: 'digest' }, '2027-09-04T08:30:00+09:00');   // 2027/9/4 は土曜
+  save(g, '2027-09-04');
+  assert.equal(g.ctx.monthCloseDaily(), null);
+  g.clock.now = new Date('2027-09-06T08:30:00+09:00').getTime();                                 // 月曜
+  save(g, '2027-09-06', { employees: EMP, workings: [{ dailyWorkings: [E('k002', '2027-08-10')] }], requests: [] });
+  assert.match(g.ctx.monthCloseDaily(), /8月分・最終の一覧[\s\S]*試験 二郎：8\/10/);
 });
 
 test('月末の締め: 0件なら「完了」・土日祝はまとめを作らない・未設定は何もしない・データが無ければ管理者へ', () => {
   const X = setup().g.ctx;
   const empty = { ok: true, punch: {}, pend: [] };
-  assert.match(X.MC_text('done', '2026-11', empty, () => ''), /11月分の締めが完了しました/);
+  assert.match(X.MC_text('final', '2026-11', empty, () => ''), /11月分の締めが完了しました/);
   assert.match(X.MC_text('daily', '2026-11', empty, () => ''), /ありません✨/);
   const s = setup({ MONTH_CLOSE_NOTIFY: 'on' }, '2026-11-30T08:30:00+09:00');
   assert.equal(s.g.ctx.monthCloseDaily(), null);                                                 // 今朝のデータが無い

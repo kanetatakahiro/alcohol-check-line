@@ -3092,7 +3092,7 @@ function AC_weekMonday(today) {
  * 戻り値：{ ok（勤務・申請のデータがあり読み取りエラーが無い）, reason, byTot: { TOTコード: [日付…（古い順）] }, order: [TOTコード…], requested（申請があったので外した日数）,
  *   kinds: { 'TOTコード:日付': 'in'／'out'／'both' }（出勤・退勤の区別が分かる日だけ） }
  */
-function AC_weeklyPunchItems(R, today) {
+function AC_weeklyPunchItems(R, today, range) {   // range（任意・版 2026-11-20g）：{ from, to }（to は含まない）。無ければ当月1日〜前日
   R = R || {};
   var out = { ok: false, reason: '', byTot: {}, order: [], requested: 0, kinds: {}, reqDays: {} };
   var bad = function (a) { return !Array.isArray(a) || a.some(function (x) { return x && x._error; }); };
@@ -3101,10 +3101,10 @@ function AC_weeklyPunchItems(R, today) {
   if (!req.ok) { out.reason = '申請のデータが無い、または読み取りエラー'; return out; }
   out.ok = true;
   out.reqDays = req.days;
-  var codeByKey = AC_totCodeByKey_(R.employees), from = today.slice(0, 8) + '01', seen = {}, kinds = AC_punchKindIndex(R);
+  var codeByKey = AC_totCodeByKey_(R.employees), from = (range && range.from) || today.slice(0, 8) + '01', to = (range && range.to) || today, seen = {}, kinds = AC_punchKindIndex(R);
   AC_totFlat_(R.workings).forEach(function (w) {
     var tot = codeByKey[w && w.employeeKey];
-    if (!tot || w.isError !== true || !w.date || w.date < from || w.date >= today) return;
+    if (!tot || w.isError !== true || !w.date || w.date < from || w.date >= to) return;
     var t = AC_totKey(tot), k = t + ':' + w.date;
     if (seen[k]) return;
     seen[k] = 1;
@@ -3162,7 +3162,7 @@ function AC_weeklyPunchMessage(dates, today, overrides, kinds, changes, name) {
 function AC_weeklyPunchRun_(R, mv, today, o) {
   o = o || {};
   var preview = o.mode === 'preview', sendLive = o.mode === 'on' && o.live === true;
-  var plan = AC_weeklyPunchItems(R, today);
+  var plan = AC_weeklyPunchItems(R, today, o.range);
   var counts = { people: 0, dates: 0, sent: 0, recorded: 0, failed: 0, already: 0, requested: plan.requested, setting: 0, paused: 0, noMaster: 0, unreg: 0, changes: 0, formRequested: 0 };
   if (!plan.ok) return { ok: false, reason: plan.reason, counts: counts, people: [] };
   var line = AC_lineByTotCode(mv, today), codeOfTot = AC_codeByTot(mv), pauseIdx = AC_pauseIndex_(), state = AC_state_(), now = new Date();
@@ -3198,7 +3198,8 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
     var dk = {};
     dates.forEach(function (d) { if (plan.kinds[t + ':' + d]) dk[d] = plan.kinds[t + ':' + d]; });
-    var text = (o.head || '') + AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
+    var text = o.message ? o.message(dates, dk, changes, names[code] || '')   // 版 2026-11-20g：月末の締め（翌月3日の最終のお願い）は別の文面
+      : (o.head || '') + AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
     counts.changes += changes.length;
     if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }
     counts.people++; counts.dates += dates.length;

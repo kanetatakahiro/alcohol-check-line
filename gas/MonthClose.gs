@@ -1,28 +1,29 @@
 /**
- * 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20f）。業務マニュアル M02「月末の勤怠締めの確認」の AI 化。
+ * 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20g）。業務マニュアル M02「月末の勤怠締めの確認」の AI 化。
+ * 本人の申請の締め日は翌月3日。翌月4日に残っている人を勤怠管理グループへ出し、管理本部から上長へ連絡する。
  *
- * 毎朝 8時台（トリガー monthCloseDaily）に、日にちで次のことをする：
- *   - 月末の前日：今月1日〜前日の「申請していない打刻漏れ」がある本人へ、個別 LINE で「締め前の最後のお願い」
- *       （毎週月曜の催促と同じ作り AC_weeklyPunchRun_ を使う。同じ月は1人1通。お知らせ設定・停止中・LINE 未登録は今までどおり外す）
- *   - 月末・翌月1日・2日：【月末の締め】のまとめ（①申請していない打刻漏れ（人ごと・日付）②承認待ちの申請（人ごと）③前日からの減り具合）
- *   - 翌月3日：最終の一覧（残っている人＝上長へ連絡が必要な人）
- *   - 翌月4日：残りが 0 件なら「締め完了」
- *   まとめは AC_pushLine_（ADMIN_NOTIFY=digest のとき、平日 9時の勤怠管理グループのまとめに入る）。土日祝はまとめを作らない
- *   対象の月：月末の前日・月末は今月、翌月1〜4日は前月
+ * 本人へ（トリガー monthClosePersonal・毎朝9時台）：
+ *   - 月末の前日：今月1日〜前日の「申請していない打刻漏れ」がある本人へ「締め前の最後のお願い」
+ *   - 翌月3日：前月分でまだ申請していない本人へ「最終のお願い（今日が締め日）」（土日祝でも送る）
+ *   毎週月曜の催促と同じ作り（AC_weeklyPunchRun_）。同じ月・同じお願いは1人1通。お知らせ設定・停止中・LINE 未登録は今までどおり外す
+ * 勤怠管理グループへ（トリガー monthCloseDaily・毎朝8時台に作り、平日9時のまとめに入る。土日祝は作らない）：
+ *   - 月末・翌月1〜3日：【月末の締め】のまとめ（①申請していない打刻漏れ（人ごと・日付）②承認待ちの申請（人ごと）③前日からの減り具合）
+ *   - 翌月4日（土日祝なら次の平日・10日まで）：最終の一覧＝本人の締め日を過ぎても残っている人（上長へ連絡する人）。0件なら「締め完了」
+ *   対象の月：月末の前日・月末は今月、翌月1〜10日は前月
  *
  * スクリプトプロパティ：MONTH_CLOSE_NOTIFY  未設定・off＝何もしない／record＝まとめは作るが本人へは送らず記録だけ／on＝送る
  * データ：朝の tot-latest.json（今朝のデータでなければ何もしない）
  */
-var MC_VERSION = '2026-11-20f';
+var MC_VERSION = '2026-11-20g';
 
-/** 純粋関数：今日することと対象の月。{ kind: 'eve'|'daily'|'final'|'done'|null, month: 'YYYY-MM' } */
+/** 純粋関数：今日することと対象の月。{ kind: 'eve'|'daily'|'deadline'|'final'|null, month: 'YYYY-MM' } */
 function MC_phase(today) {
   var d = Number(today.slice(8, 10)), ym = today.slice(0, 7), prev = AC_addMonths(ym, -1);
   if (AC_isMonthEnd(AC_addDays_(today, 1))) return { kind: 'eve', month: ym };
   if (AC_isMonthEnd(today)) return { kind: 'daily', month: ym };
   if (d === 1 || d === 2) return { kind: 'daily', month: prev };
-  if (d === 3) return { kind: 'final', month: prev };
-  if (d === 4) return { kind: 'done', month: prev };
+  if (d === 3) return { kind: 'deadline', month: prev };
+  if (d >= 4 && d <= 10) return { kind: 'final', month: prev };
   return { kind: null, month: '' };
 }
 
@@ -63,8 +64,8 @@ function MC_counts(items) {
 /** 純粋関数：まとめの文。nameOf(TOTコード) → 氏名。prev＝前日の件数（なければ null） */
 function MC_text(kind, month, items, nameOf, prev) {
   var c = MC_counts(items), m = Number(month.slice(5, 7)) + '月', md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)); };
-  if (kind === 'done') return c.punch + c.pend === 0 ? '【月末の締め】' + m + '分の締めが完了しました✨（申請していない打刻漏れ・承認待ちの申請は0件です）' : '';
-  var head = '【月末の締め】' + m + '分' + (kind === 'final' ? '・最終の確認（今日が締めの日です）' : '');
+  if (kind === 'final' && c.punch + c.pend === 0) return '【月末の締め】' + m + '分の締めが完了しました✨（申請していない打刻漏れ・承認待ちの申請は0件です）';
+  var head = '【月末の締め】' + m + '分' + (kind === 'deadline' ? '（今日が本人の申請の締め日です）' : kind === 'final' ? '・最終の一覧（本人の締め日を過ぎて残っている分）' : '');
   if (c.punch + c.pend === 0) return head + '\n申請していない打刻漏れ・承認待ちの申請はありません✨';
   var lines = [head];
   var tots = Object.keys(items.punch).sort(function (a, b) { return items.punch[a][0] < items.punch[b][0] ? -1 : 1; });
@@ -81,31 +82,63 @@ function MC_text(kind, month, items, nameOf, prev) {
   });
   if (!items.pend.length) lines.push('・なし');
   if (prev) lines.push('', '③ 前日から：打刻漏れ ' + MC_diff(prev.punch, c.punch) + '／承認待ち ' + MC_diff(prev.pend, c.pend));
-  if (kind === 'final' && tots.length) lines.push('', '①の方は、上長から本人へ申請するよう連絡をお願いします🙏（今日中に申請がなければ、来月の扱いになります）');
+  if (kind === 'final' && tots.length) lines.push('', '①の方は、上長へのご連絡をお願いします🙏');
   return lines.join('\n');
 }
 function MC_diff(a, b) { return a === b ? '変わらず（' + b + '件）' : a + '件 → ' + b + '件'; }
 
-/** トリガー（毎朝8時台）。手動で実行してもよい（同じ日の2回目は何もしない） */
+/** 純粋関数：翌月3日に本人へ送る「最終のお願い」の文。dates＝前月の申請していない打刻漏れの日、today＝送る日 */
+function MC_deadlineMessage(dates, today, kinds, changes, name) {
+  var md = function (d) { return Number(d.slice(5, 7)) + '/' + Number(d.slice(8, 10)) + '（' + '日月火水木金土'.charAt(new Date(d + 'T00:00:00+09:00').getDay()) + '）'; };
+  var m = dates.length ? Number(dates[0].slice(5, 7)) + '月' : '先月';
+  var parts = ['お疲れ様です😊\n【' + m + '分の打刻の最終のお願いです】'];
+  if (dates.length) parts.push('【申請が確認できていない打刻漏れ】\n' + dates.map(function (d) { var k = kinds && kinds[d]; return '・' + md(d) + (k ? AC_punchKindLabel(k) : ''); }).join('\n')
+    + '\n' + AC_weeklyPunchGuides(dates, kinds).join('\n'));
+  if (changes && changes.length) parts.push(AC_formChangeBlock(changes, name));
+  parts.push('本日（' + md(today) + '）が' + m + '分の申請の締め日です。\n本日中のご申請をお願いいたします🙏\n\nよろしくお願いいたします！');
+  return parts.join('\n\n').slice(0, 4900);
+}
+
+/** 本人へ（トリガー・毎朝9時台）。月末の前日と翌月3日だけ送る。手動で実行してもよい（同じ月の2回目は送らない） */
+function monthClosePersonal() {
+  var props = PropertiesService.getScriptProperties(), mode = String(props.getProperty('MONTH_CLOSE_NOTIFY') || '').trim();
+  if (mode !== 'record' && mode !== 'on') return null;
+  var today = AC_today_(), ph = MC_phase(today);
+  if (ph.kind !== 'eve' && ph.kind !== 'deadline') return null;
+  try {
+    var d = AC_weeklyPunchData_(today);
+    if (!d.R) { AC_adminNotice_('monthclose', '【エラー】月末の締めの本人へのお願いを送れませんでした🙇‍♀️\n（' + d.reason + '）'); return null; }
+    var mv = AC_masterSheet_().getDataRange().getValues(), live = mode === 'on' && props.getProperty('DRY_RUN') === 'false';
+    var o = ph.kind === 'eve'
+      ? { mode: mode, live: live, period: ph.month, tag: 'monthclose', label: '（月末の締め前のお願い）', head: '【今月の締め前の最後のお願いです】\n' }
+      : { mode: mode, live: live, period: ph.month, tag: 'monthclose3', label: '（翌月3日の最終のお願い）',
+          range: { from: ph.month + '-01', to: AC_addMonths(ph.month, 1) + '-01' },
+          message: function (dates, kinds, changes, name) { return MC_deadlineMessage(dates, today, kinds, changes, name); } };
+    var res = AC_weeklyPunchRun_(d.R, mv, today, o);
+    Logger.log('月末の締め（本人・' + ph.kind + '・' + mode + '）：' + (res.ok ? '送る人 ' + res.counts.people + '人・送信 ' + res.counts.sent + '人・記録 ' + res.counts.recorded + '人' : res.reason));
+    if (!res.ok) AC_adminNotice_('monthclose', '【エラー】月末の締めの本人へのお願いを送れませんでした🙇‍♀️\n（' + res.reason + '）');
+    return res;
+  } catch (e) {
+    Logger.log('月末の締め（本人）の処理エラー：%s', e && e.message);
+    AC_adminNotice_('monthclose', '【エラー】月末の締めの本人へのお願いで問題がありました🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
+    return null;
+  }
+}
+
+/** 勤怠管理グループのまとめ（トリガー・毎朝8時台）。手動で実行してもよい（同じ日の2回目は何もしない） */
 function monthCloseDaily() {
   var props = PropertiesService.getScriptProperties(), mode = String(props.getProperty('MONTH_CLOSE_NOTIFY') || '').trim();
   if (mode !== 'record' && mode !== 'on') return null;
   var today = AC_today_(), ph = MC_phase(today);
-  if (!ph.kind) return null;
-  var state = AC_state_(), doneKey = 'mclose:' + today;
+  if (!ph.kind || ph.kind === 'eve') return null;
+  var state = AC_state_(), doneKey = 'mclose:' + today, finalKey = 'mclose:final:' + ph.month;
   if (state.getProperty(doneKey)) { Logger.log('月末の締め：今日はもう実行済み'); return null; }
+  if (ph.kind === 'final' && state.getProperty(finalKey)) return null;   // 最終の一覧は1回だけ
+  if (typeof OT_isBusinessDay === 'function' && !OT_isBusinessDay(today, typeof OT_offDates_ === 'function' ? OT_offDates_() : [])) { Logger.log('月末の締め：土日祝のためまとめは作らない'); return null; }
   try {
     var d = AC_weeklyPunchData_(today);
     if (!d.R) { AC_adminNotice_('monthclose', '【エラー】月末の締めの確認ができませんでした🙇‍♀️\n（' + d.reason + '）'); return null; }
     var mv = AC_masterSheet_().getDataRange().getValues();
-    if (ph.kind === 'eve') {   // 本人へ「締め前の最後のお願い」
-      var res = AC_weeklyPunchRun_(d.R, mv, today, { mode: mode, live: mode === 'on' && props.getProperty('DRY_RUN') === 'false',
-        period: ph.month, tag: 'monthclose', label: '（月末の締め前のお願い）', head: '【今月の締め前の最後のお願いです】\n' });
-      state.setProperty(doneKey, new Date().toISOString());
-      Logger.log('月末の締め（前日・' + mode + '）：' + (res.ok ? '送る人 ' + res.counts.people + '人・送信 ' + res.counts.sent + '人・記録 ' + res.counts.recorded + '人' : res.reason));
-      return res;
-    }
-    if (typeof OT_isBusinessDay === 'function' && !OT_isBusinessDay(today, typeof OT_offDates_ === 'function' ? OT_offDates_() : [])) { Logger.log('月末の締め：土日祝のためまとめは作らない'); return null; }
     var items = MC_items(d.R, today, ph.month);
     if (!items.ok) { AC_adminNotice_('monthclose', '【エラー】月末の締めの確認ができませんでした🙇‍♀️\n（' + items.reason + '）'); return null; }
     var codeOfTot = AC_codeByTot(mv), names = AC_nameByCode_(mv), nameOf = function (t) { var c = codeOfTot[t]; return c ? names[c] || '' : ''; };
@@ -113,6 +146,7 @@ function monthCloseDaily() {
     var text = MC_text(ph.kind, ph.month, items, nameOf, prev);
     state.setProperty('mclose:last:' + ph.month, JSON.stringify(MC_counts(items)));
     state.setProperty(doneKey, new Date().toISOString());
+    if (ph.kind === 'final') state.setProperty(finalKey, new Date().toISOString());
     if (text) AC_pushLine_(text);
     Logger.log('月末の締め（' + ph.kind + '・' + ph.month + '）：' + JSON.stringify(MC_counts(items)));
     return text;
@@ -135,13 +169,14 @@ function monthClosePreview(day) {
   return MC_counts(items);
 }
 
-/** トリガー：毎朝8時台（monthCloseDaily）。同じ関数のトリガーがあれば作らない */
+/** トリガー：毎朝8時台（monthCloseDaily・グループのまとめ）と9時台（monthClosePersonal・本人へ）。同じ関数のトリガーがあれば作らない */
 function monthCloseSetupTrigger() {
-  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'monthCloseDaily'; });
-  if (!has) ScriptApp.newTrigger('monthCloseDaily').timeBased().everyDays(1).atHour(8).inTimezone(AC_TZ).create();
+  var has = function (f) { return ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === f; }); };
+  if (!has('monthCloseDaily')) ScriptApp.newTrigger('monthCloseDaily').timeBased().everyDays(1).atHour(8).inTimezone(AC_TZ).create();
+  if (!has('monthClosePersonal')) ScriptApp.newTrigger('monthClosePersonal').timeBased().everyDays(1).atHour(9).inTimezone(AC_TZ).create();
 }
 function monthCloseRemoveTrigger() {
-  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'monthCloseDaily') ScriptApp.deleteTrigger(t); });
+  ScriptApp.getProjectTriggers().forEach(function (t) { var f = t.getHandlerFunction(); if (f === 'monthCloseDaily' || f === 'monthClosePersonal') ScriptApp.deleteTrigger(t); });
 }
 
-if (typeof module !== 'undefined') module.exports = Object.assign(module.exports || {}, { MC_phase: MC_phase, MC_items: MC_items, MC_text: MC_text, MC_counts: MC_counts });
+if (typeof module !== 'undefined') module.exports = Object.assign(module.exports || {}, { MC_phase: MC_phase, MC_items: MC_items, MC_text: MC_text, MC_counts: MC_counts, MC_deadlineMessage: MC_deadlineMessage });

@@ -94,7 +94,7 @@ var INQ_APPEND_NOTICE_MS = 30 * 60 * 1000;
 var INQ_DEDUPE_ROWS = 2000;     // 受信記録の直近の行数（重複の確認に使う。Workersの再送は最長24時間）
 var INQ_SECRET_LABEL = '機密を含むため、チャットで確認してください';
 var INQ_SENSITIVE_LABEL = '（内容はチャットで確認してください）';   // 要注意の分類のとき、内容の代わりに出す
-var INQ_REMIND_HOURS = [9, 15];
+var INQ_REMIND_HOURS = [9, 12];   // 2026-11-20：15時はみんな帰っているため 9時・12時に（安藤さん）
 var INQ_LAST_REMIND_KEY = 'inq:lastRemind';   // 版 2026-11-17e：いちばん新しいまとめの番号の並び（ユーザーのプロパティ）
 var INQ_TEXT_MAX = 4900;
 

@@ -490,7 +490,7 @@ test('13d 本人へのお知らせ：record は送らず記録だけ／DRY_RUN�
   // フォームから入ったお知らせ停止（欠勤の日）は数えない（live の最初のテストで送れていることで確認済み）
 });
 
-test('13d まとめ（INQ_remind）：承認待ちの一覧を足す（0件なら足さない）。前日の15時台に承認待ちのカードをもう一度（1枚1回）', () => {
+test('13d まとめ（INQ_remind）：承認待ちの一覧を足す（0件なら足さない）。前日の12時の回（版 2026-11-20a から。前は15時台）に承認待ちのカードをもう一度（1枚1回）', () => {
   const { g, mf } = setup({ TOT_WRITE: 'on' }, '2026-11-15T09:00:00+09:00');
   g.drive.files['tot-latest.json'] = { ...g.drive.files['tot-latest.json'] };
   g.ctx.INQ_remind();
@@ -503,9 +503,9 @@ test('13d まとめ（INQ_remind）：承認待ちの一覧を足す（0件な�
   assert.equal(ps.length, 1, JSON.stringify(ps.map((f) => [f.body.to, f.body.messages[0].text || f.body.messages[0].altText])));
   assert.equal(ps[0].body.to, KANRI);
   assert.equal(ps[0].body.messages[0].text, '【承認待ちの勤怠の変更 2件】\n・試験 一郎さん 11/16（月） 欠勤\n・試験 一郎さん 11/20（金） 有給休暇\n勤怠管理グループの承認のカードから、承認または「反映しない」を押してください。');
-  g.clock.now = new Date('2026-11-15T15:00:00+09:00').getTime();
+  g.clock.now = new Date('2026-11-15T12:00:00+09:00').getTime();
   n = g.fetches.length;
-  g.ctx.INQ_remind();                                                      // 15時台：11/16 のカードだけもう一度
+  g.ctx.INQ_remind();                                                      // 12時の回：11/16 のカードだけもう一度
   ps = pushes(g, n);
   const again = ps.map((f) => f.body.messages[0]).filter((m) => m.type === 'flex');
   assert.equal(again.length, 1);
@@ -560,4 +560,27 @@ test('13d お知らせ設定：今のシート（ATT-11 の列が無い）に、
   }
   g.ctx.AC_NS_CACHE = null;
   assert.equal(g.ctx.AC_noticeCheck_('ATT-11', '90001', TODAY).send, true);
+});
+
+test('20a 前日の再通知：12時の回がトリガーのずれで 11:45〜12:15 のどこで動いても1回だけ送る（9時の回では送らない）', () => {
+  for (const [first, second] of [['11:45', '12:15'], ['12:00', '12:15'], ['12:15', '12:15'], ['11:45', '11:46']]) {
+    const { g, mf } = setup({ TOT_WRITE: 'on' }, '2026-11-15T08:45:00+09:00');
+    g.drive.files['tot-latest.json'] = { ...g.drive.files['tot-latest.json'] };
+    submit(g, { 区分: '欠勤', '日付（開始日）': '2026-11-16' });
+    const resent = (hm) => {
+      g.clock.now = new Date(`2026-11-15T${hm}:00+09:00`).getTime();
+      const n = g.fetches.length;
+      g.ctx.INQ_remind();
+      return pushes(g, n).map((f) => f.body.messages[0]).filter((m) => m.type === 'flex' && /明日が対象の日です/.test(m.altText)).length;
+    };
+    assert.equal(resent('08:45'), 0, '9時の回（早め）');
+    assert.equal(resent('09:15'), 0, '9時の回（遅め）');
+    assert.equal(resent(first), 1, first);
+    assert.equal(resent(second), 0, second + '（2回目は送らない）');
+    assert.equal(resent('15:00'), 0, 'その後の回も送らない');
+    assert.ok(sheet(mf).dump()[1][26]);
+    const log = mf.getSheetByName('TOT反映の記録');
+    assert.equal(log.dump().filter((r) => r[2] === '再通知').length, 1);
+    assert.ok(log.dump().some((r) => r[2] === '再通知' && r[3] === '前日の12時の回'));
+  }
 });

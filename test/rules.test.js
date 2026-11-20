@@ -320,15 +320,15 @@ test('ルール8：本人のボタンは受け付けない。TOT の承認は TO
 });
 
 // ======================================================================
-// ルール9：9:00・15:00 のまとめに承認待ちを載せる。対象の日の前日15時台に承認待ちを1回だけ再通知
+// ルール9：9:00・12:00 のまとめに承認待ちを載せる。対象の日の前日12時の回（版 2026-11-20a から。前は15時台）に承認待ちを1回だけ再通知
 // ======================================================================
-test('ルール9：まとめに承認待ちの一覧。前日の15時台に1回だけ再通知（15時より前・2回目・承認待ちでない・前日でないは出さない）', () => {
+test('ルール9：まとめに承認待ちの一覧。前日の12時の回に1回だけ再通知（9時の回・2回目・承認待ちでない・前日でないは出さない）', () => {
   const X = sync().g.ctx, S = X.SCH_STATE;
   const c = { state: S.wait, name: '試験 一郎', label: '欠勤', from: '2026-11-14', until: '2026-11-14', changeTo: '', renotifiedAt: '' };
   assert.equal(X.SCH_remindText([c, { ...c, state: S.done }]), '【承認待ちの勤怠の変更 1件】\n・試験 一郎さん 11/14（土） 欠勤\n勤怠管理グループの承認のカードから、承認または「反映しない」を押してください。');
   assert.equal(X.SCH_remindText([{ ...c, state: S.done }]), null);
-  assert.equal(X.SCH_isDueForResend(c, TODAY, 15), true);
-  assert.equal(X.SCH_isDueForResend(c, TODAY, 14), false);
+  for (const hm of ['11:30', '11:45', '12:00', '12:15', '15:00', 12, 15]) assert.equal(X.SCH_isDueForResend(c, TODAY, hm), true, String(hm));
+  for (const hm of ['08:45', '09:00', '09:15', '11:29', 9, 11, '']) assert.equal(X.SCH_isDueForResend(c, TODAY, hm), false, String(hm));
   assert.equal(X.SCH_isDueForResend({ ...c, renotifiedAt: new Date() }, TODAY, 15), false);
   assert.equal(X.SCH_isDueForResend({ ...c, state: S.queued }, TODAY, 15), false);
   assert.equal(X.SCH_isDueForResend({ ...c, from: '2026-11-15', until: '2026-11-15' }, TODAY, 15), false);

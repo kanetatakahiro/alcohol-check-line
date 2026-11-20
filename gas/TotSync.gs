@@ -32,11 +32,12 @@
  *     申請は朝・夜の中継のデータ（tot-latest.json の requests）から探す。VPS が承認・棄却の直前に申請の状態を読み直す。
  *     打刻申請・残業申請はカードに出さない。申請の承認・棄却は元に戻せない（「元に戻す」はスケジュールを書いたときだけ）。
  *  B1. カードの対象者本人が押したボタンは受け付けない（従業員マスタの LINEユーザーID と社員番号で判定）。
- *  B2. 9:00・15:00 の問い合わせのまとめ（INQ_remind）に「承認待ちの勤怠の変更」を足す。対象の日の前日の15時台に承認待ちのカードはもう一度送る（1枚1回）。
+ *  B2. 9:00・12:00 の問い合わせのまとめ（INQ_remind）に「承認待ちの勤怠の変更」を足す。対象の日の前日の12時の回（版 2026-11-20a から。前は15時台）に承認待ちのカードはもう一度送る（1枚1回）。
  *  B3. 反映できたら（スケジュールを書いた・申請を承認した）本人へ1通（通知ID ATT-11。お知らせ設定・お知らせ停止はほかの本人向けと同じ判定）。
  *      TOT_WRITE=on かつ DRY_RUN=false のときだけ送る。それ以外は送る予定の文を「TOT反映」シートの「本人へのお知らせ」に記録する。
  */
-var SCH_VERSION = '2026-11-16a';   // 版 2026-11-16a：ATT-11 の最後に「※このメッセージはAIによる自動送信です。」（AC_pushSelf_）
+var SCH_VERSION = '2026-11-20a';   // 版 2026-11-20a：前日の再通知を、まとめの12時の回で送る（SCH_RESEND_HOUR 15 → 12。トリガーのずれで 11:45 に動いても送る）
+var SCH_VERSION_16A = '2026-11-16a';   // 版 2026-11-16a：ATT-11 の最後に「※このメッセージはAIによる自動送信です。」（AC_pushSelf_）
 var SCH_SHEET = 'TOT反映';
 var SCH_LOG_SHEET = 'TOT反映の記録';
 var SCH_HEADER = ['受付番号', '状態', '受付日時', '社員番号', '氏名', '区分', '開始日', '終了日', '変更後の休みの日', '入力者',
@@ -50,7 +51,8 @@ var SCH_C = { id: 0, state: 1, at: 2, code: 3, name: 4, label: 5, from: 6, until
 var SCH_METHOD = { apply: '反映', approveReq: '申請を承認', rejectApply: '申請を棄却して反映' };
 var SCH_ACTION_METHOD = { approve: SCH_METHOD.apply, reqok: SCH_METHOD.approveReq, reqng: SCH_METHOD.rejectApply };
 var SCH_SELF_NOTICE_ID = 'ATT-11';
-var SCH_RESEND_HOUR = 15;
+var SCH_RESEND_HOUR = 12;   // 2026-11-20：まとめが 9時・12時になったため 15 → 12（版 2026-11-20a）
+var SCH_RESEND_EARLY_MIN = 30;   // トリガーの nearMinute(0) は前後15分ずれるので、12時の 30分前（11:30）から送る（9時の回は 9:15 までなので重ならない）
 var SCH_SELF_TEXT = 'ご自身の分は、ほかの方が承認してください。';
 var SCH_LOG_HEADER = ['日時', '受付番号', '操作', '結果', 'LINEユーザーID', 'イベント番号'];
 var SCH_STATE = { wait: '承認待ち', queued: '反映待ち', sending: '反映中', done: '反映済み', failed: '失敗', declined: '反映しない',
@@ -330,9 +332,18 @@ function SCH_remindText(cases) {
   })).concat(['勤怠管理グループの承認のカードから、承認または「反映しない」を押してください。']).join('\n');
 }
 
-/** 純粋関数：前日の15時台にもう一度送るカードか（承認待ち・まだ再通知していない・いちばん早い対象の日が明日） */
-function SCH_isDueForResend(c, today, hour) {
-  if (c.state !== SCH_STATE.wait || !(hour >= SCH_RESEND_HOUR) || (c.renotifiedAt instanceof Date) || String(c.renotifiedAt || '')) return false;
+/**
+ * 純粋関数：前日の12時の回（版 2026-11-20a から。前は15時台）にもう一度送るカードか（承認待ち・まだ再通知していない・いちばん早い対象の日が明日）。
+ * hm は日本時間の「HH:mm」（数だけなら「時」として扱う）。SCH_RESEND_HOUR の SCH_RESEND_EARLY_MIN 分前（11:30）から送る。1枚1回は「再通知日時」の列で守る。
+ */
+function SCH_resendMinutes_(hm) {
+  if (typeof hm === 'number') return hm * 60;
+  var m = String(hm || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+}
+function SCH_isDueForResend(c, today, hm) {
+  if (c.state !== SCH_STATE.wait || !(SCH_resendMinutes_(hm) >= SCH_RESEND_HOUR * 60 - SCH_RESEND_EARLY_MIN)
+    || (c.renotifiedAt instanceof Date) || String(c.renotifiedAt || '')) return false;
   var first = SCH_days(c).slice().sort()[0];
   return first === SCH_addDays(today, 1);
 }
@@ -768,22 +779,22 @@ function SCH_watch_() {
 }
 
 /**
- * まとめのお知らせ（INQ_remind・9:00・15:00）から呼ぶ（版 2026-11-13d）。TOT_WRITE が未設定・シートが無ければ null。
- * 戻り値 { text（承認待ちの一覧。0件なら null）, after（前日の15時台に、承認待ちのカードをもう一度送る。1枚1回） }
+ * まとめのお知らせ（INQ_remind・9:00・12:00）から呼ぶ（版 2026-11-13d）。TOT_WRITE が未設定・シートが無ければ null。
+ * 戻り値 { text（承認待ちの一覧。0件なら null）, after（前日の12時の回（版 2026-11-20a から。前は15時台）に、承認待ちのカードをもう一度送る。1枚1回） }
  */
 function SCH_remindPart_(now) {
   var mode = SCH_mode_();
   if (mode === 'off') return null;
   var ss = SCH_book_(), sh = ss.getSheetByName(SCH_SHEET);
   if (!sh) return null;
-  var cases = SCH_cases_(sh), today = Utilities.formatDate(now, AC_TZ, 'yyyy-MM-dd'), hour = Number(Utilities.formatDate(now, AC_TZ, 'HH'));
-  var due = cases.filter(function (c) { return SCH_isDueForResend(c, today, hour); });
+  var cases = SCH_cases_(sh), today = Utilities.formatDate(now, AC_TZ, 'yyyy-MM-dd'), hm = Utilities.formatDate(now, AC_TZ, 'HH:mm');
+  var due = cases.filter(function (c) { return SCH_isDueForResend(c, today, hm); });
   return { text: SCH_remindText(cases), after: function () {
     due.forEach(function (c) {
       SCH_set_(sh, c.row, 'renotifiedAt', new Date());
       var lines = String(sh.getRange(c.row, SCH_C.plan + 1).getValue() || '').split('\n').filter(Boolean);
       SCH_send_([SCH_cardMessage(c, lines, mode, { title: '【TOT反映の承認・明日が対象の日です】' })], '【TOT反映の承認・明日が対象の日です】' + SCH_what(c));
-      SCH_log_(ss, c.id, '再通知', '前日の15時台', '', '');
+      SCH_log_(ss, c.id, '再通知', '前日の12時の回', '', '');
     });
   } };
 }

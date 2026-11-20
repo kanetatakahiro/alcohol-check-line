@@ -19,7 +19,7 @@
 | 6 | ATT-02 が OFF・お知らせ停止中の人には送らない。ただしフォームから入った停止の日は打刻の項目だけ送る（【勤怠の変更】）。手で入れた停止の日は何も送らない | AC_isPausedForPunch、AC_isPaused、AC_noticeCheck_ | ルール6（2件） | ルールどおり |
 | 7 | 承認カードに出すのはスケジュール申請（申請中）だけ。打刻申請・残業申請は出さない | SCH_pendingRequests、SCH_requestLines | ルール7 | ルールどおり |
 | 8 | カードの対象者本人は承認できない。TOT への申請の承認・棄却は TOT_APPROVER_KEY の管理者で行う（無い・承認フローにいなければ承認しない） | SCH_isSelf_、SCH_button_、src/tot-write.js の checkRequests | ルール8 | ルールどおり |
-| 9 | 9:00・12:00（11/20 14:39 から。前は 9:00・15:00）のまとめに承認待ちを載せる。対象の日の前日15時台に承認待ちのカードを1回だけもう一度送る | SCH_remindText、SCH_isDueForResend、SCH_remindPart_ | ルール9 | 承認待ちを載せるのはルールどおり。**前日の再通知は 11/20 14:39 から動いていない**（SCH_RESEND_HOUR=15 だが、まとめが 9時・12時になり15時台の回が無いため。要対応） |
+| 9 | 9:00・12:00（11/20 14:39 から。前は 9:00・15:00）のまとめに承認待ちを載せる。対象の日の前日の12時の回（版 2026-11-20a から。前は15時台）に承認待ちのカードを1回だけもう一度送る | SCH_remindText、SCH_isDueForResend、SCH_remindPart_ | ルール9 | ルールどおり（版 2026-11-20a：SCH_RESEND_HOUR を 15 → 12 に。トリガーのずれを見込んで 11:30 から送る。11/20 14:39 から 2026-11-20a を本番に入れるまでは、前日の再通知が送られない） |
 | 10 | 反映できたら本人に ATT-11 を1通。TOT_WRITE=record のときは送らず記録だけ（「TOT反映」シートの「本人へのお知らせ」） | SCH_handleResult_、SCH_selfNotify_、SCH_button_ | ルール10 | ルールどおり |
 | 11 | TOT_WRITE が未設定・record のとき、TOT には何も書かない（未設定はシートもカードも作らない。record は VPS に何も渡さない） | SCH_mode_、SCH_onForm_、SCH_handleQueue_ | ルール11 | ルールどおり |
 | 12 | 管理本部の人も、ほかの人と同じく E-40（夜）と E-78（月曜）の対象（所属で外さない） | AC_lineByTotCode（LINE確認済み・退職でないかだけを見る） | ルール12 | ルールどおり（所属で外す処理は無い） |

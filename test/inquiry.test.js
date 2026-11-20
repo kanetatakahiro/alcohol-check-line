@@ -41,18 +41,22 @@ test('INQ: 機密の部分を伏せて保存する', () => {
   assert.ok(!/\d{7}/.test(X.INQ_maskSecret('１２３４５６７８')));
 });
 
-test('INQ: 冒頭20文字（改行は空白・絵文字は1文字・超えたら…）', () => {
+test('INQ: 冒頭200文字（改行は空白・絵文字は1文字・超えたら…）。版 2026-11-20b で 20 → 200', () => {
   assert.equal(X.INQ_head('短い'), '短い');
-  assert.equal(X.INQ_head('あ'.repeat(20)), 'あ'.repeat(20));
-  assert.equal(X.INQ_head('あ'.repeat(21)), 'あ'.repeat(20) + '…');
+  assert.equal(X.INQ_head('あ'.repeat(200)), 'あ'.repeat(200));
+  assert.equal(X.INQ_head('あ'.repeat(201)), 'あ'.repeat(200) + '…');
+  assert.equal(X.INQ_head('あ'.repeat(21), 20), 'あ'.repeat(20) + '…');   // 長さを渡せば今までどおり
   assert.equal(X.INQ_head('1行目\n\n2行目'), '1行目 2行目');
-  assert.equal(X.INQ_head('😀'.repeat(25)), '😀'.repeat(20) + '…');
+  assert.equal(X.INQ_head('😀'.repeat(205)), '😀'.repeat(200) + '…');
 });
 
 test('INQ: 文字以外のメッセージの表示（スタンプは記録だけ）', () => {
-  assert.equal(X.INQ_messageSummary({ type: 'image' }), '（画像）');
-  assert.equal(X.INQ_messageSummary({ type: 'file', fileName: '個人の書類.pdf' }), '（ファイル）');   // ファイル名は残さない
-  assert.equal(X.INQ_messageSummary({ type: 'location' }), '（位置情報）');
+  assert.equal(X.INQ_messageSummary({ type: 'image' }), '［写真1枚］');   // 版 2026-11-20b：写真・動画・ファイル（名前）の形
+  assert.equal(X.INQ_messageSummary({ type: 'video' }), '［動画］');
+  assert.equal(X.INQ_messageSummary({ type: 'file', fileName: '架空の書類.pdf' }), '［ファイル（架空の書類.pdf）］');
+  assert.equal(X.INQ_messageSummary({ type: 'file', fileName: 'あ'.repeat(45) + '.pdf' }), '［ファイル（' + 'あ'.repeat(40) + '…）］');
+  assert.equal(X.INQ_messageSummary({ type: 'file' }), '［ファイル］');
+  assert.equal(X.INQ_messageSummary({ type: 'location' }), '［位置情報］');
   assert.equal(X.INQ_messageSummary({ type: 'sticker' }), null);
   assert.equal(X.INQ_messageSummary({ type: 'text', text: 'こんにちは' }), 'こんにちは');
 });

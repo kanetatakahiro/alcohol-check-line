@@ -2,7 +2,7 @@
  * 従業員問い合わせ管理（第1段階）  版 INQ_VERSION
  *
  * 従業員が公式LINEに1対1で送った「社員番号以外」のメッセージを、問い合わせとして受け付け、
- * 問い合わせ専用のスプレッドシートに記録し、勤怠管理グループへ知らせる（ボタン：対応します／対応済みにする）。
+ * 問い合わせ専用のスプレッドシートに記録し、従業員連絡グループ（未登録なら勤怠管理グループ）へ知らせる（ボタン：対応します／対応済みにする）。
  * 9:00・15:00 に未対応・対応中の案件をまとめて知らせる（INQ_remind・時刻指定のトリガー。INQ_setupRemindTriggers で登録）。
  * 勤怠管理グループへのお知らせには案件番号を出さない（名前・所属・状況・要約・内容）。ボタンの中身には案件番号と合言葉が入る（表示されない）。
  *
@@ -14,7 +14,7 @@
  * 設定（スクリプトのプロパティ）
  *  INQ_MODE           未設定・off＝何もしない／record＝記録だけ（送信・返信なし）／on＝利用開始
  *  INQ_SPREADSHEET_ID 記録先のスプレッドシート（INQ_setup で作成）
- *  INQ_NOTIFY_TO      未設定＝勤怠管理グループへ／admin＝管理者の個別LINEへ（試験用）
+ *  INQ_NOTIFY_TO      未設定＝「従業員連絡」グループへ（未登録・退出なら勤怠管理グループ）／admin＝管理者の個別LINEへ（試験用）
  *  INQ_REMIND_DAYS    未設定・all＝毎日／weekdays＝土日・祝日は送らない（版 2026-11-17e で祝日も。受付の速報はいつも送る）
  *  INQ_ROUTINE_WORDS・INQ_SECRET_WORDS  定型連絡・機密の言葉の追加（「、」区切り・任意）
  *  INQ_CLASSIFY       未設定＝分類・要点を埋める／off＝埋めない（問い合わせの記録・通知はそのまま）
@@ -37,11 +37,19 @@
  *  新しい受付と、対応中の案件への追記が対象。未対応の案件への追記（質問のあとの「よろしくお願いします」など）と、要注意（⚠）の分類は閉じない。
  *  案件の無い人のスタンプは今までどおり定型連絡（案件にしない）。
  *
+ * 送り先（版 2026-11-20b）：受付のお知らせ・追記のお知らせ・9:00／15:00 のまとめは「従業員連絡」グループ（「LINEグループ」タブで部門「従業員連絡」・状態「有効」。
+ *  グループで「部門登録 従業員連絡」）へ。未登録・退出・送信失敗なら勤怠管理グループ、それも無理なら管理者の個別LINE。
+ *  TOT反映の承認待ち・管理者へのお知らせ（朝のまとめ）は今までどおり勤怠管理グループ。ボタン・「1.3対応済み」はどちらのグループでも使える。
+ *
+ * 内容の表示（版 2026-11-20b）：受付のお知らせは200文字まで（超えたら「…（続きはチャットで）」）、まとめは1件50文字まで。
+ *  写真・動画・スタンプ・ファイルは「［写真1枚］」「［スタンプ］」「［ファイル（名前）］」の形。30分以内に続けて届いた分は「／」でつないで「内容（冒頭）」へ（200文字まで）。
+ *
  * 書かないもの：トークン・合言葉は実行ログ・通知に出さない。実行ログに問い合わせの本文は出さない。
  * 返信はスタッフがLINE公式アカウントのチャット画面から行う（システムは返信の内容を読めない）。
  */
 
-var INQ_VERSION = '2026-11-17e';   // 版 2026-11-17e：まとめの番号で「1.3対応済み」、土日祝はまとめを送らない（INQ_REMIND_DAYS=weekdays）、管理者へのお知らせを朝のまとめに
+var INQ_VERSION = '2026-11-20b';   // 版 2026-11-20b：通知の内容を200文字（まとめは50文字）・写真・スタンプ・ファイルの表示・30分以内の続きの内容をつなぐ・送り先を「従業員連絡」グループへ
+var INQ_VERSION_17E = '2026-11-17e';   // 版 2026-11-17e：まとめの番号で「1.3対応済み」、土日祝はまとめを送らない（INQ_REMIND_DAYS=weekdays）、管理者へのお知らせを朝のまとめに
 var INQ_VERSION_16A = '2026-11-16a';   // 版 2026-11-16a：まとめの「何日前から」、返信が要らないLINEの自動の対応済み、本人への案内の最後のAIの一文
 
 var INQ_STATE = { open: '未対応', doing: '対応中', done: '対応済み' };
@@ -69,7 +77,13 @@ var INQ_ROUTINE_WORDS = ['出勤', '退勤', '遅刻', '早退', '休憩', '休�
   'お疲れさま', 'お疲れ様', 'おつかれさま', 'お疲れさまでした', 'お疲れ様でした'];
 var INQ_SECRET_WORDS = ['パスワード', 'パスコード', '暗証番号', '口座', 'カード番号', 'クレジット', 'セキュリティコード',
   'マイナンバー', '個人番号', 'pin', 'password'];
-var INQ_HEAD_LEN = 20;
+var INQ_HEAD_LEN = 200;          // 版 2026-11-20b：20 → 200（「内容（冒頭）」の列と受付のお知らせ）
+var INQ_REMIND_HEAD_LEN = 50;    // 版 2026-11-20b：まとめは1件50文字まで
+var INQ_MORE_LABEL = '…（続きはチャットで）';
+var INQ_JOIN = '／';              // 30分以内に続けて届いた分のつなぎ
+var INQ_FILE_NAME_LEN = 40;
+// 版 2026-11-20b：受付のお知らせ・まとめの送り先の部門（「LINEグループ」タブ）。未登録・退出なら勤怠管理グループ（AC_ADMIN_GROUP）
+var INQ_NOTICE_DEPT = '従業員連絡';
 var INQ_APPEND_NOTICE_MS = 30 * 60 * 1000;
 var INQ_DEDUPE_ROWS = 2000;     // 受信記録の直近の行数（重複の確認に使う。Workersの再送は最長24時間）
 var INQ_SECRET_LABEL = '機密を含むため、チャットで確認してください';
@@ -294,13 +308,40 @@ function INQ_head(text, n) {
   return chars.length > n ? chars.slice(0, n).join('') + '…' : chars.join('');
 }
 
-/** 純粋関数：文字以外のメッセージの内容の表示。スタンプは null（記録だけにする） */
+/**
+ * 純粋関数：文字以外のメッセージの内容の表示。スタンプは null（記録だけにする。保存するときは INQ_STICKER_LABEL）。
+ * 版 2026-11-20b：「［写真1枚］」「［動画］」「［ファイル（名前）］」の形（ファイル名は40文字まで）
+ */
+var INQ_STICKER_LABEL = '［スタンプ］';
 function INQ_messageSummary(message) {
   var m = message || {};
-  var labels = { image: '（画像）', video: '（動画）', audio: '（音声）', file: '（ファイル）', location: '（位置情報）' };
+  var labels = { image: '［写真1枚］', video: '［動画］', audio: '［音声］', location: '［位置情報］' };
   if (m.type === 'text') return String(m.text || '');
   if (m.type === 'sticker') return null;
-  return labels[m.type] || '（' + String(m.type || '不明') + '）';
+  if (m.type === 'file') {
+    var fn = Array.from(String(m.fileName || '').replace(/[\s\r\n]+/g, ' ').trim());
+    return fn.length ? '［ファイル（' + fn.slice(0, INQ_FILE_NAME_LEN).join('') + (fn.length > INQ_FILE_NAME_LEN ? '…' : '') + '）］' : '［ファイル］';
+  }
+  return labels[m.type] || '［' + String(m.type || '不明') + '］';
+}
+
+/**
+ * 純粋関数（版 2026-11-20b）：「内容（冒頭）」に、30分以内に続けて届いた分をつなぐ（INQ_HEAD_LEN 文字まで。超えたら末尾に「…」）。
+ * すでに切れている（末尾が「…」）ならそのまま。写真が続いたら「［写真2枚］」のように数える
+ */
+function INQ_joinHead(head, more) {
+  var h = String(head == null ? '' : head), add = INQ_head(more, INQ_HEAD_LEN);
+  if (!add) return h;
+  if (!h) return add;
+  if (Array.from(h).length > INQ_HEAD_LEN) return h;   // すでに切れている（200文字＋「…」）
+  var pm = /［写真(\d+)枚］$/.exec(h), am = /^［写真(\d+)枚］$/.exec(add);
+  if (pm && am) return h.slice(0, pm.index) + '［写真' + (Number(pm[1]) + Number(am[1])) + '枚］';
+  return INQ_head(h + INQ_JOIN + add, INQ_HEAD_LEN);
+}
+
+/** 純粋関数（版 2026-11-20b）：続けて届いた分か（最後に受け取ってから30分以内） */
+function INQ_isContinuation(lastAtMs, nowMs) {
+  return lastAtMs > 0 && nowMs - lastAtMs >= 0 && nowMs - lastAtMs <= INQ_APPEND_NOTICE_MS;
 }
 
 /**
@@ -378,10 +419,22 @@ function INQ_md_(d) {
   return Number(p[1]) + '/' + Number(p[2]) + '（' + '日月火水木金土'.charAt(INQ_dow_(d)) + '）';
 }
 
-/** 純粋関数：一覧・通知に出す内容（機密ありならチャットで確認。要注意の分類なら「（内容はチャットで確認してください）」） */
-function INQ_shownHead(c, sensitive) {
+/**
+ * 純粋関数：一覧・通知に出す内容（機密ありならチャットで確認。要注意の分類なら「（内容はチャットで確認してください）」）。
+ * 版 2026-11-20b：forRemind が無い（受付のお知らせ）なら200文字まで・切れていれば「…（続きはチャットで）」。
+ * forRemind（まとめ）なら50文字まで（超えたら「…」）
+ */
+function INQ_shownHead(c, sensitive, forRemind) {
   if (c.secret) return INQ_SECRET_LABEL;
-  return sensitive ? INQ_SENSITIVE_LABEL : '「' + (c.head || '') + '」';
+  if (sensitive) return INQ_SENSITIVE_LABEL;
+  var h = String(c.head || ''), chars = Array.from(h);
+  var cut = chars.length > INQ_HEAD_LEN;   // 保存のときに切れた（200文字＋「…」）。本人が打った「…」は切れた印にしない
+  var body = cut ? chars.slice(0, INQ_HEAD_LEN).join('') : h;
+  if (forRemind) {
+    var b = Array.from(body);
+    return '「' + (b.length > INQ_REMIND_HEAD_LEN ? b.slice(0, INQ_REMIND_HEAD_LEN).join('') + '…' : body) + '」';
+  }
+  return '「' + body + (cut ? INQ_MORE_LABEL : '') + '」';
 }
 
 /**
@@ -449,8 +502,10 @@ function INQ_daysBetween(fromYmd, toYmd) {
 
 /** 純粋関数：1件分の行（名前・状況・要約・内容） */
 function INQ_caseLines(c, now) {
-  var sensitive = INQ_isSensitiveCategory(INQ_summaryParts_(c).category);
-  return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c, sensitive)];
+  // 版 2026-11-20b：シートの分類が要注意でなくても、出す内容そのものが要注意の分類に当たるときは内容を出さない（続けて届いた分をつないだため）
+  var sensitive = INQ_isSensitiveCategory(INQ_summaryParts_(c).category)
+    || (!!String(c.head || '').trim() && INQ_isSensitiveCategory(INQ_classify(String(c.head).replace(/…$/, '')).category));
+  return [INQ_whoShort(c), '状況：' + INQ_stateLabel(c, now), '要約：' + INQ_summary(c), '内容：' + INQ_shownHead(c, sensitive, !!now)];
 }
 
 /**
@@ -596,7 +651,7 @@ function INQ_rowToCase(r, i, col) {
     name: String(cell('name') || ''), dept: String(cell('dept') || ''), link: String(cell('link') || ''),
     userId: String(cell('userId') || ''), lineName: String(cell('lineName') || ''), at: d(cell('at')), head: String(cell('head') || ''),
     secret: cell('secret') === true, appends: Number(cell('appends')) || 0, staff: String(cell('staff') || ''),
-    appendNoticeAt: d(cell('appendNoticeAt')), token: String(cell('token') || ''), who: '',
+    appendNoticeAt: d(cell('appendNoticeAt')), lastAt: d(cell('lastAt')), token: String(cell('token') || ''), who: '',
     doneBy: String(cell('doneBy') || ''), doneAt: d(cell('doneAt')),
     category: C.category >= 0 ? String(r[C.category] == null ? '' : r[C.category]).trim() : '',
     point: C.point >= 0 ? String(r[C.point] == null ? '' : r[C.point]).trim() : '' };
@@ -696,13 +751,42 @@ function INQ_token_() {
   return 'abcdef'.charAt(parseInt(h.charAt(0), 16) % 6) + h.slice(1, 6);
 }
 
-/** 送り先：INQ_NOTIFY_TO=admin なら管理者の個別LINE、それ以外は勤怠管理グループ（無ければ管理者） */
-function INQ_targets_() {
+/**
+ * 純粋関数（版 2026-11-20b）：送り先のグループを、送る順に [{ dept, list }]。byDept は AC_groupsByDept の結果（状態「有効」だけ）。
+ * kind 'inquiry'（受付・追記・まとめ）：従業員連絡 → 勤怠管理。kind 'admin'（TOT反映の承認待ち・管理者へのお知らせ）：勤怠管理だけ。
+ * 登録の無い部門は入れない（空の配列なら、呼び出し側で管理者の個別LINEへ）
+ */
+function INQ_targetPlan(byDept, kind) {
+  var b = byDept || {}, tiers = [];
+  [kind === 'admin' ? null : INQ_NOTICE_DEPT, AC_ADMIN_GROUP].forEach(function (d) {
+    if (d && b[d] && b[d].length) tiers.push({ dept: d, list: b[d].slice() });
+  });
+  return tiers;
+}
+
+/** 純粋関数（版 2026-11-20b）：問い合わせのボタン・「1.3対応済み」を受け付けるグループ（勤怠管理・従業員連絡） */
+function INQ_staffGroups(byDept) {
+  var b = byDept || {}, out = [];
+  [AC_ADMIN_GROUP, INQ_NOTICE_DEPT].forEach(function (d) { (b[d] || []).forEach(function (g) { if (out.indexOf(g) === -1) out.push(g); }); });
+  return out;
+}
+
+/** 「部門登録」で登録できる部門の名前（コード.gs の部門登録から呼ぶ） */
+function INQ_groupDept_() { return INQ_NOTICE_DEPT; }
+
+function INQ_groupsByDept_() {
+  try { return AC_groupsByDept(AC_groupSheet_().getDataRange().getValues()); } catch (e) { Logger.log('「LINEグループ」タブの読み込みに失敗'); return {}; }
+}
+
+/**
+ * 送り先：INQ_NOTIFY_TO=admin なら管理者の個別LINE（tiers は空・admin=true）。
+ * それ以外は INQ_targetPlan の順（グループが1つも無ければ管理者の個別LINE）
+ */
+function INQ_targets_(kind) {
   var admin = INQ_props_().getProperty('LINE_ADMIN_USER_ID');
-  if (String(INQ_props_().getProperty('INQ_NOTIFY_TO') || '').trim() === 'admin') return { list: admin ? [admin] : [], admin: true };
-  var groups = [];
-  try { groups = AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || []; } catch (e) { Logger.log('勤怠管理グループの読み込みに失敗'); }
-  return groups.length ? { list: groups, admin: false } : { list: admin ? [admin] : [], admin: true };
+  if (String(INQ_props_().getProperty('INQ_NOTIFY_TO') || '').trim() === 'admin') return { tiers: [], adminList: admin ? [admin] : [], admin: true };
+  var tiers = INQ_targetPlan(INQ_groupsByDept_(), kind);
+  return tiers.length ? { tiers: tiers, adminList: [], admin: false } : { tiers: [], adminList: admin ? [admin] : [], admin: true };
 }
 
 function INQ_pushMessages_(to, messages) {
@@ -716,12 +800,20 @@ function INQ_pushMessages_(to, messages) {
   return res.getResponseCode() === 200;
 }
 
-/** 送り先すべてへ送る。1つも届かなければ、管理者の個別LINEへ文字だけで送る。届いた数を返す */
-function INQ_send_(messages, fallbackText) {
-  var t = INQ_targets_(), sent = 0;
-  t.list.forEach(function (to) { try { if (INQ_pushMessages_(to, messages)) sent++; } catch (e) { Logger.log('問い合わせの通知の送信に失敗'); } });
-  if (!sent && !t.admin) {
-    try { AC_pushLine_(fallbackText + '\n（勤怠管理グループへ送れなかったため、こちらへお知らせしました）'); sent++; } catch (e2) { Logger.log('管理者への送信にも失敗'); }
+/**
+ * 送り先へ送る。kind は INQ_targetPlan（省略時 'inquiry'）。従業員連絡グループに1つも届かなければ勤怠管理グループへ、
+ * それも届かなければ、管理者の個別LINEへ文字だけで送る（予備の文は「勤怠管理グループへ送れなかった」を含むので朝のまとめに回らない）。届いた数を返す
+ */
+function INQ_send_(messages, fallbackText, kind) {
+  var t = INQ_targets_(kind || 'inquiry'), sent = 0;
+  var push = function (to) { try { if (INQ_pushMessages_(to, messages)) sent++; } catch (e) { Logger.log('問い合わせの通知の送信に失敗'); } };
+  if (t.admin) { t.adminList.forEach(push); return sent; }
+  for (var i = 0; i < t.tiers.length && !sent; i++) {
+    if (i > 0) Logger.log('問い合わせの通知：%sグループへ送れなかったため、%sグループへ送ります', t.tiers[i - 1].dept, t.tiers[i].dept);
+    t.tiers[i].list.forEach(push);
+  }
+  if (!sent) {
+    try { AC_pushLine_(fallbackText + '\n（' + (t.tiers.some(function (x) { return x.dept === INQ_NOTICE_DEPT; }) ? INQ_NOTICE_DEPT + 'グループ・' : '') + '勤怠管理グループへ送れなかったため、こちらへお知らせしました）'); sent++; } catch (e2) { Logger.log('管理者への送信にも失敗'); }
   }
   return sent;
 }
@@ -780,7 +872,7 @@ function INQ_receive_(ev, mode) {
   var who = INQ_whoLabel(match, displayName);
   var secretWords = props.getProperty('INQ_SECRET_WORDS');
   var secret = raw !== null && INQ_hasSecret(raw, secretWords);
-  var stored = raw === null ? '（スタンプ）' : secret ? INQ_maskSecret(raw, secretWords) : raw;
+  var stored = raw === null ? INQ_STICKER_LABEL : secret ? INQ_maskSecret(raw, secretWords) : raw;
   var routine = raw !== null && INQ_isRoutine(raw, props.getProperty('INQ_ROUTINE_WORDS'));
   var ack = INQ_isAckMessage(ev.message);   // 版 2026-11-16a：返信が要らないLINE（スタンプだけを含む）
   var after = null;
@@ -818,6 +910,16 @@ function INQ_receive_(ev, mode) {
       INQ_setCell_(sh, open.row, C, 'lastAt', now);
       INQ_setCell_(sh, open.row, C, 'appends', open.appends + 1);
       if (secret && !open.secret) INQ_setCell_(sh, open.row, C, 'secret', true);
+      // 版 2026-11-20b：30分以内に続けて届いた分は「内容（冒頭）」につなぐ（200文字まで）。要注意の言葉が入ったら分類を要注意にする（内容を出さない側へ）
+      if (!closeIt && INQ_isContinuation(open.lastAt ? open.lastAt.getTime() : 0, now.getTime())) {
+        var joined = INQ_joinHead(open.head, stored);
+        if (joined !== open.head) { INQ_setCell_(sh, open.row, C, 'head', joined); open.head = joined; }
+        var addCls = INQ_classify(stored);
+        if (INQ_isSensitiveCategory(addCls.category) && C.category >= 0 && open.category && !INQ_isSensitiveCategory(open.category)) {
+          INQ_setCell_(sh, open.row, C, 'category', addCls.category); open.category = addCls.category;
+          if (C.point >= 0) { INQ_setCell_(sh, open.row, C, 'point', addCls.point); open.point = addCls.point; }
+        }
+      }
       if (notify && mode === 'on') INQ_setCell_(sh, open.row, C, 'appendNoticeAt', now);
       log.appendRow([now, open.id, '追記', stored, uid, ev.webhookEventId || '', "'" + mid]);
       if (closeIt) autoDone(open, open.row);
@@ -870,8 +972,8 @@ function INQ_onGroupPostback_(ev) {
     var p = INQ_parsePostback(ev.postback && ev.postback.data);
     if (!p) return;                                    // 問い合わせのボタンではない（ほかの機能のもの）
     var gid = ev.source && ev.source.groupId;
-    var groups = AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || [];
-    if (!gid || groups.indexOf(gid) === -1) return;    // 勤怠管理グループ以外では何もしない
+    var groups = INQ_staffGroups(AC_groupsByDept(AC_groupSheet_().getDataRange().getValues()));
+    if (!gid || groups.indexOf(gid) === -1) return;    // 勤怠管理・従業員連絡グループ以外では何もしない（版 2026-11-20b で従業員連絡を追加）
     var uid = ev.source.userId;
     if (!AC_isUserId(uid)) { AC_reply_(ev.replyToken, '押した方を確認できないため受け付けできませんでした。スマートフォンのLINEから押してください。'); return; }
     var name = INQ_memberName_(gid, uid);
@@ -891,7 +993,7 @@ function INQ_onGroupMessage_(ev) {
     if (!gid) return false;
     var nums = INQ_parseDoneNumbers(INQ_stripMentions(ev.message.text, ev.message.mention));
     if (!nums) return false;
-    var groups = AC_groupsByDept(AC_groupSheet_().getDataRange().getValues())[AC_ADMIN_GROUP] || [];
+    var groups = INQ_staffGroups(AC_groupsByDept(AC_groupSheet_().getDataRange().getValues()));   // 勤怠管理・従業員連絡（版 2026-11-20b）
     if (groups.indexOf(gid) === -1) return false;
     var uid = ev.source.userId;
     if (!AC_isUserId(uid)) { AC_reply_(ev.replyToken, '送った方を確認できないため受け付けできませんでした。スマートフォンのLINEから送ってください。'); return true; }
@@ -1023,19 +1125,24 @@ function INQ_remind() {
     }
   } catch (err) { INQ_fail_('リマインド', err); }
   try {
-    if (sch && sch.text) text = text ? (text + '\n\n' + sch.text).slice(0, 5000) : sch.text;
+    // 版 2026-11-20b：従業員連絡グループがあれば、問い合わせのまとめはそちらへ、TOT反映の承認待ち・管理者へのお知らせは今までどおり勤怠管理グループへ分けて送る。
+    // 無ければ今までどおり1回の送信で勤怠管理グループへ
+    var split = INQ_targets_('inquiry').tiers.some(function (x) { return x.dept === INQ_NOTICE_DEPT; });
+    var inqText = text, admText = sch && sch.text ? sch.text : null;
+    if (!split && admText) { inqText = inqText ? (inqText + '\n\n' + admText).slice(0, 5000) : admText; admText = null; }
     var digest = { texts: [], used: [] };
     if (Number(INQ_hm_(now).slice(0, 2)) < 12 && typeof AC_digestItems_ === 'function') {
       var items = AC_digestItems_().map(function (x) { x.label = INQ_mdhm_(x.at); return x; });
-      if (items.length) digest = AC_digestText(items, INQ_mdhm_(now), text ? 4 : 5);
+      if (items.length) digest = AC_digestText(items, INQ_mdhm_(now), (split ? admText : inqText) ? 4 : 5);
     }
-    var messages = (text ? [text] : []).concat(digest.texts).map(function (t) { return { type: 'text', text: t }; });
-    if (!messages.length) { if (digest.used.length) AC_digestRemove_(digest.used); return; }
-    var sent = INQ_send_(messages, messages.map(function (m) { return m.text; }).join('\n\n').slice(0, 4800));
-    if (sent) {
-      if (digest.used.length) AC_digestRemove_(digest.used);
-      if (text && ids && ids.length) PropertiesService.getUserProperties().setProperty(INQ_LAST_REMIND_KEY, JSON.stringify({ at: now.toISOString(), label: INQ_mdhm_(now), ids: ids }));
-    }
+    var toMsgs = function (list) { return list.filter(Boolean).map(function (t) { return { type: 'text', text: t }; }); };
+    var join = function (ms) { return ms.map(function (m) { return m.text; }).join('\n\n').slice(0, 4800); };
+    var inqMsgs = toMsgs([inqText].concat(split ? [] : digest.texts));
+    var admMsgs = split ? toMsgs([admText].concat(digest.texts)) : [];
+    var inqSent = inqMsgs.length ? INQ_send_(inqMsgs, join(inqMsgs), 'inquiry') : 0;
+    var admSent = admMsgs.length ? INQ_send_(admMsgs, join(admMsgs), 'admin') : 0;
+    if (digest.used.length && (!digest.texts.length || (split ? admSent : inqSent))) AC_digestRemove_(digest.used);
+    if (inqSent && text && ids && ids.length) PropertiesService.getUserProperties().setProperty(INQ_LAST_REMIND_KEY, JSON.stringify({ at: now.toISOString(), label: INQ_mdhm_(now), ids: ids }));
     if (sch && sch.after) sch.after();
   } catch (err2) { INQ_fail_('リマインド', err2); }
 }
@@ -1291,5 +1398,6 @@ if (typeof module !== 'undefined') {
     INQ_shouldNotifyAppend: INQ_shouldNotifyAppend, INQ_newCaseMessage: INQ_newCaseMessage, INQ_newCaseText: INQ_newCaseText,
     INQ_appendText: INQ_appendText, INQ_remindText: INQ_remindText, INQ_classify: INQ_classify, INQ_classifyPlan: INQ_classifyPlan, INQ_firstSentence: INQ_firstSentence, INQ_whoShort: INQ_whoShort, INQ_summary: INQ_summary, INQ_isSensitiveCategory: INQ_isSensitiveCategory, INQ_shownHead: INQ_shownHead, INQ_stateLabel: INQ_stateLabel, INQ_caseLines: INQ_caseLines, INQ_openCaseOf: INQ_openCaseOf, INQ_caseWho: INQ_caseWho,
     INQ_C: INQ_C, INQ_caseCols: INQ_caseCols, INQ_colsMessage: INQ_colsMessage, INQ_newCaseRow: INQ_newCaseRow, INQ_rowToCase: INQ_rowToCase,
-    INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows });
+    INQ_SHEET_FAQ: INQ_SHEET_FAQ, INQ_FAQ_HEADER: INQ_FAQ_HEADER, INQ_FAQ_ROWS: INQ_FAQ_ROWS, INQ_faqSheetRows: INQ_faqSheetRows,
+    INQ_joinHead: INQ_joinHead, INQ_isContinuation: INQ_isContinuation, INQ_targetPlan: INQ_targetPlan, INQ_staffGroups: INQ_staffGroups, INQ_NOTICE_DEPT: INQ_NOTICE_DEPT });
 }

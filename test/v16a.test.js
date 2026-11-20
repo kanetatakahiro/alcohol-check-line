@@ -174,7 +174,7 @@ test('16a-2 ほかの文を含む・要注意（⚠）の案件・記録のみ�
   post(c.g, userMsg(U(1), STICKER));
   assert.deepEqual([cases(c.book)[0][1], cases(c.book)[0][16]], ['対応済み', 'AI（自動）']);
   assert.equal(since(c.g, n).push.length, 0);
-  assert.equal(c.book.getSheetByName('やりとり').dump().filter((r) => r[2] === '追記')[0][3], '（スタンプ）');
+  assert.equal(c.book.getSheetByName('やりとり').dump().filter((r) => r[2] === '追記')[0][3], '［スタンプ］');
   // 記録のみ（record）でも自動で対応済みにする（送信はもともと無い）
   const d = setup({ INQ_MODE: 'record' });
   post(d.g, userMsg(U(1), 'ありがとうございます'));

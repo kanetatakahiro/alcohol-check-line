@@ -92,6 +92,12 @@ test('送信時：部署別の設問で選んだ人の所属グループと勤�
   assert.match(env.sent[1].text, /部署Aのグループ LINEにもお知らせしました|部署AのグループLINEにもお知らせしました/);
 });
 
+test('送信時：「従業員連絡」グループ（問い合わせの送り先・版 2026-11-20b）が登録されていても、勤怠連絡の送り先は変わらない', () => {
+  const env = makeEnv({ groups: GROUPS.concat([['G-EMP', '従業員連絡', '', '有効']]) });
+  env.submit(base('対象者（部署A）', '試験 一郎（90010）'));
+  assert.deepEqual(env.sent.map(s => s.to), ['G-A', 'G-KANRI']);
+});
+
 test('送信時：所属の判定は従業員マスタで行う（フォームで違う部署のページから選んでも、本人の所属のグループへ）', () => {
   const env = makeEnv({ groups: GROUPS });
   env.submit(base('対象者（部署A）', '試験 二郎（90002）'));   // 部署Bの人

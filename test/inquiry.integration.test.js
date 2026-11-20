@@ -67,7 +67,7 @@ test('INQ結合: 登録済みの従業員の問い合わせ → 受付・勤怠�
   const msg = push[0].body.messages[0];
   assert.equal(msg.type, 'flex');
   assert.deepEqual([...msg.contents.body.contents].map((x) => x.text), ['【問い合わせ】11/5 14:12', '試験 一郎（部署A）', '状況：未対応',
-    '要約：シフト・希望休／シフト', '内容：「明日のシフトの件で確認したいことがありま…」']);
+    '要約：シフト・希望休／シフト', '内容：「明日のシフトの件で確認したいことがあります。 よろしくお願いします」']);   // 版 2026-11-20b：200文字まで
   assert.ok(!JSON.stringify(msg.contents.body).includes('Q-'));   // 本文に案件番号は出さない
   assert.equal(msg.contents.footer.contents[0].action.displayText, '対応します（試験 一郎（部署A））');
   assert.match(dataOf(msg, 0), /^inq\|1\|take\|Q-20261105-001\|[a-f][0-9a-f]{5}$/);   // 先頭は英字（数字だけだとシートで数値に変わるため）
@@ -118,9 +118,9 @@ test('INQ結合: 定型連絡・スタンプは記録だけ（通知しない）
   assert.equal(since(g, n).push.length, 0);
   assert.equal(cases(book).length, 0);
   const r = sheet(book, '定型連絡').dump();
-  assert.deepEqual([r[1][1], r[1][4], r[2][4]], ['90001', '退勤しました。', '（スタンプ）']);
+  assert.deepEqual([r[1][1], r[1][4], r[2][4]], ['90001', '退勤しました。', '［スタンプ］']);
   post(g, userMsg(U(1), { type: 'image', contentProvider: { type: 'line' } }));
-  assert.equal(cases(book)[0][9], '（画像）');
+  assert.equal(cases(book)[0][9], '［写真1枚］');
   assert.equal(since(g, n).push.length, 1);
 });
 

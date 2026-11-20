@@ -1004,7 +1004,8 @@ function AC_handleGroupEvent_(ev) {
   if (typeof INQ_onGroupMessage_ === 'function' && INQ_onGroupMessage_(ev)) return;   // 勤怠管理グループの「1.3対応済み」（gas/Inquiry.gs・版 2026-11-17e）
   var depts = AC_parseDeptRegistration(ev.message.text);
   if (!depts) return;   // グループの普段の会話には反応しない
-  var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues()).concat([AC_ADMIN_GROUP]).concat(typeof OT_groupDept_ === 'function' ? [OT_groupDept_()] : []);
+  var known = AC_deptNames(AC_masterSheet_().getDataRange().getValues()).concat([AC_ADMIN_GROUP]).concat(typeof OT_groupDept_ === 'function' ? [OT_groupDept_()] : [])
+    .concat(typeof INQ_groupDept_ === 'function' ? [INQ_groupDept_()] : []);   // 問い合わせの送り先「従業員連絡」（gas/Inquiry.gs・版 2026-11-20b）
   var ok = depts.filter(function (d) { return known.indexOf(d) !== -1; });
   var ng = depts.filter(function (d) { return known.indexOf(d) === -1; });
   if (!ok.length) {
@@ -1023,6 +1024,7 @@ function AC_handleGroupEvent_(ev) {
   AC_reply_(ev.replyToken, 'このグループを「' + ok.join('、') + '」のグループとして登録しました！ありがとうございます😊\n'
     + (typeof OT_groupDept_ === 'function' && ok.length === 1 && ok[0] === OT_groupDept_() ? 'これから、毎朝の「今日のお仕事」と報告をこちらでやり取りします。'
       : ok.indexOf(AC_ADMIN_GROUP) !== -1 ? 'これから、勤怠連絡フォームのすべての報告（管理者向けの内容）をこちらへお知らせします。'
+      : typeof INQ_groupDept_ === 'function' && ok.length === 1 && ok[0] === INQ_groupDept_() ? 'これから、公式LINEへの問い合わせと、9時・15時の未対応のまとめをこちらへお知らせします。'
       : 'これから、勤怠連絡フォームで' + ok.join('・') + 'の方の連絡があったときに、こちらへお知らせします。')
     + (ng.length ? '\n（「' + ng.join('、') + '」は見つからなかったため登録していません）' : ''));
   AC_pushLine_('【グループLINE】グループを「' + ok.join('、') + '」として登録しました。');

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGas } from './helpers/gas-mock.js';
 
-// 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20h）。すべて架空データ・模擬環境（LINEには送らない）
+// 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20i）。すべて架空データ・模擬環境（LINEには送らない）
 const U = (c) => 'U' + String(c).repeat(32).slice(0, 32);
 const ADMIN = 'U' + 'a'.repeat(32);
 const FILES = ['AlcoholCheck.gs', 'Inquiry.gs', 'LeaveRequest.gs', 'Notices.gs', 'OfficeTask.gs', 'MonthClose.gs'];
@@ -50,7 +50,7 @@ function setup(props = {}, now = MON + 'T10:00:00+09:00') {
   const book = g.newSpreadsheet('【テスト】業務一覧（架空）');
   const tab = book.insertSheet('毎月1日の案内');
   [['項目', '内容', '説明'], ['今月のお知らせ', '年末調整の書類は11月中旬までです。', ''], ['本人の締め日（翌月◯日）', 3, ''], ['領収書の必着日（翌月◯日）', 5, ''],
-    ['案内の文（ひな形）', TEMPLATE, ''], ['全体LINEに貼る文（自動）', '', ''], ['いつの案内か（自動）', '', '']].forEach((r) => tab.appendRow(r));
+    ['案内の文（ひな形）', TEMPLATE, ''], ['打刻漏れが無い人に届く文（見本・自動）', '', ''], ['いつの案内か（自動）', '', '']].forEach((r) => tab.appendRow(r));
   g.scriptProps.setProperties({ EMPLOYEE_MASTER_ID: mf.getId(), OFFICE_TASK_BOOK_ID: book.getId(), LINE_CHANNEL_ACCESS_TOKEN: 'fake', LINE_ADMIN_USER_ID: ADMIN,
     DRY_RUN: 'false', NOTICE_SETTINGS: 'on', ...props });
   g.ctx.alcoholCheckSetupNoticeSettings();
@@ -91,12 +91,12 @@ test('月末の締め: 日にちの判定（1日＝案内・3日＝締め日・4
   assert.match(t, /^【管理本部からご連絡】\nお疲れ様です！\n11月分の勤怠・経費の締めのご案内です。\n\n■ 12月3日（木）までにご対応ください\n・Touch On Timeの修正\n\n■ 領収書は12月7日（月）必着\n【送付先】（架空）\n\nご確認宜しくお願いいたします。$/);   // 空の段落は詰める
 });
 
-test('月末の締め: 毎朝、全体LINEに貼る文を作り直す（次の1日の分・1〜3日は今月1日の分）', () => {
+test('月末の締め: 毎朝、打刻漏れが無い人に届く文（見本）を作り直す（次の1日の分・1〜3日は今月1日の分）', () => {
   const { g, tab } = setup({ MONTH_CLOSE_NOTIFY: 'on' }, '2026-11-20T08:10:00+09:00');
   g.ctx.monthCloseDaily();
   const v = tab.dump();
   assert.match(String(v[5][1]), /^【管理本部からご連絡】[\s\S]*11月分の[\s\S]*12月3日（木）までに[\s\S]*12月7日（月）必着[\s\S]*年末調整の書類は11月中旬までです。[\s\S]*ご確認宜しく/);
-  assert.ok(!/申請が確認できていない/.test(String(v[5][1])));                              // 全体向けには打刻の段落は入らない
+  assert.ok(!/申請が確認できていない/.test(String(v[5][1])));                              // 見本には打刻の段落は入らない
   assert.equal(v[6][1], '12月1日（火）の案内（11月分）');
   g.clock.now = new Date('2026-12-02T08:10:00+09:00').getTime();
   g.ctx.monthCloseDaily();
@@ -106,15 +106,19 @@ test('月末の締め: 毎朝、全体LINEに貼る文を作り直す（次の1�
   assert.equal(tab.dump()[6][1], '1月1日（金）の案内（12月分）');
 });
 
-test('月末の締め: 1日は打刻漏れのある本人だけへ、案内＋申請していない日（1人1通・同じ月は1回）。タブが無ければ送らず管理者へ', () => {
+test('月末の締め: 1日は全員へ案内（打刻漏れのある人は申請していない日を入れる・無い人は打刻の段落を除く・1人1通・同じ月は1回）。タブが無ければ送らず管理者へ', () => {
   const { g } = setup({ MONTH_CLOSE_NOTIFY: 'on' }, '2026-12-01T09:10:00+09:00');
   save(g, '2026-12-01');
   let n = g.fetches.length;
   assert.equal(g.ctx.monthCloseDaily(), null);                                                   // 1日はグループへ送らない
   g.ctx.monthClosePersonal();
   const p = toSelf(g.fetches.slice(n).filter((f) => f.url.endsWith('/push')));
-  assert.deepEqual(p.map((f) => f.body.to).sort(), [U(1), U(4)]);                            // 打刻漏れのある人だけ（二郎は申請済み・三郎は設定OFF・五郎はLINE未登録）
+  assert.deepEqual(p.map((f) => f.body.to).sort(), [U(1), U(2), U(3), U(4)]);              // 全員（五郎はLINE未登録）。1人1通
   const m1 = text(p.find((f) => f.body.to === U(1)));
+  const m2 = text(p.find((f) => f.body.to === U(2)));                                          // 二郎は全部申請済み → 打刻の段落なし
+  assert.match(m2, /^【管理本部からご連絡】[\s\S]*12月3日（木）までに[\s\S]*12月7日（月）必着[\s\S]*年末調整/);
+  assert.ok(!/申請が確認できていない/.test(m2));
+  assert.ok(!/申請が確認できていない/.test(text(p.find((f) => f.body.to === U(3)))));             // 三郎は打刻のお知らせが OFF → 案内だけ
   assert.match(m1, /^【管理本部からご連絡】[\s\S]*12月3日（木）までに[\s\S]*【申請が確認できていない打刻（11月分）】\n・11\/2（月）\n・11\/9（月）[\s\S]*・11\/16（月）\n→ [\s\S]*12月7日（月）必着[\s\S]*年末調整の書類は11月中旬までです。/);
   assert.ok(!/10\/30|11\/5（|11\/6（/.test(m1));                                       // 前の月・申請済みの日は入らない
   assert.equal(g.fetches.slice(n).filter((f) => f.body && f.body.to === GROUP).length, 0);

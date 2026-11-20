@@ -2,23 +2,23 @@
  * 月末の勤怠の締め（gas/MonthClose.gs・版 2026-11-20h）。業務マニュアル M02「月末の勤怠締めの確認」の AI 化。
  * 本人の申請の締め日は翌月3日（勤怠・経費・交通費とも。作業員はシフト制なので土日祝でも日付どおり）。
  *
- * 本人へ（トリガー monthClosePersonal・毎朝9時台。LINE の通数を抑えるため、送るのは「やることが残っている人」だけ）：
- *   - 毎月1日：前月分で申請していない打刻漏れがある本人へ、締めの案内（業務一覧ファイルの「毎月1日の案内」タブの文）＋その人の申請していない日
- *     （打刻漏れの無い人は、管理本部が全体LINE（個人LINEのグループ）に貼る案内で知る。貼る文は同じタブにAIが毎朝作る）
- *   - 毎月3日：前月分の「申請していない打刻漏れ」「交通費申請が届いていない（TRAVEL_APPLY_MODE=on のとき）」がある本人へ、最終のお願い（1人1通にまとめる）
+ * 本人へ（トリガー monthClosePersonal・毎朝9時台。1人1通にまとめる）：
+ *   - 毎月1日：在籍・LINE 登録済みの全員へ、締めの案内（業務一覧ファイルの「毎月1日の案内」タブのひな形）。
+ *     前月分で申請していない打刻漏れがある人には、その日の段落（{打刻}）を入れる。無い人には打刻の段落を除いた文（お知らせ停止中の人には送らない）
+ *   - 毎月3日：前月分の「申請していない打刻漏れ」「交通費申請が届いていない（TRAVEL_APPLY_MODE=on のとき）」が残っている本人だけへ、最終のお願い
  *   毎週月曜の催促と同じ作り（AC_weeklyPunchRun_）。同じ月・同じお願いは1人1通。お知らせ設定・停止中・LINE 未登録は今までどおり外す
  * 勤怠管理グループへ（トリガー monthCloseDaily・毎朝8時台）：
  *   - 毎月4日（土日祝・OFFICE_TASK_OFF_DATES なら次の平日・10日まで）に「勤怠の締め確定」を単独で送る＝締め日を過ぎて残っている人
  *     （①申請していない打刻漏れ ②承認待ちの申請 ③交通費申請が届いていない人）。0件なら「締めが完了しました」。ほかの日は送らない
- *   - 毎朝、「毎月1日の案内」タブの「全体LINEに貼る文」を作り直す（次の1日の分。1〜3日は今月1日の分）
+ *   - 毎朝、「毎月1日の案内」タブの「打刻漏れが無い人に届く文（見本）」を作り直す（次の1日の分。1〜3日は今月1日の分）
  *
  * スクリプトプロパティ：MONTH_CLOSE_NOTIFY  未設定・off＝何もしない／record＝本人へは送らず記録だけ（グループへは送る）／on＝送る
  * データ：朝の tot-latest.json（今朝のデータでなければ何もしない）
  */
-var MC_VERSION = '2026-11-20h';
+var MC_VERSION = '2026-11-20i';
 var MC_TAB = '毎月1日の案内';
 var MC_ROW = { notice: '今月のお知らせ', closeDay: '本人の締め日（翌月◯日）', receiptDay: '領収書の必着日（翌月◯日）', template: '案内の文（ひな形）',
-  groupText: '全体LINEに貼る文（自動）', groupFor: 'いつの案内か（自動）' };
+  groupText: '打刻漏れが無い人に届く文（見本・自動）', groupFor: 'いつの案内か（自動）' };
 
 /** 純粋関数：今日することと対象の月。{ kind: 'notice'|'deadline'|'final'|null, month: 'YYYY-MM' } */
 function MC_phase(today) {
@@ -154,7 +154,7 @@ function MC_config_() {
   return { ok: true, reason: '', sheet: sh, rows: rows, cfg: cfg };
 }
 
-/** 毎朝：全体LINEに貼る文を作り直す（次の1日の分。1〜3日は今月1日の分） */
+/** 毎朝：打刻漏れが無い人に届く文（見本）を作り直す（次の1日の分。1〜3日は今月1日の分） */
 function MC_refreshGroupText_(today, conf) {
   if (!conf.ok || !conf.rows[MC_ROW.groupText]) return;
   var first = Number(today.slice(8, 10)) <= 3 ? today.slice(0, 7) + '-01' : AC_addMonths(today.slice(0, 7), 1) + '-01';
@@ -171,6 +171,22 @@ function MC_travelMissing_(today, month) {
     var ss = TRV_book_(), st = TA_load_(ss);
     return TA_remindTargets(TA_people_(today), TRV_commuteInputs(TRV_sheetValues_(ss, TRV_COMMUTE_SHEET)), st.apps, month);
   } catch (e) { Logger.log('月末の締め：交通費申請の状況を読めませんでした'); return null; }
+}
+
+/** 純粋関数：1日の案内を送る全員（在籍・LINE 登録済み・同じ LINE を2人で使っていない・お知らせ停止中でない）→ [{ code, userId }] */
+function MC_allRecipients(masterValues, today, pauseIndex) {
+  var uidCount = {}, out = [], seen = {};
+  for (var i = 1; i < (masterValues || []).length; i++) { var u = String(masterValues[i][AC_COL.userId] || '').trim(); if (u) uidCount[u] = (uidCount[u] || 0) + 1; }
+  for (var j = 1; j < (masterValues || []).length; j++) {
+    var r = masterValues[j], code = AC_cellCode_(r[AC_COL.code]), uid = String(r[AC_COL.userId] || '').trim();
+    if (!code || seen[code]) continue;
+    seen[code] = 1;
+    if (String(r[AC_COL.status] || '').trim() === '退職' || AC_isRetired(r[AC_COL.retiredOn], today)) continue;
+    if (r[AC_COL.lineOk] !== true || !AC_isUserId(uid) || uidCount[uid] !== 1) continue;
+    if (pauseIndex && AC_isPaused(pauseIndex, code, today)) continue;
+    out.push({ code: code, userId: uid });
+  }
+  return out;
 }
 
 // ---------------- トリガー ----------------
@@ -198,18 +214,29 @@ function monthClosePersonal() {
       range: { from: ph.month + '-01', to: AC_addMonths(ph.month, 1) + '-01' },
       message: function (ds, kinds, changes, name, code) {
         var punch = MC_punchBlock(ph.month, ds, kinds);
+        covered[code] = 1;
         if (ph.kind === 'notice') return MC_render(conf.cfg.template, ph.month, dates, conf.cfg.notice, punch + (changes && changes.length ? (punch ? '\n\n' : '') + AC_formChangeBlock(changes, name) : ''));
-        if (travelBy[code]) covered[code] = 1;
         return MC_deadlineMessage(ph.month, dates, punch, !!travelBy[code], changes, name);
       } };
     var res = AC_weeklyPunchRun_(d.R, mv, today, o);
     if (!res.ok) { AC_adminNotice_('monthclose', '【エラー】' + label + 'を送れませんでした🙇‍♀️\n（' + res.reason + '）'); return null; }
-    var tSent = 0, tRec = 0;
+    var tSent = 0, tRec = 0, aSent = 0, aRec = 0, aFail = 0;
+    if (ph.kind === 'notice') {   // 1日：打刻漏れの文を送らなかった全員へ、打刻の段落を除いた案内
+      var st1 = AC_state_(), base = MC_render(conf.cfg.template, ph.month, dates, conf.cfg.notice, '');
+      MC_allRecipients(mv, today, AC_pauseIndex_()).forEach(function (p) {
+        var key = 'att:' + ph.month + ':monthnotice:all:' + p.code;
+        if (covered[p.code]) { if (live) st1.setProperty(key, new Date().toISOString()); return; }   // 打刻漏れの文（同じ案内）で送った人
+        if (st1.getProperty(key) || (!live && st1.getProperty(key + ':rec'))) return;
+        if (!live) { st1.setProperty(key + ':rec', new Date().toISOString()); aRec++; return; }
+        try { AC_pushSelf_(p.userId, base); st1.setProperty(key, new Date().toISOString()); aSent++; }
+        catch (e) { aFail++; }   // 印を付けないので、もう一度実行すれば送り直す
+      });
+    }
     if (travel) {   // 3日：交通費だけが残っている人へ（打刻漏れの文に入れた人は、同じ1通で知らせ済み）
       var state = AC_state_();
       travel.forEach(function (p) {
         var key = 'sent:' + ph.month + ':ta-remind:' + p.code;   // 交通費申請AI（travelApplyRemind）と同じ印。同じ月・同じ人は1回
-        if (covered[p.code]) { if (live) state.setProperty(key, new Date().toISOString()); return; }
+        if (covered[p.code] && travelBy[p.code]) { if (live) state.setProperty(key, new Date().toISOString()); return; }
         if (state.getProperty(key)) return;
         if (!live) { tRec++; return; }
         try { AC_pushSelf_(p.userId, MC_deadlineMessage(ph.month, dates, '', true, null, '')); state.setProperty(key, new Date().toISOString()); tSent++; }
@@ -217,8 +244,9 @@ function monthClosePersonal() {
       });
     }
     Logger.log('月末の締め（本人・' + ph.kind + '・' + mode + '）：打刻 送る人 ' + res.counts.people + '人・送信 ' + res.counts.sent + '人・記録 ' + res.counts.recorded + '人'
+      + (ph.kind === 'notice' ? '／打刻漏れの無い人 送信 ' + aSent + '人・記録 ' + aRec + '人・失敗 ' + aFail + '人' : '')
       + (travel ? '／交通費だけ 送信 ' + tSent + '人・記録 ' + tRec + '人' : ''));
-    return { punch: res.counts, travelSent: tSent, travelRecorded: tRec };
+    return { punch: res.counts, allSent: aSent, allRecorded: aRec, allFailed: aFail, travelSent: tSent, travelRecorded: tRec };
   } catch (e) {
     Logger.log('月末の締め（本人）の処理エラー：%s', e && e.message);
     AC_adminNotice_('monthclose', '【エラー】' + label + 'で問題がありました🙇‍♀️\n（' + (e && e.message ? e.message : '不明なエラー') + '）');
@@ -282,4 +310,4 @@ function monthCloseRemoveTrigger() {
 }
 
 if (typeof module !== 'undefined') module.exports = Object.assign(module.exports || {}, { MC_phase: MC_phase, MC_items: MC_items, MC_counts: MC_counts,
-  MC_dates: MC_dates, MC_render: MC_render, MC_punchBlock: MC_punchBlock, MC_deadlineMessage: MC_deadlineMessage, MC_finalText: MC_finalText, MC_nextBusinessDay: MC_nextBusinessDay });
+  MC_dates: MC_dates, MC_render: MC_render, MC_punchBlock: MC_punchBlock, MC_deadlineMessage: MC_deadlineMessage, MC_finalText: MC_finalText, MC_nextBusinessDay: MC_nextBusinessDay, MC_allRecipients: MC_allRecipients });

@@ -3198,7 +3198,7 @@ function AC_weeklyPunchRun_(R, mv, today, o) {
     if (!setOn(code)) { counts.setting++; exclude(key, code, 'お知らせ設定でOFF'); return; }
     var dk = {};
     dates.forEach(function (d) { if (plan.kinds[t + ':' + d]) dk[d] = plan.kinds[t + ':' + d]; });
-    var text = o.message ? o.message(dates, dk, changes, names[code] || '')   // 版 2026-11-20g：月末の締め（翌月3日の最終のお願い）は別の文面
+    var text = o.message ? o.message(dates, dk, changes, names[code] || '', code)   // 版 2026-11-20g：月末の締め（翌月3日の最終のお願い）は別の文面
       : (o.head || '') + AC_weeklyPunchMessage(dates, today, overrides, dk, changes, names[code] || ''), to = line[t];
     counts.changes += changes.length;
     if (!to) { counts.unreg++; if (preview) people.push({ dates: dates, text: text, line: false }); exclude(key, code, 'LINE未登録'); return; }

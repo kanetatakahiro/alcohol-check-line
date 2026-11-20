@@ -24,8 +24,10 @@
  *      TOT の出勤の記録は、毎朝の処理（tot-latest.json の日別勤怠）で照合する。
  *   4. 毎朝7時台（travelApplyDaily）：TOT の照合 → 回答が入った行を照合し直して確定 → 要確認の行を「臨時の依頼」（業務一覧ファイル）へ1件1行で追加
  *      （8時の「今日の業務」に出る）。回答が空のまま［完了］になっていたら、確認事項を出し直す。6日は前月の締め（月のタブ・管理者へ一覧）。
- *   5. 締切（版 2026-11-19b）：提出期日は翌月3日。4日 10:00（travelApplyRemind・土日祝も日付どおり）に、前月分が届いていない対象者へ個別 LINE で催促。
- *      前月分として受け付けるのは4日 23:59 まで。5日 0時以降に届いた前月分は「来月反映」（本人にも返信で伝える）。5日は管理本部が要確認に回答する日（臨時の依頼の期限）。
+ *   5. 締切（版 2026-11-20h）：提出期日は翌月3日（勤怠・経費と同じ締め日）。前月分として受け付けるのは3日 23:59 まで。
+ *      4日 0時以降に届いた前月分は「来月反映」（本人にも返信で伝える）。届いていない人への催促は、3日の朝に月末の締め（gas/MonthClose.gs）が
+ *      打刻漏れのお願いと1通にまとめて送る（MONTH_CLOSE_NOTIFY が on・record のとき。未設定のときだけ travelApplyRemind が3日 10:00 に送る）。
+ *      要確認に回答する日（臨時の依頼の期限）は5日。管理本部の締めなので、土日祝なら次の平日。
  *   6. 6日の朝（締め）：確定額を給与反映シート（社労士共有用【リバースHD】）の前月のタブ「R{令和}.{M}月分{M+1}月支給」の「通勤手当」に書く
  *      （gas/PayrollSheet.gs の PAY_writeColumn_。タブが無ければ「テンプレ」から作る。すでに値がある欄は上書きせず管理者へ）。
  *      要確認が残る人は書かずに来月へ回し、未提出・要確認・書けなかった人の一覧を管理者へ。区間ごとの明細は従業員マスタのファイルに残す。
@@ -33,7 +35,7 @@
  *      「通勤距離」の日額 × 前月の出勤日数を「通勤手当」に書く（PAY_writeColumn_）。出勤日数は tot-latest.json の日別勤怠（workings）で
  *      総労働時間が0より多い日（半日の休暇＋出勤・休日出勤も1日。全日の休暇の日は数えない）。VPS の中継（src/tot-relay.js）は変えない。
  *      前月にエラー勤務の日がある・日額が空・出勤日数が0・前月の日別勤怠がそろっていないときは書かずに要確認にして、管理者への一覧に理由と出す
- *      （直したあと travelApplyCloseAgain）。4日の催促・未提出の一覧の対象外。写真が届いても読まない（ほかの対象外の区分と同じ）。
+ *      （直したあと travelApplyCloseAgain）。3日の催促・未提出の一覧の対象外。写真が届いても読まない（ほかの対象外の区分と同じ）。
  *
  * タブ（従業員マスタのファイル。新しいタブだけを足す）：「交通費申請」（1申請1行）・「交通費明細」（1区間1行）・「交通費の送る予定」（record のとき）
  * スクリプトプロパティ：
@@ -44,7 +46,7 @@
  *   TRAVEL_AI_MODEL・TRAVEL_AI_DAILY_MAX  読み取りのモデル（既定は免許証と同じ）・1日の上限（既定 100枚）
  * ログには件数・社員番号・申請ID だけを書く（住所・金額・写真の中身・氏名は書かない）。
  */
-var TA_VERSION = '2026-11-20a';
+var TA_VERSION = '2026-11-20h';
 var TA_APPLY_SHEET = '交通費申請', TA_DETAIL_SHEET = '交通費明細', TA_PLAN_SHEET = '交通費の送る予定';
 var TA_APPLY_HEADER = ['申請ID', '受付日時', '社員番号', '氏名', '対象月', '反映月', '状態', '合計（円）', '写真', '枚目', '備考'];
 var TA_A = { id: 0, at: 1, code: 2, name: 3, target: 4, reflect: 5, status: 6, total: 7, photo: 8, pages: 9, note: 10 };
@@ -54,7 +56,7 @@ var TA_D = { id: 0, code: 1, date: 2, from: 3, to: 4, means: 5, trip: 6, one: 7,
 var TA_PLAN_HEADER = ['日時', '種類', '宛先', '内容'];
 var TA_PAY_COLUMN = '通勤手当';   // 給与反映シートで交通費を書く列
 var TA_APPLY_TYPES = ['交通費申請（車・バイク）', '公共交通機関'];   // 写真を受け付ける通勤区分
-var TA_REMIND_TYPE = '交通費申請（車・バイク）';                     // 4日の催促・未提出の対象
+var TA_REMIND_TYPE = '交通費申請（車・バイク）';                     // 3日の催促・未提出の対象
 var TA_FIXED_TYPE = '定期（固定額）';
 var TA_DAILY_TYPE = '固定店舗（日額×出勤日数）';   // 版 2026-11-20a：日額 × 前月の出勤日数（申請書なし。gas/Travel.gs の TRV_DAILY_TYPE と同じ）
 var TA_DAILY_ISSUE = { noData: 'TOT の前月の日別勤怠がそろっていない', noDaily: '日額が空', error: 'エラー勤務の日がある', zero: '出勤日数が0日' };
@@ -65,7 +67,7 @@ var TA_KM_EPS = 0.05;   // 片道×2 と合計の比べ方（km の小数1桁ま
 var TA_OK = 'OK', TA_CHECK = '要確認', TA_DONE = '確認済み', TA_REPLACED = '差し替え';
 var TA_TOT_WAIT = '未確認', TA_TOT_YES = 'あり', TA_TOT_NO = 'なし', TA_TOT_UNKNOWN = '確認できない';
 var TA_ST = { recv: '受付', check: '要確認', fixed: '確定', next: '来月反映' };
-var TA_ACCEPT_DAY = 4, TA_ANSWER_DAY = 5, TA_REMIND_DAY = 4, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
+var TA_ACCEPT_DAY = 3, TA_ANSWER_DAY = 5, TA_REMIND_DAY = 3, TA_REMIND_HOUR = 10, TA_DAILY_HOUR = 7, TA_CLOSE_DAY = 6;
 var TA_DEFAULT_YEN_PER_KM = 15, TA_AI_DEFAULT_MAX = 100;
 var TA_PAGES_WAIT_MS = 3600000, TA_PAGES_EVERY_MIN = 15, TA_PAGES_FROM_HOUR = 8, TA_PAGES_TO_HOUR = 21;   // 枚目の知らせ：最後の写真から1時間・15分ごと・8時〜21時台
 var TA_PAGES_WAIT_KEY = 'ta-pages-wait';   // 枚目の知らせを待つ申請（{ 申請ID: 最後の写真の時刻（ミリ秒） }。AC_state_ に置く）
@@ -76,7 +78,7 @@ var TA_TEXT = {
   late: '\n受付の締切（{deadline}）を過ぎて届いたため、来月のお給料での反映になります。',
   fail: '写真をうまく受け取れませんでした。お手数ですが、もう一度送ってください。',
   pages: '{month}交通費申請書の{pages}枚目が届いていません。写真を送ってください。',
-  remind: '先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。5日以降に届いた分は、来月のお給料での反映になります。',
+  remind: '先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。4日以降に届いた分は、来月のお給料での反映になります。',
 };
 /** 確認事項（detail：シートに書く。数字を含んでよい／memo：グループに出る「臨時の依頼」のメモ。金額・住所は書かない／fix：どう直すか） */
 var TA_ISSUE = {
@@ -118,7 +120,7 @@ function TA_monthLabel(ym) { return ym ? Number(ym.slice(5, 7)) + '月' : ''; }
 function TA_md(ymd) { return ymd ? Number(ymd.slice(5, 7)) + '/' + Number(ymd.slice(8, 10)) : ''; }
 function TA_validYmd(y, m, d) { var t = new Date(Date.UTC(y, m - 1, d)); return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; }
 
-/** 純粋関数：前月分として受け付けられる月（4日までは前月、5日からは今月） */
+/** 純粋関数：前月分として受け付けられる月（3日までは前月、4日からは今月） */
 function TA_openMonth(today) {
   return Number(today.slice(8, 10)) <= TA_ACCEPT_DAY ? TA_addMonth(TA_ym(today), -1) : TA_ym(today);
 }
@@ -128,10 +130,18 @@ function TA_reflectMonth(target, receivedYmd) {
   var open = TA_openMonth(receivedYmd);
   return target < open ? open : target;
 }
-/** 純粋関数：その月の分を受け付ける最後の日（翌月4日） */
+/** 純粋関数：その月の分を受け付ける最後の日（翌月3日） */
 function TA_acceptDeadline(ym) { return TA_addMonth(ym, 1) + '-' + TA_pad(TA_ACCEPT_DAY); }
-/** 純粋関数：要確認に回答する日（翌月5日。臨時の依頼の期限） */
-function TA_answerDay(ym) { return TA_addMonth(ym, 1) + '-' + TA_pad(TA_ANSWER_DAY); }
+/** 純粋関数：要確認に回答する日（翌月5日。臨時の依頼の期限。管理本部の締めなので土日祝なら次の平日） */
+function TA_answerDay(ym) {
+  var t = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), TA_ANSWER_DAY)), ymd = '';
+  for (var i = 0; i < 14; i++, t.setUTCDate(t.getUTCDate() + 1)) {
+    ymd = t.getUTCFullYear() + '-' + TA_pad(t.getUTCMonth() + 1) + '-' + TA_pad(t.getUTCDate());
+    var dow = t.getUTCDay(), hol = typeof OT_holidays === 'function' && OT_holidays(t.getUTCFullYear())[ymd];
+    if (dow !== 0 && dow !== 6 && !hol) break;
+  }
+  return ymd;
+}
 
 /** 純粋関数：「YYYY-MM」の形の月（日付・「2026/11」・「2026年11月」）。読めなければ '' */
 function TA_ymOf(v) {
@@ -1027,7 +1037,7 @@ function travelApplyPagesRemind() {
   return res;
 }
 
-// ---------------- 4日の催促 ----------------
+// ---------------- 3日の催促（月末の締めが動いていないときだけ） ----------------
 /** 純粋関数：催促する人（通勤区分が「交通費申請（車・バイク）」の在籍者で、前月分の申請が無く、LINE で送れる人） */
 function TA_remindTargets(people, inputs, apps, month) {
   return people.filter(function (p) {
@@ -1035,11 +1045,13 @@ function TA_remindTargets(people, inputs, apps, month) {
   });
 }
 
-/** 毎月4日 10:00（トリガー）：前月分が届いていない人へ個別 LINE（土日祝も日付どおり。同じ月・同じ人は1回） */
+/** 毎月3日 10:00（トリガー・MONTH_CLOSE_NOTIFY が未設定のときだけ）：前月分が届いていない人へ個別 LINE（土日祝も日付どおり。同じ月・同じ人は1回） */
 function travelApplyRemind() {
   var mode = TA_mode_(), today = AC_today_();
   if (mode === 'off') return { mode: mode };
-  if (Number(today.slice(8, 10)) !== TA_REMIND_DAY) return { mode: mode, skipped: '4日ではない' };
+  var mc = String(TA_props_().getProperty('MONTH_CLOSE_NOTIFY') || '').trim();
+  if (mc === 'on' || mc === 'record') return { mode: mode, skipped: '月末の締め（3日の朝）にまとめて送る' };   // 版 2026-11-20h
+  if (Number(today.slice(8, 10)) !== TA_REMIND_DAY) return { mode: mode, skipped: '3日ではない' };
   var ss = TRV_book_(), month = TA_addMonth(TA_ym(today), -1), st = TA_load_(ss), state = AC_state_();
   var targets = TA_remindTargets(TA_people_(today), TRV_commuteInputs(TRV_sheetValues_(ss, TRV_COMMUTE_SHEET)), st.apps, month);
   var res = { mode: mode, month: month, sent: 0, failed: 0, skipped: 0 };
@@ -1047,7 +1059,7 @@ function travelApplyRemind() {
     var key = 'sent:' + month + ':ta-remind:' + p.code;
     if (state.getProperty(key)) { res.skipped++; return; }
     try {
-      if (mode === 'on') AC_pushSelf_(p.userId, TA_TEXT.remind); else TA_plan_('4日の催促', p.code, TA_TEXT.remind);
+      if (mode === 'on') AC_pushSelf_(p.userId, TA_TEXT.remind); else TA_plan_('3日の催促', p.code, TA_TEXT.remind);
       state.setProperty(key, new Date().toISOString());
       res.sent++;
     } catch (e) { res.failed++; }

@@ -448,7 +448,7 @@ test('交通費申請（毎朝）: TOT の出勤の記録で照合し、要確�
   assert.match(q[0][4], /^何が：11\/6 自宅→甲町（車）\nなぜ：その日の TOT の出勤の記録がありません\nどう直すか：従業員マスタのファイルの「交通費明細」3行目/);
   assert.match(q[1][4], /片道5kmを超えて/);
   q.forEach((x) => assert.ok(!/円|架空県|(?<!片道)\d+(\.\d+)?km/.test(x[4]), x[4]));
-  assert.equal(String(q[0][3]), '2026-12-05');   // 期限：締切の日
+  assert.equal(String(q[0][3]), '2026-12-07');   // 期限：回答の日（12/5 は土曜なので次の平日）
   assert.deepEqual(d.map((x) => String(x[15])), ['', '2', '3']);
   assert.equal(apps(master)[0][6], '要確認');
   // 同じ日にもう1回：同じ依頼は重ねない
@@ -475,36 +475,41 @@ test('交通費申請（毎朝）: TOT の出勤の記録で照合し、要確�
   noPersonalLogs(g);
 });
 
-test('交通費申請（締切）: 4日 10:00 の催促は対象者だけ・提出済みには送らない・土日でも送る・同じ月は1回。前月分は4日 23:59 まで・5日 0時以降は来月反映（本人にも返信で伝える）', () => {
+test('交通費申請（締切・20h）: 3日 10:00 の催促（月末の締めが動いていないときだけ）は対象者だけ・提出済みには送らない・土日でも送る・同じ月は1回。前月分は3日 23:59 まで・4日 0時以降は来月反映（本人にも返信で伝える）。回答の日は5日（土日なら次の平日）', () => {
   const { g, master } = setup({ TRAVEL_APPLY_MODE: 'on' }, '2026-07-02T09:00:00+09:00');
-  g.ai.queue.push(form([{ date: '6/5', from: '自宅', to: '甲町', km: '15' }], '2026-06'));
-  photo(g, U(2));   // 90002 は6月分を提出済み
-  at(g, '2026-07-04T10:00:00+09:00');   // 土曜
+  at(g, '2026-10-02T09:00:00+09:00');
+  g.ai.queue.push(form([{ date: '9/5', from: '自宅', to: '甲町', km: '15' }], '2026-09'));
+  photo(g, U(2));   // 90002 は9月分を提出済み
+  at(g, '2026-10-03T10:00:00+09:00');   // 土曜
   const n = g.fetches.length;
   const r = g.ctx.travelApplyRemind();
-  assert.deepEqual({ sent: r.sent, month: r.month }, { sent: 1, month: '2026-06' });
+  assert.deepEqual({ sent: r.sent, month: r.month }, { sent: 1, month: '2026-09' });
   const p = pushes(g, n);
   assert.deepEqual(p.map((x) => x.to), [U(1)]);   // 公共交通機関・ガソリンカード・固定額・退職者・提出済みには送らない
-  assert.match(p[0].text, /^先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。5日以降に届いた分は、来月のお給料での反映になります。/);
+  assert.match(p[0].text, /^先月分の交通費申請がまだ届いていません。本日中に申請書の写真をこちらへ送ってください。4日以降に届いた分は、来月のお給料での反映になります。/);
   assert.equal(g.ctx.travelApplyRemind().sent, 0);   // 2回目は送らない
-  at(g, '2026-07-03T10:00:00+09:00');
-  assert.equal(g.ctx.travelApplyRemind().skipped, '4日ではない');
-  // 4日までは前月の反映・5日からは来月反映
+  at(g, '2026-10-04T10:00:00+09:00');
+  assert.equal(g.ctx.travelApplyRemind().skipped, '3日ではない');
+  g.scriptProps.setProperty('MONTH_CLOSE_NOTIFY', 'on');
+  at(g, '2026-11-03T10:00:00+09:00');
+  assert.match(g.ctx.travelApplyRemind().skipped, /月末の締め/);   // 月末の締めが3日の朝にまとめて送る
+  g.scriptProps.deleteProperty('MONTH_CLOSE_NOTIFY');
+  // 3日までは前月の反映・4日からは来月反映
   const X = g.ctx;
-  assert.deepEqual(['2026-12-04', '2026-12-05', '2026-11-30'].map((t) => X.TA_reflectMonth('2026-11', t)), ['2026-11', '2026-12', '2026-11']);
+  assert.deepEqual(['2026-12-03', '2026-12-04', '2026-11-30'].map((t) => X.TA_reflectMonth('2026-11', t)), ['2026-11', '2026-12', '2026-11']);
   assert.equal(X.TA_reflectMonth('2026-10', '2026-12-03'), '2026-11');
-  assert.deepEqual([X.TA_acceptDeadline('2026-11'), X.TA_answerDay('2026-11')], ['2026-12-04', '2026-12-05']);
-  at(g, '2026-07-04T23:59:00+09:00');   // 4日 23:59 は前月分として受け付ける
+  assert.deepEqual([X.TA_acceptDeadline('2026-11'), X.TA_answerDay('2026-11'), X.TA_answerDay('2026-09')], ['2026-12-03', '2026-12-07', '2026-10-05']);
+  at(g, '2026-07-03T23:59:00+09:00');   // 3日 23:59 は前月分として受け付ける
   g.ai.queue.push(form([{ date: '6/9', from: '自宅', to: '甲町', km: '10' }], '2026-06'));
   photo(g, U(2));
   assert.equal(String(apps(master).filter((x) => String(x[2]) === '90002').at(-1)[5]), '2026-06');
-  at(g, '2026-07-05T00:00:00+09:00');
+  at(g, '2026-07-04T00:00:00+09:00');
   g.ai.queue.push(form([{ date: '6/8', from: '自宅', to: '甲町', km: '10' }], '2026-06'));
   const n2 = g.fetches.length;
   photo(g, U(1));
   const a = apps(master).find((x) => String(x[2]) === '90001');
   assert.deepEqual([String(a[4]), String(a[5])], ['2026-06', '2026-07']);
-  assert.match(replies(g, n2)[0], /（6月分・1件）。[\s\S]*受付の締切（7\/4）を過ぎて届いたため、来月のお給料での反映になります。/);
+  assert.match(replies(g, n2)[0], /（6月分・1件）。[\s\S]*受付の締切（7\/3）を過ぎて届いたため、来月のお給料での反映になります。/);
 });
 
 test('交通費申請（給与反映シート）: 6日の締めでタブが無ければ「テンプレ」から作る（1行目 B・C・テンプレの人は残し、足りない在籍者だけ足す・合計の行の上に挿入して =SUM を広げる・下の表と L・M 列はそのまま）。確定額は「通勤手当」へ', () => {
@@ -542,7 +547,7 @@ test('交通費申請（給与反映シート）: 6日の締めでタブが無�
   assert.equal(String(apps(master).find((x) => String(x[2]) === '90002')[5]), '2026-12');   // 要確認は来月へ
   const adm = pushes(g, n).filter((p) => p.to === ADMIN);
   assert.equal(adm.length, 1);
-  assert.match(adm[0].text, /^【交通費】11月分を締めました（受付は12\/4まで・回答は12\/5まで）。\n給与反映シートの「R8.11月分12月支給」（テンプレから作りました）の「通勤手当」に 3人分を書きました。\n・未提出 0人\n・要確認が残っている 1人（来月に反映）\n　90002 試験 二郎/);
+  assert.match(adm[0].text, /^【交通費】11月分を締めました（受付は12\/3まで・回答は12\/7まで）。\n給与反映シートの「R8.11月分12月支給」（テンプレから作りました）の「通勤手当」に 3人分を書きました。\n・未提出 0人\n・要確認が残っている 1人（来月に反映）\n　90002 試験 二郎/);
   at(g, '2026-12-06T08:00:00+09:00');
   assert.match(g.ctx.travelApplyDaily().closed, /締め済み/);
   noPersonalLogs(g);
@@ -677,8 +682,8 @@ test('交通費申請（固定店舗・20a）: 6日の締めで日額×前月の
   assert.equal(g.ai.calls.length, 0);
   assert.equal(cases(inq).length, c0 + 1);
   assert.equal(apps(master).length, 0);
-  // 4日の催促は「交通費申請（車・バイク）」の 90001 だけ
-  at(g, '2026-12-04T10:00:00+09:00');
+  // 3日の催促は「交通費申請（車・バイク）」の 90001 だけ
+  at(g, '2026-12-03T10:00:00+09:00');
   const n0 = g.fetches.length;
   g.ctx.travelApplyRemind();
   assert.deepEqual(pushes(g, n0).map((x) => x.to), [U(1)]);
@@ -761,11 +766,11 @@ test('交通費申請（record）: 受け付けて記録するが LINE・臨時�
   g.ctx.travelApplyDaily();
   assert.equal(requests(ot).length, 0);
   assert.deepEqual(plan(), ['受付の返信', '臨時の依頼']);
-  at(g, '2026-12-04T10:00:00+09:00');
+  at(g, '2026-12-03T10:00:00+09:00');
   const n2 = g.fetches.length;
   g.ctx.travelApplyRemind();
   assert.equal(pushes(g, n2).length, 0);
-  assert.deepEqual(plan().slice(-1), ['4日の催促']);
+  assert.deepEqual(plan().slice(-1), ['3日の催促']);
   at(g, '2026-12-06T07:00:00+09:00');
   const n3 = g.fetches.length;
   g.ctx.travelApplyDaily();
